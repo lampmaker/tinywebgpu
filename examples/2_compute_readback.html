@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<!-- TinyWebGPU example 2: compute → storage buffer → readback. No canvas needed.
+     Serve this folder (python3 -m http.server) and open /examples/2_compute_readback.html -->
+<body style="font:14px monospace; background:#111; color:#ddd">
+  <pre id="out">running…</pre>
+  <script type="module">
+    import { WEBGPU } from '../tinywebgpu.js';
+
+    const G = await WEBGPU().init();          // compute-only: no canvas
+    const N = 16;
+
+    const p = await G.makeCompute('', `
+        let i = gid.x;
+        if (i < UB.n) { data[i] = f32(i) * f32(i); }
+      `,
+      { n: 'u32' },                            // uniforms
+      { data: 'array<f32>' },                  // resources
+      { wg: [64, 1, 1] });
+
+    const buf = G.createStorageBuffer(N * 4);
+    p.setResources({ data: buf.b });
+    p.setUniforms({ n: N });
+    p.dispatch(Math.ceil(N / 64));
+
+    const squares = await buf.r(N * 4, 0, Float32Array);   // debug readback (stalls the pipeline)
+    document.getElementById('out').textContent = 'squares: ' + [...squares].join(', ');
+    window.__result = { ok: squares[5] === 25, msg: [...squares].join(',') };
+  </script>
+</body>

@@ -1,0 +1,145 @@
+# TinyWebGPU — API reference
+
+Complete surface of `tinywebgpu.js`. Pre-1.0: minor versions may still break API.
+
+```js
+import { WEBGPU } from './tinywebgpu.js';
+const G = WEBGPU();
+await G.init(canvas.getContext('webgpu'));
+```
+
+## Setup
+
+### `await G.init(ctx?)`
+Requests adapter + device (with the adapter's max buffer-size limits) and, if a canvas
+`'webgpu'` context is passed, configures it (`preferredCanvasFormat`, `alphaMode:'opaque'`).
+Omit `ctx` for compute-only use — render calls then need an explicit target view. Populates
+`G.device`, `G.context`, `G.format`. Throws if WebGPU is unavailable.
+
+### `G.debug = true|false` (default false)
+Enables uniform-write warnings (width overflow, non-integer into int fields). WGSL compile
+checking is always on: errors throw with a pretty source-window log, warnings are logged.
+
+### `G.pre = null | (src: string) => string` (default null)
+Optional WGSL preprocessing hook, applied in `makeShader` before hashing/compiling. `null`
+means user WGSL is never rewritten. Must be deterministic — the shader cache keys on the
+post-`pre` source. See “WGSL preprocessing” below for the stock token expander.
+
+### `G.onDeviceLost = null | (info: GPUDeviceLostInfo) => void` (default null)
+Called if the GPU device is lost (driver reset, context crash). The library always logs the
+loss; set this to rebuild/recover. Uncaptured WebGPU errors are also logged with labels
+(buffers, textures, shaders and encoders carry `label`s for readable messages).
+
+## Pipelines (the main API)
+
+### `await G.makeRender(fragWGSL, uniforms?, resources?, { format? })`
+Fullscreen pipeline. You provide a WGSL function `fn frag(uv: vec2<f32>) -> vec4<f32>`; the
+toolkit generates the vertex shader (single fullscreen triangle) and the `fs_main` wrapper.
+Only the uniforms you declare exist — nothing is auto-added.
+
+### `await G.makeCompute(bodyWGSL, mainWGSL, uniforms?, resources?, { wg = [8,8,1] })`
+Compute pipeline. `bodyWGSL` = declarations (functions, structs); `mainWGSL` = statements placed
+inside the generated entry point, which receives `gid` (global), `lid` (local), `wid`
+(workgroup) invocation ids. `wg` is the `@workgroup_size`.
+
+### Schemas
+- `uniforms`: `{ name: 'f32' | 'i32' | 'u32' | 'vec2/3/4<f32|u32|i32>' | 'mat4x4<f32>' }` →
+  generated into `struct Uniforms {...}` bound as `UB` at `@group(0) @binding(0)`. Layout
+  follows WGSL uniform rules (vec3: align 16, size 12 — a following scalar packs into its tail).
+- Schema resources the shader never references are skipped from the bind group with a console
+  warning (`layout:'auto'` strips their bindings — see “Sharp edges” in the README).
+- `resources`: `{ name: <full WGSL type> }` → bound in declaration order after the uniform
+  buffer. Supported forms:
+  - `'array<T>'` → `var<storage, read_write>` runtime array (T may be a struct you define in
+    `bodyWGSL` or inline via the struct form below)
+  - `'struct Foo { ... }'` → struct emitted + bound as `var<storage, read_write> name: Foo`
+  - primitive/vector/matrix → auto-wrapped in a single-field struct, bound as storage
+  - `'texture_2d<f32>'`, `'texture_storage_2d<rgba32float, write>'`, … → texture binding
+  - `'sampler'` / `'sampler_comparison'`
+
+### Pipeline object (both kinds)
+| Member | Meaning |
+|---|---|
+| `p.uniforms = {vals}` / `p.setUniforms(vals)` / `p.setUniform(name, v)` | Merge values into the CPU staging struct and upload the whole buffer. Vectors/matrices take arrays (or scalars for 1-wide). |
+| `p.resources = {vals}` / `p.setResources(vals)` | (Re)build the bind group. Pass `GPUBuffer`s for buffer-likes (the `.b` of buffer handles), textures or views for textures. Reference-compared: pass a fresh object to force rebind. |
+| `p.pipeline` | The raw `GPURenderPipeline`/`GPUComputePipeline`. |
+| `p.uniformFields` / `p.resourceFields` | Names, in binding order. |
+
+Compute-only:
+| Member | Meaning |
+|---|---|
+| `p.dispatch(x=1, y=1, z=1, encoder?)` | Dispatch; self-submits unless a frame encoder is open or one is passed. |
+| `p.dispatchIndirect(gpuBuffer, byteOffset=0, encoder?)` | Indirect dispatch from a `[x,y,z]: 3×u32` buffer. |
+| `p.use(pass?)`, `p.dispatchOn(pass?, x,y,z)`, `p.dispatchIndirectOn(pass?, buf, off)` | Chain multiple pipelines inside one compute pass (see Frame API). |
+
+Render-only:
+| Member | Meaning |
+|---|---|
+| `p.drawTo(view?, clear=[0,0,0,1], encoder?)` | Draw the fullscreen triangle. `view` defaults to the frame view or a fresh swapchain view. `clear` = color array or `'load'` to keep contents. |
+
+### One-liners
+- `await G.drawQuad({ frag, uniforms, resources, clear, format })` → pipeline + `run(u?, view?)`
+- `await G.compute2D({ body, uniforms, resources, size, wg })` → pipeline + `run(w?, h?, d=1)`
+  (dispatches `ceil(w/wg[0]), ceil(h/wg[1]), ceil(d/wg[2])` workgroups)
+
+## Frame API (batching)
+
+```js
+G.beginFrame();          // one encoder + one swapchain view for the whole frame
+computeA.dispatch(...);  // recorded, not submitted
+quad.drawTo();           // recorded
+G.endFrame();            // single queue.submit
+```
+
+`G.beginCompute()` / `G.endCompute()` keep one compute pass open so chained kernels skip
+per-dispatch pass overhead — use with `p.use()` + `p.dispatchOn()`. Calling plain
+`p.dispatch()` (or `drawTo`) while a chained pass is open auto-closes that pass first; chained
+dispatches after it need a fresh `beginCompute()`.
+
+While a frame is open, uniform writes, storage `w()` and `clear()` are **frame-ordered**: the
+toolkit stages the bytes and encodes a buffer-to-buffer copy at that point in the frame, so
+consecutive dispatches see the values set just before them — per-dispatch uniforms work in a
+single submit. Outside a frame, writes are plain queue writes as
+before. `createStorageBuffer().r()` during an open frame reads *pre-frame* data and warns —
+`endFrame()` first.
+
+## Buffers, textures, samplers
+
+| Call | Returns | Notes |
+|---|---|---|
+| `G.createUniformBuffer(bytes)` | `GPUBuffer` | UNIFORM \| COPY_DST |
+| `G.createStorageBuffer(bytesOrData)` | `{ b, w(data, off?), r(nbytes?, off?, Ctor?), clear() }` | STORAGE \| COPY_SRC \| COPY_DST. Pass a byte length, or a TypedArray/ArrayBuffer to size **and** fill in one call. `r` is an async debug readback (stalls!; staging pooled). `w`/`clear` are frame-ordered inside `beginFrame()`. |
+| `G.createBuffer(bytes, usage)` | `{ b, w }` | explicit usage flags |
+| `G.createDispatchIndirectBuffer()` | `{ b, w }` | 12 bytes, INDIRECT \| STORAGE \| COPY_DST |
+| `G.createTexture2D(w, h, format='rgba8unorm', usage?)` | `GPUTexture` | render target / sampled |
+| `G.createStorageTexture2D(w, h, format='rgba32float')` | `GPUTexture` | `textureStore`/`textureLoad` |
+| `G.createSampler({ magFilter, minFilter, wrapU, wrapV })` | `GPUSampler` | defaults nearest/clamp |
+| `G.writeUniforms(buf, typedArrayOrDataView, byteOffset?)` | — | raw write |
+
+## Lower-level escape hatches
+
+`G.makeShader(code)` (returns a cached promise of the compiled module; applies `G.pre`),
+`G.makeRenderPipeline(vs, fs, format, topology?)`, `G.makeComputePipeline(module)`,
+`G.bindGroup(pipeline, groupIndex, entries)`,
+`G.makeUniformsAndResources(...)` (the schema engine itself).
+
+## WGSL preprocessing
+
+The core does **no rewriting by default**. `G.pre` is an optional `(src) => src` hook applied
+before compile/caching. The token expander is a separate optional module
+`wgsl_shorthand.js`:
+
+```js
+import { shorthand, TOKENS, SHORT_TOKENS } from './wgsl_shorthand.js';
+G.pre = shorthand();                       // safe stock set: FLOAT INT VEC2/3/4 MAT4 PI TAU EPS
+G.pre = shorthand(TOKENS, SHORT_TOKENS);   // + one-letter legacy aliases F V W X I U U3
+G.pre = shorthand({ RAY: 'MyRay', ...TOKENS });          // custom map
+G.pre = s => shorthand()(myMacros(s));                   // compose freely
+```
+
+`shorthand(...maps)` merges the maps (default `TOKENS`), compiles one word-boundary
+alternation regex (longest token wins), and returns a deterministic `src => src` function.
+
+Careful with `SHORT_TOKENS`: one-letter aliases collide with natural identifier names, so
+`let F = fresnel(...)` becomes `let f32 = ...` and won't compile. They are opt-in for exactly
+that reason.

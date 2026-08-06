@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TinyWebGPU — demos</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff; --fg: #1b1b1f; --muted: #5c5c68; --line: #e3e3e8;
+      --card: #fafafb; --accent: #2f6df6; --warn-bg: #fff6e5; --warn-fg: #7a4b00;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #131317; --fg: #e8e8ec; --muted: #9a9aa6; --line: #2a2a32;
+        --card: #1a1a20; --accent: #7aa2ff; --warn-bg: #2c2413; --warn-fg: #e8c983;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 3rem 1.25rem 5rem; background: var(--bg); color: var(--fg);
+      font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    main { max-width: 46rem; margin: 0 auto; }
+    h1 { font-size: 2rem; margin: 0 0 .25rem; letter-spacing: -.02em; }
+    .tag { color: var(--muted); margin: 0 0 2rem; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .9em; background: var(--card); border: 1px solid var(--line);
+      border-radius: 4px; padding: .1em .35em;
+    }
+    #unsupported {
+      display: none; background: var(--warn-bg); color: var(--warn-fg);
+      border: 1px solid color-mix(in srgb, var(--warn-fg) 30%, transparent);
+      border-radius: 8px; padding: .85rem 1rem; margin-bottom: 2rem;
+    }
+    ul { list-style: none; padding: 0; margin: 0; display: grid; gap: .85rem; }
+    a.demo {
+      display: block; padding: 1rem 1.15rem; background: var(--card); color: inherit;
+      border: 1px solid var(--line); border-radius: 10px; text-decoration: none;
+      transition: border-color .15s ease, transform .15s ease;
+    }
+    a.demo:hover { border-color: var(--accent); transform: translateY(-1px); }
+    a.demo strong { display: block; font-size: 1.05rem; }
+    a.demo span { color: var(--muted); font-size: .92rem; }
+    footer { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .92rem; }
+    footer a { color: var(--accent); }
+  </style>
+</head>
+
+<body>
+  <main>
+    <h1>TinyWebGPU</h1>
+    <p class="tag">One file, no dependencies, no build step. Live demos below — each is a single
+      self-contained HTML file.</p>
+
+    <div id="unsupported">
+      <strong>WebGPU isn’t available in this browser.</strong> The demos need Chrome/Edge 113+,
+      Firefox 141+ (Windows), or Safari 26+, over https or localhost.
+    </div>
+
+    <ul>
+      <li><a class="demo" href="examples/1_hello.html">
+          <strong>1 · Hello fullscreen shader</strong>
+          <span>An animated fragment shader in about ten lines.</span></a></li>
+      <li><a class="demo" href="examples/2_compute_readback.html">
+          <strong>2 · Compute → storage buffer → readback</strong>
+          <span>A compute pass with no canvas at all, reading results back to JS.</span></a></li>
+      <li><a class="demo" href="examples/3_life.html">
+          <strong>3 · Ping-pong compute + present</strong>
+          <span>Game of life: two buffers swapped each frame, stepped and drawn in one submit.</span></a></li>
+      <li><a class="demo" href="examples/4_indirect.html">
+          <strong>4 · Indirect dispatch with GPU-side counters</strong>
+          <span>A kernel compacts work and counts it atomically; the next dispatch sizes itself
+            from that count, with no CPU round-trip.</span></a></li>
+    </ul>
+
+    <footer>
+      Source and docs: <a href="https://github.com/lampmaker/tinywebgpu">github.com/lampmaker/tinywebgpu</a>
+      · Start with the <a href="https://github.com/lampmaker/tinywebgpu#readme">README</a> and the
+      <a href="https://github.com/lampmaker/tinywebgpu/blob/main/API.md">API reference</a>. MIT licensed.
+    </footer>
+  </main>
+
+  <script>
+    if (!navigator.gpu) document.getElementById('unsupported').style.display = 'block';
+  </script>
+</body>
+
+</html>

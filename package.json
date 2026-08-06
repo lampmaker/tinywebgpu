@@ -1,0 +1,33 @@
+{
+  "name": "tinywebgpu",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "One file, no dependencies, no build step. A WebGPU micro-framework for shader-first work: dual-schema pipelines, fullscreen shaders and compute.",
+  "main": "./tinywebgpu.js",
+  "exports": "./tinywebgpu.js",
+  "files": [
+    "tinywebgpu.js",
+    "wgsl_shorthand.js",
+    "README.md",
+    "API.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/layout.test.mjs"
+  },
+  "license": "MIT",
+  "author": "Matthijs Keuper",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lampmaker/tinywebgpu.git"
+  },
+  "homepage": "https://lampmaker.github.io/tinywebgpu/",
+  "keywords": [
+    "webgpu",
+    "wgsl",
+    "shader",
+    "compute",
+    "gpgpu",
+    "graphics"
+  ]
+}

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<!-- TinyWebGPU example 3: ping-pong compute + present (Conway's game of life).
+     Shows the frame API: one submit per frame for step + draw.
+     Serve this folder (python3 -m http.server) and open /examples/3_life.html -->
+<body style="margin:0; background:#111">
+  <canvas id="c" width="512" height="512" style="image-rendering:pixelated"></canvas>
+  <script type="module">
+    import { WEBGPU } from '../tinywebgpu.js';
+
+    const W = 256, H = 256;
+    const G = await WEBGPU().init(document.getElementById('c').getContext('webgpu'));
+
+    const step = await G.makeCompute(`
+        fn idx(x: i32, y: i32) -> u32 {
+          return u32(((y + ${H}) % ${H}) * ${W} + ((x + ${W}) % ${W}));
+        }`, `
+        let x = i32(gid.x); let y = i32(gid.y);
+        if (x >= ${W} || y >= ${H}) { return; }
+        var n = 0u;
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            if (dx != 0 || dy != 0) { n += src[idx(x + dx, y + dy)]; }
+          }
+        }
+        let alive = src[idx(x, y)] == 1u;
+        dst[idx(x, y)] = select(select(0u, 1u, n == 3u), select(0u, 1u, n == 2u || n == 3u), alive);
+      `,
+      {}, { src: 'array<u32>', dst: 'array<u32>' }, { wg: [8, 8, 1] });
+
+    const show = await G.makeRender(`
+        fn frag(uv: vec2<f32>) -> vec4<f32> {
+          let x = u32(uv.x * ${W}.0);
+          let y = u32((1.0 - uv.y) * ${H}.0);
+          let c = f32(cells[y * ${W}u + x]);
+          return vec4<f32>(c, c, c * 0.6 + 0.05, 1.0);
+        }`,
+      {}, { cells: 'array<u32>' });
+
+    // create-and-fill from a TypedArray, or size in bytes — both forms work
+    let a = G.createStorageBuffer(Uint32Array.from({ length: W * H }, () => Math.random() < 0.3 ? 1 : 0));
+    let b = G.createStorageBuffer(W * H * 4);
+
+    const frame = () => {
+      G.beginFrame();                             // step + draw in one submit
+      step.resources = { src: a.b, dst: b.b };
+      step.dispatch(W / 8, H / 8, 1);
+      show.resources = { cells: b.b };
+      show.drawTo();
+      G.endFrame();
+      [a, b] = [b, a];                            // ping-pong
+      requestAnimationFrame(frame);
+    };
+    frame();
+  </script>
+</body>
