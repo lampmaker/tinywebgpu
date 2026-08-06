@@ -73,13 +73,42 @@ work.dispatchIndirect(indirect.b, 0);   // no CPU round-trip
 
 ## Examples
 
-Four single-file examples live in `examples/` — **[run them live](https://lampmaker.github.io/tinywebgpu/)**
+Five single-file examples live in `examples/` — **[run them live](https://lampmaker.github.io/tinywebgpu/)**
 (or serve the folder yourself and open them in a WebGPU browser):
 
 1. `1_hello.html` — animated fullscreen shader in ~10 lines
 2. `2_compute_readback.html` — compute → storage buffer → readback, no canvas
 3. `3_life.html` — ping-pong compute + present (game of life), frame API
 4. `4_indirect.html` — GPU-side counters → indirect dispatch (wavefront pattern)
+5. `5_texture.html` — image upload (`writeTexture` / `loadTexture`) + alpha blending
+
+## Textures
+
+Get pixels in from raw bytes, or from anything the browser can decode:
+
+```js
+// raw bytes — LUTs, generated data
+const tex = G.createTexture2D(2, 2);
+G.writeTexture(tex, new Uint8Array([255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255]));
+
+// or an image: URL, Blob, ImageBitmap, <img>, <canvas>, <video>
+const photo = await G.loadTexture('image.png');
+
+const quad = await G.drawQuad({
+  frag: `fn frag(uv: vec2<f32>) -> vec4<f32> { return textureSample(photo, samp, uv); }`,
+  resources: { photo: 'texture_2d<f32>', samp: 'sampler' },
+});
+quad.setResources({ photo, samp: G.createSampler({ magFilter: 'linear' }) });
+quad.run();
+```
+
+Draw translucent passes over what's already there with `blend` — `'alpha'`,
+`'premultiplied'`, `'additive'`, or a raw `GPUBlendState`:
+
+```js
+const glow = await G.makeRender(frag, {}, {}, { blend: 'additive' });
+glow.drawTo(view, 'load');           // 'load' keeps the existing contents
+```
 
 ## Optional WGSL shorthands
 

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<!-- TinyWebGPU example 5: getting images into textures, and alpha blending.
+     Serve this folder (python3 -m http.server) and open /examples/5_texture.html
+
+     Shows three things:
+       writeTexture  — raw pixel bytes into a texture (LUTs, generated data)
+       loadTexture   — an image source (canvas here; a URL works the same)
+       blend         — drawing a translucent pass over an opaque one
+
+     The checks read texels back with textureLoad instead of eyeballing the canvas, so they
+     give a real pass/fail. Note the order: everything is built and verified first, and the
+     canvas is drawn last — building pipelines up front is good practice anyway, and it keeps
+     the checks meaningful on machines where presenting to a canvas is flaky. -->
+<body style="font:14px monospace; background:#111; color:#ddd">
+  <canvas id="c" width="512" height="256" style="border:1px solid #333"></canvas>
+  <pre id="out">running…</pre>
+  <script type="module">
+    import { WEBGPU } from '../tinywebgpu.js';
+
+    const G = await WEBGPU().init(document.getElementById('c').getContext('webgpu'));
+    const log = [];
+    let ok = true;
+    const check = (name, pass, detail) => { ok &&= pass; log.push(`${pass ? 'ok  ' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };
+
+    // ---- 1. writeTexture: a 2x2 image straight from bytes -------------------------------
+    // Row 0 is the first row of the image (v = 0).
+    const checker = G.createTexture2D(2, 2, 'rgba8unorm');
+    G.writeTexture(checker, new Uint8Array([
+      255, 0, 0, 255,    0, 255, 0, 255,      // red    green
+      0, 0, 255, 255,  255, 255, 255, 255,    // blue   white
+    ]));
+
+    // ---- 2. loadTexture: from anything the browser can decode ---------------------------
+    // A canvas here so the example runs offline; `await G.loadTexture('image.png')` is the
+    // same call with a URL, and <img>, <video>, Blob and ImageBitmap all work too.
+    const src = document.createElement('canvas');
+    src.width = src.height = 64;
+    const ctx2d = src.getContext('2d');
+    ctx2d.fillStyle = 'rgb(0, 128, 255)';
+    ctx2d.fillRect(0, 0, 64, 64);
+    const solid = await G.loadTexture(src);
+
+    // ---- Verify both uploads by reading texels back in a compute shader ------------------
+    const probe = await G.makeCompute('', `
+        let t = textureLoad(checker, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
+        let base = (gid.y * 2u + gid.x) * 4u;
+        texels[base] = t.r; texels[base + 1u] = t.g; texels[base + 2u] = t.b; texels[base + 3u] = t.a;
+        if (gid.x == 0u && gid.y == 0u) {
+          let s = textureLoad(solid, vec2<i32>(32, 32), 0);
+          texels[16] = s.r; texels[17] = s.g; texels[18] = s.b;
+        }
+      `,
+      {}, { texels: 'array<f32>', checker: 'texture_2d<f32>', solid: 'texture_2d<f32>' },
+      { wg: [2, 2, 1] });
+
+    const outBuf = G.createStorageBuffer(19 * 4);
+    probe.setResources({ texels: outBuf.b, checker, solid });   // textures bind directly, no createView needed
+    probe.dispatch(1, 1, 1);
+    const t = await outBuf.r(19 * 4, 0, Float32Array);
+
+    check('writeTexture texel (0,0) is red', t[0] === 1 && t[1] === 0 && t[2] === 0);
+    check('writeTexture texel (1,0) is green', t[4] === 0 && t[5] === 1 && t[6] === 0);
+    check('writeTexture texel (0,1) is blue', t[8] === 0 && t[9] === 0 && t[10] === 1);
+    check('loadTexture round-trips rgb(0,128,255)',
+      t[16] === 0 && Math.abs(t[17] * 255 - 128) <= 1 && t[18] === 1,
+      `got ${[t[16], t[17], t[18]].map(v => Math.round(v * 255)).join(',')}`);
+
+    // ---- 3. blend: a translucent pass over an opaque one ---------------------------------
+    // Rendered offscreen so the result can be read back and checked numerically.
+    // `format` must match the target texture — it defaults to the canvas format, not this.
+    const FMT = 'rgba8unorm';
+    const target = G.createTexture2D(64, 64, FMT);
+    const view = target.createView();
+
+    const red = await G.makeRender(`fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.,0.,0.,1.); }`,
+      {}, {}, { format: FMT });
+    const greenHalf = await G.makeRender(
+      `fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(0.,1.,0.,0.5); }`,
+      {}, {}, { format: FMT, blend: 'alpha' });
+
+    red.drawTo(view, [0, 0, 0, 1]);
+    greenHalf.drawTo(view, 'load');            // 'load' keeps what's already there
+
+    const px = G.createStorageBuffer(64 * 64 * 4);
+    const enc = G.device.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: target }, { buffer: px.b, bytesPerRow: 64 * 4 }, { width: 64, height: 64 });
+    G.device.queue.submit([enc.finish()]);
+    const rgba = await px.r(64 * 64 * 4, 0, Uint8Array);
+
+    // Both passes cover the whole surface, so every pixel is the same 50/50 mix.
+    check('alpha blend gives half green over red',
+      Math.abs(rgba[0] - 128) <= 2 && Math.abs(rgba[1] - 128) <= 2 && rgba[2] === 0,
+      `got ${rgba[0]},${rgba[1]},${rgba[2]}`);
+
+    // Same WGSL, different blend — these must be distinct pipelines, not a cache hit.
+    const greenOpaque = await G.makeRender(`fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(0.,1.,0.,0.5); }`,
+      {}, {}, { format: FMT });
+    check('blend is part of the pipeline cache key', greenOpaque.pipeline !== greenHalf.pipeline);
+
+    // ---- Build the on-canvas demo: both textures side by side, plus a blended tint -------
+    const sampler = G.createSampler({ magFilter: 'nearest' });
+    const show = await G.drawQuad({
+      frag: `
+        fn frag(uv: vec2<f32>) -> vec4<f32> {
+          let pick = vec2<f32>(fract(uv.x * 2.), uv.y);
+          let a = textureSample(checker, samp, pick);
+          let b = textureSample(solid, samp, pick);
+          return select(a, b, uv.x > 0.5);
+        }`,
+      resources: { checker: 'texture_2d<f32>', solid: 'texture_2d<f32>', samp: 'sampler' },
+    });
+    show.setResources({ checker, solid, samp: sampler });
+
+    const tint = await G.drawQuad({
+      frag: `fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(1., 1., 0., 0.25 * uv.y); }`,
+      clear: 'load',
+      blend: 'alpha',
+    });
+
+    // Report before presenting, so the results stand on their own.
+    log.push('', `features granted: ${[...G.features].join(', ') || '(none beyond the defaults)'}`);
+    log.unshift(ok ? 'PASS' : 'FAIL', '');
+    document.getElementById('out').textContent = log.join('\n');
+    window.__result = { ok, msg: log.join(' | ') };
+
+    show.run();
+    tint.run();
+  </script>
+</body>

@@ -10,11 +10,26 @@ await G.init(canvas.getContext('webgpu'));
 
 ## Setup
 
-### `await G.init(ctx?)`
+### `await G.init(ctx?, opts?)`
 Requests adapter + device (with the adapter's max buffer-size limits) and, if a canvas
 `'webgpu'` context is passed, configures it (`preferredCanvasFormat`, `alphaMode:'opaque'`).
 Omit `ctx` for compute-only use — render calls then need an explicit target view. Populates
-`G.device`, `G.context`, `G.format`. Throws if WebGPU is unavailable.
+`G.device`, `G.context`, `G.format`, `G.features`. Throws if WebGPU is unavailable.
+
+`opts` (all optional):
+
+| Option | Effect |
+|---|---|
+| `features: string[]` | Requested best-effort. Any the adapter doesn't support are dropped with a console warning instead of throwing, so asking is always safe. Check `G.features` (a `Set`) for what was actually granted. |
+| `limits: {}` | Shallow-merged over the defaults, so you can raise or override individual limits. |
+| `alphaMode` | Canvas alpha mode, default `'opaque'`. Use `'premultiplied'` for a transparent canvas. |
+
+```js
+const G = await WEBGPU().init(ctx, { features: ['timestamp-query'] });
+if (G.features.has('timestamp-query')) { /* ... */ }
+```
+
+Requesting a feature makes it *available* — the library doesn't build anything on top of it.
 
 ### `G.debug = true|false` (default false)
 Enables uniform-write warnings (width overflow, non-integer into int fields). WGSL compile
@@ -32,10 +47,26 @@ loss; set this to rebuild/recover. Uncaptured WebGPU errors are also logged with
 
 ## Pipelines (the main API)
 
-### `await G.makeRender(fragWGSL, uniforms?, resources?, { format? })`
+### `await G.makeRender(fragWGSL, uniforms?, resources?, { format?, blend? })`
 Fullscreen pipeline. You provide a WGSL function `fn frag(uv: vec2<f32>) -> vec4<f32>`; the
 toolkit generates the vertex shader (single fullscreen triangle) and the `fs_main` wrapper.
 Only the uniforms you declare exist — nothing is auto-added.
+
+`format` defaults to the canvas format — pass it explicitly when drawing to an offscreen
+texture in a different format, or the pipeline won't match the attachment.
+
+`blend` is off by default (opaque overwrite). Pass a preset name or a raw `GPUBlendState`:
+
+| Preset | Use for |
+|---|---|
+| `'alpha'` | Ordinary transparency; expects straight (un-premultiplied) alpha out of `frag`. |
+| `'premultiplied'` | `frag` already returns rgb scaled by a. |
+| `'additive'` | Glows, accumulation, light stacking. |
+
+```js
+const overlay = await G.makeRender(frag, {}, {}, { blend: 'alpha' });
+overlay.drawTo(view, 'load');        // 'load' keeps what's underneath
+```
 
 ### `await G.makeCompute(bodyWGSL, mainWGSL, uniforms?, resources?, { wg = [8,8,1] })`
 Compute pipeline. `bodyWGSL` = declarations (functions, structs); `mainWGSL` = statements placed
@@ -78,7 +109,7 @@ Render-only:
 | `p.drawTo(view?, clear=[0,0,0,1], encoder?)` | Draw the fullscreen triangle. `view` defaults to the frame view or a fresh swapchain view. `clear` = color array or `'load'` to keep contents. |
 
 ### One-liners
-- `await G.drawQuad({ frag, uniforms, resources, clear, format })` → pipeline + `run(u?, view?)`
+- `await G.drawQuad({ frag, uniforms, resources, clear, format, blend })` → pipeline + `run(u?, view?)`
 - `await G.compute2D({ body, uniforms, resources, size, wg })` → pipeline + `run(w?, h?, d=1)`
   (dispatches `ceil(w/wg[0]), ceil(h/wg[1]), ceil(d/wg[2])` workgroups)
 
@@ -111,9 +142,11 @@ before. `createStorageBuffer().r()` during an open frame reads *pre-frame* data 
 | `G.createStorageBuffer(bytesOrData)` | `{ b, w(data, off?), r(nbytes?, off?, Ctor?), clear() }` | STORAGE \| COPY_SRC \| COPY_DST. Pass a byte length, or a TypedArray/ArrayBuffer to size **and** fill in one call. `r` is an async debug readback (stalls!; staging pooled). `w`/`clear` are frame-ordered inside `beginFrame()`. |
 | `G.createBuffer(bytes, usage)` | `{ b, w }` | explicit usage flags |
 | `G.createDispatchIndirectBuffer()` | `{ b, w }` | 12 bytes, INDIRECT \| STORAGE \| COPY_DST |
-| `G.createTexture2D(w, h, format='rgba8unorm', usage?)` | `GPUTexture` | render target / sampled |
+| `G.createTexture2D(w, h, format='rgba8unorm', usage?)` | `GPUTexture` | render target / sampled. Default usage is RENDER_ATTACHMENT \| TEXTURE_BINDING \| COPY_SRC \| COPY_DST, so uploads work without opting in. |
 | `G.createStorageTexture2D(w, h, format='rgba32float')` | `GPUTexture` | `textureStore`/`textureLoad` |
 | `G.createSampler({ magFilter, minFilter, wrapU, wrapV })` | `GPUSampler` | defaults nearest/clamp |
+| `G.writeTexture(tex, data, { width?, height?, x?, y?, bytesPerRow?, mipLevel? })` | `GPUTexture` | Raw pixel bytes in (LUTs, generated data). `width`/`height` default to the whole texture; `bytesPerRow` is derived from the format unless you pass it. Needs COPY_DST. |
+| `await G.loadTexture(src, { texture?, format?, usage?, flipY?, premultipliedAlpha?, colorSpace? })` | `Promise<GPUTexture>` | `src` = URL string, `Blob`, `ImageBitmap`, `<img>`, `<canvas>`, `OffscreenCanvas` or `<video>`. Creates a texture sized from the source unless you pass `texture` to reuse one. |
 | `G.writeUniforms(buf, typedArrayOrDataView, byteOffset?)` | — | raw write |
 
 ## Lower-level escape hatches

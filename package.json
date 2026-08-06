@@ -1,6 +1,6 @@
 {
   "name": "tinywebgpu",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "One file, no dependencies, no build step. A WebGPU micro-framework for shader-first work: dual-schema pipelines, fullscreen shaders and compute.",
   "main": "./tinywebgpu.js",

@@ -163,9 +163,12 @@ export let WEBGPU = (U) => {
      * compute-only use (render calls then require an explicit target view).
      * Requests the adapter's max buffer-size limits. Throws if WebGPU is unavailable.
      * @param {GPUCanvasContext|null} [ctx]
-     * @returns {Promise<Object>} this instance, with device/context/format populated
+     * @param {{features?: string[], limits?: Object, alphaMode?: string}} [opts]
+     *   `features` are requested best-effort: any the adapter doesn't support are dropped
+     *   with a warning rather than throwing. Check `G.features` for what was granted.
+     * @returns {Promise<Object>} this instance, with device/context/format/features populated
      */
-    init: async (ctx = null) => {
+    init: async (ctx = null, opts = {}) => {
       if (!navigator.gpu) throw Error('WebGPU not supported');
       const a = await navigator.gpu.requestAdapter();
       if (!a) throw Error('No GPU adapter');
@@ -174,17 +177,24 @@ export let WEBGPU = (U) => {
       const requiredLimits = {
         maxStorageBufferBindingSize: a.limits.maxStorageBufferBindingSize,
         maxBufferSize: a.limits.maxBufferSize,
+        ...(opts.limits ?? {}),
       };
 
-      const d = await a.requestDevice({ requiredLimits });
+      // Best-effort features: asking for one the adapter lacks would throw, so filter first.
+      const wanted = opts.features ?? [];
+      const requiredFeatures = wanted.filter(f => a.features.has(f));
+      const dropped = wanted.filter(f => !a.features.has(f));
+      if (dropped.length) console.warn(`[TinyWebGPU] Adapter does not support ${dropped.map(f => `'${f}'`).join(', ')}; continuing without.`);
+
+      const d = await a.requestDevice({ requiredLimits, requiredFeatures });
       d.lost.then(info => {
         console.error(`[TinyWebGPU] GPU device lost (${info.reason || 'unknown'}): ${info.message}`);
         S.onDeviceLost?.(info);
       });
       d.onuncapturederror = e => console.error('[TinyWebGPU] Uncaptured WebGPU error:', e.error?.message ?? e);
       const f = navigator.gpu.getPreferredCanvasFormat();
-      if (ctx) ctx.configure({ device: d, format: f, alphaMode: 'opaque' });
-      Object.assign(S, { device: d, context: ctx, format: f })
+      if (ctx) ctx.configure({ device: d, format: f, alphaMode: opts.alphaMode ?? 'opaque' });
+      Object.assign(S, { device: d, context: ctx, format: f, features: d.features })
       return S;
     },
     //=============================================================================================================================
@@ -235,12 +245,37 @@ export let WEBGPU = (U) => {
 
     //=============================================================================================================================
     // Pipelines: render and compute
-    makeRenderPipeline: (vsModule, fsModule, format, topology = 'triangle-list') => {
+    // Named blend states. 'alpha' expects straight (un-premultiplied) alpha out of frag();
+    // 'premultiplied' expects rgb already scaled by a; 'additive' ignores destination alpha.
+    _blendPresets: {
+      alpha: {
+        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+      },
+      premultiplied: {
+        color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+      },
+      additive: {
+        color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+      },
+    },
+    // Accepts a preset name or a raw GPUBlendState; null/undefined = no blending (opaque).
+    _resolveBlend: blend => {
+      if (!blend) return null;
+      if (typeof blend !== 'string') return blend;
+      const b = S._blendPresets[blend];
+      if (!b) throw new Error(`Unknown blend preset '${blend}'. Use ${Object.keys(S._blendPresets).map(k => `'${k}'`).join(', ')} or a GPUBlendState object.`);
+      return b;
+    },
+    makeRenderPipeline: (vsModule, fsModule, format, topology = 'triangle-list', blend = null) => {
+      const b = S._resolveBlend(blend);
       return S.device.createRenderPipeline({
         layout: 'auto',                                       // 'auto' means use the default layout for this pipeline, which
         vertex: { module: vsModule, entryPoint: 'vs_main' },     // entryPoint is the function name in the WGSL module
-        fragment: { module: fsModule, entryPoint: 'fs_main', targets: [{ format }] },  // targets is an array of output formats (usually one)
-        primitive: { topology }                                 // primitive topology (triangle-list, triangle-strip, line-list, etc.)                    
+        fragment: { module: fsModule, entryPoint: 'fs_main', targets: [b ? { format, blend: b } : { format }] },  // targets is an array of output formats (usually one)
+        primitive: { topology }                                 // primitive topology (triangle-list, triangle-strip, line-list, etc.)
       });
     },
     makeComputePipeline: csModule => S.device.createComputePipeline({ layout: 'auto', compute: { module: csModule, entryPoint: 'main' } }),
@@ -326,7 +361,8 @@ export let WEBGPU = (U) => {
     //=============================================================================================================================
     // Creates a normal 2D texture — good for images, render targets, post-process buffers.
     // Read-only in shaders (except as render pass output). Compact format by default.   
-    createTexture2D: (width, height, format = 'rgba8unorm', usage) => S.device.createTexture({ size: { width, height }, format, mipLevelCount: 1, sampleCount: 1, usage: usage ?? (GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC), label: `texture2D ${width}x${height} ${format}` }),
+    // COPY_DST is in the default set so writeTexture/loadTexture work without opting in.
+    createTexture2D: (width, height, format = 'rgba8unorm', usage) => S.device.createTexture({ size: { width, height }, format, mipLevelCount: 1, sampleCount: 1, usage: usage ?? (GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST), label: `texture2D ${width}x${height} ${format}` }),
     //=============================================================================================================================
     // Creates a storage texture — good for compute shaders, ray tracing accumulation,
     // GPGPU processing, or any case you need to read+write pixels directly in a shader.
@@ -340,6 +376,72 @@ export let WEBGPU = (U) => {
     //   - wrapU: 'clamp-to-edge', 'repeat', or 'mirror-repeat' (default: 'clamp-to-edge')
     //   - wrapV: 'clamp-to-edge', 'repeat', or 'mirror-repeat' (default: 'clamp-to-edge')    
     createSampler: (opts = {}) => S.device.createSampler({ magFilter: opts.magFilter ?? 'nearest', minFilter: opts.minFilter ?? 'nearest', addressModeU: opts.wrapU ?? 'clamp-to-edge', addressModeV: opts.wrapV ?? 'clamp-to-edge' }),
+    //=============================================================================================================================
+    // Bytes per texel, for the formats these helpers can produce. Only used to derive a
+    // default bytesPerRow in writeTexture; pass bytesPerRow explicitly for anything exotic.
+    _texelBytes: {
+      'r8unorm': 1, 'r8uint': 1, 'r8sint': 1,
+      'rg8unorm': 2, 'r16float': 2, 'r16uint': 2, 'r16sint': 2,
+      'rgba8unorm': 4, 'rgba8unorm-srgb': 4, 'bgra8unorm': 4, 'bgra8unorm-srgb': 4,
+      'rgba8uint': 4, 'rgba8sint': 4, 'rg16float': 4, 'r32float': 4, 'r32uint': 4, 'r32sint': 4,
+      'rgba16float': 8, 'rg32float': 8, 'rg32uint': 8, 'rg32sint': 8,
+      'rgba32float': 16, 'rgba32uint': 16, 'rgba32sint': 16,
+    },
+    /**
+     * Uploads raw pixel data into a texture (LUTs, generated noise, CPU-side images).
+     * The texture needs COPY_DST usage — the default from `createTexture2D` has it.
+     * @param {GPUTexture} tex
+     * @param {ArrayBuffer|ArrayBufferView} data tightly packed rows unless bytesPerRow says otherwise
+     * @param {{width?:number,height?:number,x?:number,y?:number,bytesPerRow?:number,mipLevel?:number}} [opts]
+     *   width/height default to the texture's own size (a full-surface upload)
+     * @returns {GPUTexture} the same texture, for chaining
+     */
+    writeTexture: (tex, data, opts = {}) => {
+      const w = opts.width ?? tex.width, h = opts.height ?? tex.height;
+      const bpt = S._texelBytes[tex.format];
+      if (opts.bytesPerRow == null && !bpt)
+        throw new Error(`writeTexture: unknown bytes-per-texel for format '${tex.format}'; pass bytesPerRow explicitly.`);
+      const bytesPerRow = opts.bytesPerRow ?? w * bpt;
+      S.device.queue.writeTexture(
+        { texture: tex, mipLevel: opts.mipLevel ?? 0, origin: { x: opts.x ?? 0, y: opts.y ?? 0 } },
+        data, { bytesPerRow, rowsPerImage: h }, { width: w, height: h });
+      return tex;
+    },
+    /**
+     * Loads an image into a texture. Accepts a URL, Blob, ImageBitmap, <img>, <canvas>,
+     * OffscreenCanvas or <video>. Creates a texture sized from the source unless one is
+     * passed in `opts.texture`.
+     *
+     * Note on orientation: `flipY` defaults to false, which puts the image's first row at
+     * v=0. The uv `makeRender` hands your `frag` also starts at 0 on that edge, so the
+     * default round-trips; set `flipY: true` if your source is bottom-up.
+     * @param {string|Blob|ImageBitmap|HTMLImageElement|HTMLCanvasElement|OffscreenCanvas|HTMLVideoElement} src
+     * @param {{texture?:GPUTexture,format?:string,usage?:number,flipY?:boolean,premultipliedAlpha?:boolean,colorSpace?:string}} [opts]
+     * @returns {Promise<GPUTexture>}
+     */
+    loadTexture: async (src, opts = {}) => {
+      let source = src;
+      if (typeof src === 'string' || src instanceof Blob) {
+        const blob = typeof src === 'string' ? await (await fetch(src)).blob() : src;
+        source = await createImageBitmap(blob);
+      } else if (typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement) {
+        if (!src.complete) await src.decode();
+        source = await createImageBitmap(src);
+      }
+      // Every accepted source type reports its size under one of these pairs.
+      const w = source.width ?? source.videoWidth ?? source.displayWidth;
+      const h = source.height ?? source.videoHeight ?? source.displayHeight;
+      if (!w || !h) throw new Error('loadTexture: could not determine source dimensions.');
+      // copyExternalImageToTexture requires RENDER_ATTACHMENT in addition to COPY_DST.
+      const tex = opts.texture ?? S.createTexture2D(w, h, opts.format ?? 'rgba8unorm', opts.usage);
+      S.device.queue.copyExternalImageToTexture(
+        { source, flipY: opts.flipY ?? false },
+        { texture: tex, premultipliedAlpha: opts.premultipliedAlpha ?? false, colorSpace: opts.colorSpace ?? 'srgb' },
+        { width: w, height: h });
+      // ImageBitmaps we created ourselves are ours to release; caller-owned sources are not.
+      if (source !== src && typeof source.close === 'function') source.close();
+      return tex;
+    },
     // ------------------------------
     // 6) Bind groups: connect buffers/textures to @group(N)/@binding(M)
     // entries: [{ binding:0, resource:{ buffer } }, { binding:1, resource: textureView }, ...]
@@ -505,7 +607,7 @@ export let WEBGPU = (U) => {
   // uniforms: object with WGSL basic types (f32, vec2<f32>, etc.)
   // resources: object with full WGSL resource types (texture_storage_2d<...>, array<...>, etc.)
 
-  const makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format, isCompute = false, wg = [8, 8, 1] }) => {
+  const makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format, isCompute = false, wg = [8, 8, 1], blend = null }) => {
     // Process dual schema
     const schemaResult = S.makeUniformsAndResources(uniforms, resources, { group: 0, startBinding: 0 });
 
@@ -532,13 +634,16 @@ export let WEBGPU = (U) => {
         `auto layout removes unused bindings, so ${unused.length > 1 ? 'their' : 'its'} bind group entries are skipped.`);
     }
 
-    // Pipeline cache (hash + length: see makeShader collision note)
-  const cacheKey = (isCompute ? `C|` : `R|${format}|`) + S._hash(finalCode) + ':' + finalCode.length;
+    // Pipeline cache (hash + length: see makeShader collision note).
+    // Blend is part of the render key: identical WGSL with a different blend state is a
+    // different pipeline, and omitting it here would hand back the wrong one.
+    const blendKey = isCompute || !blend ? '' : (typeof blend === 'string' ? blend : JSON.stringify(blend)) + '|';
+    const cacheKey = (isCompute ? `C|` : `R|${format}|${blendKey}`) + S._hash(finalCode) + ':' + finalCode.length;
     let pipeline = S.pipelineCache.get(cacheKey);
     if (!pipeline) {
       const module = await S.makeShader(finalCode);
       S.device.pushErrorScope('validation');
-      pipeline = isCompute ? S.makeComputePipeline(module) : S.makeRenderPipeline(module, module, format);
+      pipeline = isCompute ? S.makeComputePipeline(module) : S.makeRenderPipeline(module, module, format, 'triangle-list', blend);
       S.device.popErrorScope().then(err => {
         if (err) console.error(`[TinyWebGPU] Pipeline creation failed (${cacheKey}):\n${err.message}`);
       }).catch(() => { });   // scope pop rejects if the device is lost meanwhile
@@ -709,10 +814,12 @@ export let WEBGPU = (U) => {
    * @param {string} frag WGSL containing the frag function (plus any helpers)
    * @param {UniformSchema} [uniforms]
    * @param {ResourceSchema} [resources]
-   * @param {{format?: string}} [opts] target format, default = canvas format
+   * @param {{format?: string, blend?: string|GPUBlendState}} [opts] target format (default =
+   *   canvas format) and optional blending: 'alpha' | 'premultiplied' | 'additive', or a raw
+   *   GPUBlendState. Omitted = opaque overwrite, as before.
    * @returns {Promise<RenderPipeline>}
    */
-  S.makeRender = (frag, uniforms = {}, resources = {}, { format = S.format } = {}) => {
+  S.makeRender = (frag, uniforms = {}, resources = {}, { format = S.format, blend = null } = {}) => {
     // Generate vertex + fragment shader code
     const code = `
       struct VSOut {@builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>};
@@ -724,7 +831,7 @@ export let WEBGPU = (U) => {
       @fragment fn fs_main(vs: VSOut) -> @location(0) vec4<f32> { return frag(vs.uv); }
     `.trim();
 
-    return makePipeline({ code, uniforms, resources, format, isCompute: false });
+    return makePipeline({ code, uniforms, resources, format, isCompute: false, blend });
   };
 
   //======================== One-liner helpers ========================
@@ -732,8 +839,8 @@ export let WEBGPU = (U) => {
    * makeRender + a `run(uniformValues?, view?)` helper that uploads and draws in one call.
    * @returns {Promise<RenderPipeline & {run: (u?: Object, view?: GPUTextureView) => void}>}
    */
-  S.drawQuad = async ({ frag, uniforms = {}, resources = {}, clear = [0, 0, 0, 1], format = S.format }) => {
-    const p = await S.makeRender(frag, uniforms, resources, { format });
+  S.drawQuad = async ({ frag, uniforms = {}, resources = {}, clear = [0, 0, 0, 1], format = S.format, blend = null }) => {
+    const p = await S.makeRender(frag, uniforms, resources, { format, blend });
     return Object.assign(p, {
       run: (u = {}, view = (S.frame.view ?? S.context.getCurrentTexture().createView())) => {
         if (u && Object.keys(u).length) p.uniforms = u;

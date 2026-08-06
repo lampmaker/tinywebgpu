@@ -2,6 +2,24 @@
 
 All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API.
 
+## 0.2.0 — 2026-08-06
+
+Additive release — no existing call changes behavior.
+
+- **Texture upload.** `G.writeTexture(tex, data, opts?)` for raw pixel bytes and
+  `await G.loadTexture(src, opts?)` for anything the browser can decode (URL, `Blob`,
+  `ImageBitmap`, `<img>`, `<canvas>`, `OffscreenCanvas`, `<video>`). Previously a texture
+  could only be filled by rendering into it.
+- `createTexture2D`'s default usage now includes `COPY_DST` so uploads work without opting
+  in. This is a superset of the previous flags.
+- **Optional device features.** `init(ctx?, opts?)` accepts `features`, `limits` and
+  `alphaMode`. Features are requested best-effort — unsupported ones are dropped with a
+  warning instead of throwing — and the granted set is exposed as `G.features`.
+- **Blending.** `makeRender(..., { blend })` and `drawQuad({ blend })` accept `'alpha'`,
+  `'premultiplied'`, `'additive'`, or a raw `GPUBlendState`. Blend is part of the pipeline
+  cache key, so blend variants of identical WGSL are distinct pipelines.
+- New example `5_texture.html` covering all three.
+
 ## 0.1.0 — 2026-08-06
 
 First public release. Single-file WebGPU micro-framework: dual-schema pipelines
