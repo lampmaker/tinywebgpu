@@ -1,8 +1,11 @@
 // Regression tests for the uniform packer and the WGSL shorthand module.
 // Runs in plain node — the GPU device is stubbed, only the JS-side layout logic is tested.
 // Usage: node test/layout.test.mjs
+//        TWG_ENTRY=<path> node test/layout.test.mjs   ← run against another build
+// The entry is overridable so the same assertions can be run against the minified build.
 
-import { WEBGPU } from '../tinywebgpu.js';
+const ENTRY = process.env.TWG_ENTRY ?? '../tinywebgpu.js';
+const { WEBGPU } = await import(ENTRY);
 import { shorthand, TOKENS, SHORT_TOKENS } from '../wgsl_shorthand.js';
 
 let failures = 0;

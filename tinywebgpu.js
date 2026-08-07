@@ -45,6 +45,12 @@ Terminology cheatsheet (quick):
  * }} RenderPipeline
  */
 
+// Build-time diagnostics switch. The minified build flips this to false, which lets dead-code
+// elimination drop the WGSL compile-log formatter; console calls are stripped separately.
+// Errors still throw in every build — only the reporting goes away. Leave the line shape
+// intact: build-min.mjs matches it literally.
+const DIAG = true;
+
 /**
  * Creates an independent toolkit instance. Call `await G.init(ctx?)` before anything else.
  * Also settable on the instance: `G.debug`, `G.pre`, `G.onDeviceLost` (see their comments).
@@ -221,24 +227,25 @@ export let WEBGPU = (U) => {
       const info = await module.getCompilationInfo();
       const msgs = info.messages.filter(m => m.message && m.type !== 'info');
       if (msgs.length) {
-        const L = code.split('\n');
-        let log = '\n=== WGSL Compile Log ===\n';
-        for (const m of msgs) {
-          const ln = m.lineNum, col = m.linePos, t = m.type.toUpperCase(), msg = m.message;
-          const s = Math.max(0, ln - 10), e = Math.min(L.length, ln + 4);
-          log += `\n${t} @ ${ln}:${col} — ${msg}\n\n`;
-          for (let i = s; i < e; i++) {
-            const n = i + 1, pad = String(n).padStart(4, ' ');
-            log += `${pad} | ${L[i]}\n`;
-            if (n === ln) log += `     | ${' '.repeat(Math.max(0, col - 1))}^\n`;
-          }
-        }
         const hasError = msgs.some(m => m.type === 'error');
-        if (hasError) {
-          console.error(log);
-          throw new Error('WGSL compilation failed. See log above.');
+        // DIAG is folded to false in the minified build, which removes this whole formatter.
+        // The throw below sits outside it on purpose — errors stay loud in every build.
+        if (DIAG) {
+          const L = code.split('\n');
+          let log = '\n=== WGSL Compile Log ===\n';
+          for (const m of msgs) {
+            const ln = m.lineNum, col = m.linePos, t = m.type.toUpperCase(), msg = m.message;
+            const s = Math.max(0, ln - 10), e = Math.min(L.length, ln + 4);
+            log += `\n${t} @ ${ln}:${col} — ${msg}\n\n`;
+            for (let i = s; i < e; i++) {
+              const n = i + 1, pad = String(n).padStart(4, ' ');
+              log += `${pad} | ${L[i]}\n`;
+              if (n === ln) log += `     | ${' '.repeat(Math.max(0, col - 1))}^\n`;
+            }
+          }
+          (hasError ? console.error : console.warn)(log);
         }
-        console.warn(log);
+        if (hasError) throw new Error('WGSL compilation failed.');
       }
       return module;
     },
@@ -293,18 +300,23 @@ export let WEBGPU = (U) => {
      *   contents (the buffer is sized from it and filled in the same call)
      * @returns {StorageBufferHandle}
      */
-    createStorageBuffer: sizeOrData => {
-      const init = typeof sizeOrData === 'number' ? null : sizeOrData;
-      const n = init ? (init.byteLength + 3) & ~3 : sizeOrData;   // buffer sizes stay 4-byte aligned
-      // Safety warnings for oversized buffers
+    // Warns (doesn't throw) when a requested size exceeds the device limits — allocation is
+    // still attempted, since limits vary wildly across GPUs. Shared by both buffer creators.
+    _checkBufferSize: (n, isStorage) => {
       try {
-        if (S.device && n > S.device.limits.maxBufferSize) {
+        if (!S.device) return;
+        if (n > S.device.limits.maxBufferSize) {
           console.warn(`[TinyWebGPU] Requested buffer size (${n}) exceeds device.maxBufferSize (${S.device.limits.maxBufferSize}).`);
         }
-        if (S.device && n > S.device.limits.maxStorageBufferBindingSize) {
+        if (isStorage && n > S.device.limits.maxStorageBufferBindingSize) {
           console.warn(`[TinyWebGPU] Requested storage buffer size (${n}) exceeds device.maxStorageBufferBindingSize (${S.device.limits.maxStorageBufferBindingSize}).`);
         }
       } catch {}
+    },
+    createStorageBuffer: sizeOrData => {
+      const init = typeof sizeOrData === 'number' ? null : sizeOrData;
+      const n = init ? (init.byteLength + 3) & ~3 : sizeOrData;   // buffer sizes stay 4-byte aligned
+      S._checkBufferSize(n, true);
       const b = S.device.createBuffer({
         size: n, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
         label: `storage ${n}B`
@@ -335,16 +347,7 @@ export let WEBGPU = (U) => {
 
     // Generic buffer creator with explicit usage flags; minimal helpers
     createBuffer: (size, usage) => {
-      // Safety warnings for oversized buffers
-      try {
-        if (S.device && size > S.device.limits.maxBufferSize) {
-          console.warn(`[TinyWebGPU] Requested buffer size (${size}) exceeds device.maxBufferSize (${S.device.limits.maxBufferSize}).`);
-        }
-        // If storage usage, also compare against storage binding limit
-        if (S.device && (usage & GPUBufferUsage.STORAGE) && size > S.device.limits.maxStorageBufferBindingSize) {
-          console.warn(`[TinyWebGPU] Requested storage buffer size (${size}) exceeds device.maxStorageBufferBindingSize (${S.device.limits.maxStorageBufferBindingSize}).`);
-        }
-      } catch {}
+      S._checkBufferSize(size, !!(usage & GPUBufferUsage.STORAGE));
       const b = S.device.createBuffer({ size, usage, label: `buffer ${size}B` });
       const w = (d, o = 0) => S.frame.encoder
         ? S._stageCopy(b, o, d, d.byteLength ?? d.length ?? size)
@@ -528,8 +531,8 @@ export let WEBGPU = (U) => {
  
 
         uniformWGSL = `struct ${n} {
-          ${structFields.join('\n')}
-          }\n@group(${g}) @binding(${binding}) var<uniform> ${v}: ${n};`;
+${structFields.join('\n')}
+}\n@group(${g}) @binding(${binding}) var<uniform> ${v}: ${n};`;
 
         
         binding++;
@@ -797,13 +800,14 @@ export let WEBGPU = (U) => {
    */
   S.makeCompute = (body, main, uniforms = {}, resources = {}, { wg = [8, 8, 1] } = {}) => {
     // Generate compute shader code
-    const code = `      
-      ${body}
-      @compute @workgroup_size(${wg[0]}, ${wg[1]}, ${wg[2]})
-      fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
-        ${main}
-      }
-    `;
+    // Kept flush-left: this text is prepended to every generated shader, so it is hashed,
+    // compiled, and line-numbered in compile errors.
+    const code = `${body}
+@compute @workgroup_size(${wg[0]}, ${wg[1]}, ${wg[2]})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+${main}
+}
+`.trim();
 
     return makePipeline({ code, uniforms, resources, isCompute: true, wg });
   };
@@ -821,15 +825,14 @@ export let WEBGPU = (U) => {
    */
   S.makeRender = (frag, uniforms = {}, resources = {}, { format = S.format, blend = null } = {}) => {
     // Generate vertex + fragment shader code
-    const code = `
-      struct VSOut {@builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>};
-      @vertex fn vs_main(@builtin(vertex_index) i: u32) -> VSOut {
-        var ndc = array<vec2<f32>,3>(vec2<f32>(-1.,-3.),vec2<f32>(-1.,1.),vec2<f32>(3.,1.))[i];
-        var o: VSOut; o.pos = vec4<f32>(ndc, 0.0, 1.0); o.uv = ndc * 0.5 + vec2<f32>(0.5); return o;
-      }
-      ${frag}
-      @fragment fn fs_main(vs: VSOut) -> @location(0) vec4<f32> { return frag(vs.uv); }
-    `.trim();
+    const code = `struct VSOut {@builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>};
+@vertex fn vs_main(@builtin(vertex_index) i: u32) -> VSOut {
+var ndc = array<vec2<f32>,3>(vec2<f32>(-1.,-3.),vec2<f32>(-1.,1.),vec2<f32>(3.,1.))[i];
+var o: VSOut; o.pos = vec4<f32>(ndc, 0.0, 1.0); o.uv = ndc * 0.5 + vec2<f32>(0.5); return o;
+}
+${frag}
+@fragment fn fs_main(vs: VSOut) -> @location(0) vec4<f32> { return frag(vs.uv); }
+`.trim();
 
     return makePipeline({ code, uniforms, resources, format, isCompute: false, blend });
   };

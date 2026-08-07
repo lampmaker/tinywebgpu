@@ -110,6 +110,20 @@ const glow = await G.makeRender(frag, {}, {}, { blend: 'additive' });
 glow.drawTo(view, 'load');           // 'load' keeps the existing contents
 ```
 
+## Minified build
+
+`tinywebgpu.min.js` — **16.3 KB** (6.3 KB gzipped), versus 46.8 KB for the source. Rebuild it
+with `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
+
+It is a **production artifact and it is silent**: every `console` warning is stripped, and so is
+the WGSL compile-error log with its source window and caret. Failures still *throw*, with their
+messages intact — including the bind-group validation error that catches a missing or
+mistyped resource — you just get no diagnostics on the way there.
+
+So: develop against `tinywebgpu.js`, switch to the minified file when you ship. `main` and
+`exports` point at the readable source on purpose, so you never get the silent build by
+accident.
+
 ## Optional WGSL shorthands
 
 The core never rewrites your WGSL. If you want token expansion, opt in with the companion

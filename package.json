@@ -1,19 +1,22 @@
 {
   "name": "tinywebgpu",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "One file, no dependencies, no build step. A WebGPU micro-framework for shader-first work: dual-schema pipelines, fullscreen shaders and compute.",
   "main": "./tinywebgpu.js",
   "exports": "./tinywebgpu.js",
   "files": [
     "tinywebgpu.js",
+    "tinywebgpu.min.js",
     "wgsl_shorthand.js",
     "README.md",
     "API.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test/layout.test.mjs"
+    "test": "node test/layout.test.mjs",
+    "test:min": "TWG_ENTRY=../tinywebgpu.min.js node test/layout.test.mjs",
+    "build:min": "node build-min.mjs"
   },
   "license": "MIT",
   "author": "Matthijs Keuper",
@@ -29,5 +32,8 @@
     "compute",
     "gpgpu",
     "graphics"
-  ]
+  ],
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
 }

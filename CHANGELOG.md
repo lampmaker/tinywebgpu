@@ -2,6 +2,24 @@
 
 All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API.
 
+## 0.3.0 — 2026-08-06
+
+Adds a minified build. No public API change.
+
+- **`tinywebgpu.min.js`** — 16.3 KB (6.3 KB gzipped), down from 46.8 KB / 14.5 KB. Built with
+  `npm run build:min` (esbuild). **It is console-free**: every warning and the WGSL
+  compile-error log are stripped. Errors still throw with their messages, including the
+  bind-group validation failure — only the reporting is gone. Develop against
+  `tinywebgpu.js` and switch to the minified file when shipping; `main`/`exports` still point
+  at the readable source.
+- Deduplicated the buffer-size limit warning shared by `createStorageBuffer` and
+  `createBuffer` into one internal helper.
+- The generated WGSL wrappers (fullscreen vertex shader, compute entry point, uniform struct)
+  are no longer indented. That text is prepended to every shader you compile, so it was being
+  hashed, compiled and line-numbered on every pipeline build.
+- `test/layout.test.mjs` takes a `TWG_ENTRY` override so the same assertions run against
+  either build (`npm test` / `npm run test:min`).
+
 ## 0.2.0 — 2026-08-06
 
 Additive release — no existing call changes behavior.
