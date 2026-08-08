@@ -11,9 +11,32 @@
      give a real pass/fail. Note the order: everything is built and verified first, and the
      canvas is drawn last — building pipelines up front is good practice anyway, and it keeps
      the checks meaningful on machines where presenting to a canvas is flaky. -->
-<body style="font:14px monospace; background:#111; color:#ddd">
-  <canvas id="c" width="512" height="256" style="border:1px solid #333"></canvas>
-  <pre id="out">running…</pre>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TinyWebGPU — textures and blending</title>
+  <style>
+    body {
+      margin: 0; padding: 1rem; background: #111; color: #ddd;
+      font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      -webkit-text-size-adjust: 100%;
+    }
+    main { max-width: 512px; margin: 0 auto; display: grid; gap: 1rem; }
+    canvas {
+      display: block; width: 100%; height: auto; aspect-ratio: 2 / 1;
+      border: 1px solid #333;
+    }
+    pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  </style>
+</head>
+
+<body>
+  <main>
+    <canvas id="c" width="512" height="256"></canvas>
+    <pre id="out">running…</pre>
+  </main>
   <script type="module">
     import { WEBGPU } from '../tinywebgpu.js';
 
@@ -127,3 +150,5 @@
     tint.run();
   </script>
 </body>
+
+</html>

@@ -43,6 +43,13 @@
     }
     a.demo:hover { border-color: var(--accent); transform: translateY(-1px); }
     a.demo strong { display: block; font-size: 1.05rem; }
+    a.demo.start {
+      margin-bottom: 2rem; border-color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 8%, var(--card));
+    }
+    a.demo.start strong { font-size: 1.15rem; }
+    h2 { font-size: 1rem; margin: 0 0 .8rem; color: var(--muted); font-weight: 600;
+         text-transform: uppercase; letter-spacing: .05em; }
     a.demo span { color: var(--muted); font-size: .92rem; }
     footer { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .92rem; }
     footer a { color: var(--accent); }
@@ -55,11 +62,17 @@
     <p class="tag">One file, no dependencies, no build step. Live demos below — each is a single
       self-contained HTML file.</p>
 
+    <a class="demo start" href="tutorial.html">
+      <strong>Start here · The tutorial</strong>
+      <span>Sixteen steps from one coloured pixel to a particle system, with a live, editable
+        code box at every stage. Runs on your GPU as you read.</span></a>
+
     <div id="unsupported">
       <strong>WebGPU isn’t available in this browser.</strong> The demos need Chrome/Edge 113+,
       Firefox 141+ (Windows), or Safari 26+, over https or localhost.
     </div>
 
+    <h2>Examples</h2>
     <ul>
       <li><a class="demo" href="examples/1_hello.html">
           <strong>1 · Hello fullscreen shader</strong>
@@ -78,11 +91,20 @@
           <strong>5 · Textures and blending</strong>
           <span>Pixels uploaded from raw bytes and from an image source, sampled in a shader,
             with a translucent pass composited on top.</span></a></li>
+      <li><a class="demo" href="examples/6_evolution.html">
+          <strong>6 · Differential evolution</strong>
+          <span>A real black-box optimizer run population-parallel: one thread per individual,
+            four textbook-hard objectives, and a 2D slice through a 32-dimensional search.</span></a></li>
+      <li><a class="demo" href="examples/7_particles.html">
+          <strong>7 · Particle simulator</strong>
+          <span>Up to 800k particles pulled around by your pointer. No vertex buffers — each one
+            splats into a density grid, and a fullscreen pass colours it.</span></a></li>
     </ul>
 
     <footer>
       Source and docs: <a href="https://github.com/lampmaker/tinywebgpu">github.com/lampmaker/tinywebgpu</a>
-      · Start with the <a href="https://github.com/lampmaker/tinywebgpu#readme">README</a> and the
+      · The <a href="tutorial.html">tutorial</a>, the
+      <a href="https://github.com/lampmaker/tinywebgpu#readme">README</a> and the
       <a href="https://github.com/lampmaker/tinywebgpu/blob/main/API.md">API reference</a>. MIT licensed.
     </footer>
   </main>

@@ -71,9 +71,17 @@ prep.dispatch(1);                       // writes [x,y,z] into a 3×u32 buffer
 work.dispatchIndirect(indirect.b, 0);   // no CPU round-trip
 ```
 
+## Tutorial
+
+**[tutorial.html](https://lampmaker.github.io/tinywebgpu/tutorial.html)** is the guided path:
+sixteen steps from one coloured pixel to a particle system, and every code box on the page is
+live — edit it and it recompiles against your GPU. It covers uniforms and the schema, compute and
+dispatch sizing, ping-pong buffers, the frame API, atomics and reduction, indirect dispatch,
+textures, and the sharp edges worth knowing before you hit them.
+
 ## Examples
 
-Five single-file examples live in `examples/` — **[run them live](https://lampmaker.github.io/tinywebgpu/)**
+Seven single-file examples live in `examples/` — **[run them live](https://lampmaker.github.io/tinywebgpu/)**
 (or serve the folder yourself and open them in a WebGPU browser):
 
 1. `1_hello.html` — animated fullscreen shader in ~10 lines
@@ -81,6 +89,15 @@ Five single-file examples live in `examples/` — **[run them live](https://lamp
 3. `3_life.html` — ping-pong compute + present (game of life), frame API
 4. `4_indirect.html` — GPU-side counters → indirect dispatch (wavefront pattern)
 5. `5_texture.html` — image upload (`writeTexture` / `loadTexture`) + alpha blending
+6. `6_evolution.html` — differential evolution: a gradient-free global optimizer with one
+   thread per individual, a workgroup-shared-memory reduction to find the best, and a swappable
+   objective — the four here are the standard hard cases
+7. `7_particles.html` — a few hundred thousand particles with no vertex buffers: each one splats
+   into a density grid with an `atomicAdd`, and a fullscreen pass colours it
+
+Every page is laid out for a phone as much as a desktop, and examples 5, 6 and 7 check their own
+arithmetic on load rather than asking you to judge it by eye — example 6 holds its WGSL objectives
+against an independent CPU implementation and then proves the search reaches a known optimum.
 
 ## Textures
 

@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<!-- TinyWebGPU example 7: a few hundred thousand particles, simulated and drawn on the GPU.
+     Serve this folder (python3 -m http.server) and open /examples/7_particles.html
+
+     Move the pointer (or drag a finger) to move the attractor.
+
+     TinyWebGPU draws one fullscreen triangle — it has no vertex buffers and no point sprites.
+     That sounds like a problem for a particle system and turns out to be a feature: instead of
+     drawing N points, the simulation *splats* each particle into a density grid with one
+     atomicAdd, and a fullscreen pass colours the grid. The particle count stops being a
+     draw-call problem and becomes an arithmetic problem, which is the kind GPUs are good at.
+
+     The pattern in full:
+       fade    decay the grid a little            (trails, and it doubles as the clear)
+       sim     integrate + splat                  (one atomicAdd per particle)
+       draw    colour the grid, fullscreen        (reads the same buffer, non-atomically)
+     — three passes, one submit, no CPU round-trip and no per-particle draw call. -->
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TinyWebGPU — particles</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: max(0.6rem, env(safe-area-inset-top)) 0.7rem 1.2rem;
+      background: #08080b; color: #e8e8ec;
+      font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-text-size-adjust: 100%;
+    }
+    main { max-width: 60rem; margin: 0 auto; display: grid; gap: 0.7rem; }
+    h1 { font-size: 1.1rem; margin: 0; font-weight: 600; }
+    p { margin: 0; color: #9a9aa6; font-size: 0.88rem; }
+    /* The simulation reads its aspect ratio from the canvas, so any shape works — which lets
+       the canvas simply take the space it is given, portrait or landscape. */
+    canvas {
+      display: block; width: 100%; height: min(62vh, 34rem); border-radius: 10px;
+      border: 1px solid #23232b; background: #08080b;
+      touch-action: none;                    /* the canvas wants the drag, not the scroller */
+      cursor: crosshair;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 0.45rem; align-items: center; }
+    button {
+      flex: 1 1 6.5rem; min-height: 44px; padding: 0.5rem 0.75rem; font: inherit; font-size: 0.88rem;
+      color: inherit; background: #16161c; border: 1px solid #2c2c36; border-radius: 8px; cursor: pointer;
+    }
+    button:hover { border-color: #7aa2ff; }
+    button[aria-pressed="true"] { background: #22223a; border-color: #7aa2ff; color: #cfd9ff; }
+    .stats {
+      font: 0.8rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #8b8b96;
+      font-variant-numeric: tabular-nums;
+    }
+    #err { display: none; background: #2c1a1a; border: 1px solid #6b3030; border-radius: 8px; padding: 0.75rem 0.9rem; }
+    a { color: #7aa2ff; }
+  </style>
+</head>
+
+<body>
+  <main>
+    <h1>Particles</h1>
+    <div id="err"></div>
+    <canvas id="c"></canvas>
+    <div class="row">
+      <button id="fewer">Fewer</button>
+      <button id="more">More</button>
+      <button id="repel" aria-pressed="false">Repel</button>
+      <button id="swirlBtn" aria-pressed="true">Swirl</button>
+      <button id="reset">Reset</button>
+    </div>
+    <p class="stats" id="stats">starting…</p>
+    <p>Each particle is 16 bytes — position and velocity — and never leaves the GPU.
+      <a href="../tutorial.html#particles">The tutorial builds this one up step by step.</a></p>
+  </main>
+
+  <script type="module">
+    import { WEBGPU } from '../tinywebgpu.js';
+
+    const canvas = document.getElementById('c');
+    const el = id => document.getElementById(id);
+
+    const WG = 64;                 // particles per workgroup
+    const FADE_WG = 256;           // cells per workgroup in the fade pass
+    const MAX_CELLS = 1_200_000;   // grid cap, so a 4K screen doesn't allocate a huge buffer
+    const COUNTS = [30_000, 120_000, 300_000, 800_000];
+    // Phones get a smaller default: fewer particles, and a coarser grid from the smaller canvas.
+    let countIdx = window.innerWidth < 700 ? 1 : 2;
+
+    let G;
+    try {
+      G = await WEBGPU().init(canvas.getContext('webgpu'));
+    } catch (e) {
+      el('err').style.display = 'block';
+      el('err').textContent = `WebGPU unavailable: ${e.message}. Needs Chrome/Edge 113+, ` +
+        `Firefox 141+ (Windows) or Safari 26+, over https or localhost.`;
+      el('stats').textContent = '';
+      window.__result = { ok: false, msg: 'no webgpu: ' + e.message };
+      throw e;
+    }
+
+    // ---- 1. fade: decay the whole grid -----------------------------------------------------
+    // Bound as a plain array<u32>: only this pass writes it here, so there is nothing to make
+    // atomic. Integer maths keeps it exact — `keep/256` is the per-frame survival fraction.
+    const fade = await G.makeCompute('', `
+        let i = gid.x;
+        if (i >= UB.cells) { return; }
+        grid[i] = grid[i] * UB.keep / 256u;
+      `,
+      { cells: 'u32', keep: 'u32' }, { grid: 'array<u32>' }, { wg: [FADE_WG, 1, 1] });
+
+    // ---- 2. sim: integrate, bounce, splat ---------------------------------------------------
+    // World space is x in [-aspect, aspect], y in [-1, 1], so the field keeps its shape when the
+    // canvas does not. The struct is declared here and referenced by the resource schema below;
+    // WGSL lets module-scope declarations appear in any order.
+    const sim = await G.makeCompute(`
+        struct Particle {
+          pos: vec2<f32>,
+          vel: vec2<f32>,
+        }`, `
+        let i = gid.x;
+        if (i >= UB.n) { return; }
+        var p = parts[i];
+
+        let d = UB.attract - p.pos;
+        let r2 = dot(d, d) + 0.015;             // softened, so the centre is not a singularity
+        let inv = inverseSqrt(r2);
+        let dir = d * inv;
+        let tang = vec2<f32>(-dir.y, dir.x);    // perpendicular: gives orbits instead of collapse
+
+        let pull = clamp(UB.pull / r2, -60.0, 60.0);
+        p.vel += (dir * pull + tang * UB.swirl * inv) * UB.dt;
+        p.vel *= UB.damp;
+        p.pos += p.vel * UB.dt;
+
+        // bounce off the walls of the world box
+        let lim = vec2<f32>(UB.aspect, 1.0);
+        if (p.pos.x < -lim.x) { p.pos.x = -lim.x; p.vel.x =  abs(p.vel.x) * 0.55; }
+        if (p.pos.x >  lim.x) { p.pos.x =  lim.x; p.vel.x = -abs(p.vel.x) * 0.55; }
+        if (p.pos.y < -lim.y) { p.pos.y = -lim.y; p.vel.y =  abs(p.vel.y) * 0.55; }
+        if (p.pos.y >  lim.y) { p.pos.y =  lim.y; p.vel.y = -abs(p.vel.y) * 0.55; }
+        parts[i] = p;
+
+        // splat: the entire "draw call" for this particle
+        let uv = (p.pos / lim) * 0.5 + vec2<f32>(0.5);
+        let cx = min(u32(clamp(uv.x, 0.0, 1.0) * f32(UB.gw)), UB.gw - 1u);
+        let cy = min(u32(clamp(uv.y, 0.0, 1.0) * f32(UB.gh)), UB.gh - 1u);
+        atomicAdd(&grid[cy * UB.gw + cx], 1u);
+      `,
+      {
+        attract: 'vec2<f32>', dt: 'f32', aspect: 'f32', pull: 'f32', swirl: 'f32',
+        damp: 'f32', n: 'u32', gw: 'u32', gh: 'u32',
+      },
+      { parts: 'array<Particle>', grid: 'array<atomic<u32>>' },
+      { wg: [WG, 1, 1] });
+
+    // ---- 3. draw: colour the grid ------------------------------------------------------------
+    const draw = await G.makeRender(`
+        fn pal(t: f32) -> vec3<f32> {
+          let a = vec3<f32>(0.03, 0.02, 0.09);
+          let b = vec3<f32>(0.30, 0.09, 0.72);
+          let c = vec3<f32>(1.00, 0.33, 0.52);
+          let d = vec3<f32>(1.00, 0.94, 0.84);
+          return mix(mix(mix(a, b, smoothstep(0.0, 0.35, t)), c, smoothstep(0.30, 0.78, t)),
+                     d, smoothstep(0.72, 1.0, t));
+        }
+        fn frag(uv: vec2<f32>) -> vec4<f32> {
+          let cx = min(u32(uv.x * f32(UB.gw)), UB.gw - 1u);
+          let cy = min(u32(uv.y * f32(UB.gh)), UB.gh - 1u);
+          let n = f32(grid[cy * UB.gw + cx]);
+          return vec4<f32>(pal(1.0 - exp(-n * UB.gain)), 1.0);
+        }`,
+      { gw: 'u32', gh: 'u32', gain: 'f32' }, { grid: 'array<u32>' });
+
+    // ---- particles ---------------------------------------------------------------------------
+    // 4 floats each: pos.xy, vel.xy. A disc of particles with a tangential kick, so the thing is
+    // already turning on the first frame.
+    const makeParticles = (n, aspect) => {
+      const a = new Float32Array(n * 4);
+      for (let i = 0; i < n; i++) {
+        const th = Math.random() * Math.PI * 2;
+        const r = Math.sqrt(Math.random()) * 0.75;
+        const x = Math.cos(th) * r * aspect, y = Math.sin(th) * r;
+        a[i * 4] = x; a[i * 4 + 1] = y;
+        a[i * 4 + 2] = -y * 0.6; a[i * 4 + 3] = x * 0.6;
+      }
+      return a;
+    };
+
+    // ---- self-check --------------------------------------------------------------------------
+    // Runs on its own small buffers before the canvas is ever acquired, so it can read results
+    // back. Every particle is clamped inside the box, so each step splats exactly once: after
+    // `steps` steps the grid must hold exactly n*steps hits. That number is either right or the
+    // kernel is wrong — no eyeballing involved.
+    {
+      const n = 1024, g = 32, steps = 30;
+      const init = makeParticles(n, 1);
+      const sp = G.createStorageBuffer(init);
+      const sg = G.createStorageBuffer(g * g * 4);
+      sim.setResources({ parts: sp.b, grid: sg.b });
+      sim.setUniforms({
+        attract: [0.3, 0.1], dt: 1 / 60, aspect: 1, pull: 1.2, swirl: 1.5,
+        damp: 0.995, n, gw: g, gh: g,
+      });
+
+      G.beginCompute();                        // one pass, `steps` chained dispatches
+      sim.use();
+      for (let i = 0; i < steps; i++) sim.dispatchOn(null, Math.ceil(n / WG));
+      G.endCompute();
+
+      const cells = await sg.r(g * g * 4, 0, Uint32Array);
+      const splats = cells.reduce((a, b) => a + b, 0);
+      const out = await sp.r(n * 16, 0, Float32Array);
+
+      let finite = true, inBox = true, moved = 0;
+      for (let i = 0; i < n; i++) {
+        const x = out[i * 4], y = out[i * 4 + 1];
+        if (!Number.isFinite(x) || !Number.isFinite(y) ||
+            !Number.isFinite(out[i * 4 + 2]) || !Number.isFinite(out[i * 4 + 3])) finite = false;
+        if (Math.abs(x) > 1.001 || Math.abs(y) > 1.001) inBox = false;
+        if (Math.hypot(x - init[i * 4], y - init[i * 4 + 1]) > 1e-4) moved++;
+      }
+      const ok = splats === n * steps && finite && inBox && moved === n;
+      window.__result = {
+        ok,
+        msg: `splats ${splats}/${n * steps}, finite ${finite}, in box ${inBox}, moved ${moved}/${n}`,
+      };
+      sp.b.destroy();
+      sg.b.destroy();
+    }
+
+    // ---- live state ---------------------------------------------------------------------------
+    let N = COUNTS[countIdx];
+    let parts = null, grid = null, gw = 0, gh = 0, cells = 0, aspect = 1;
+    let repel = false, swirl = true, held = false;
+    let attract = [0, 0], target = [0, 0], pointer = false;
+
+    const allocParticles = () => {
+      parts?.b.destroy();
+      parts = G.createStorageBuffer(makeParticles(N, aspect));
+      sim.setResources({ parts: parts.b, grid: grid.b });
+    };
+
+    // Sizes the backing store to the CSS box, then rebuilds the grid to match. `changed` is what
+    // keeps this from reallocating on every frame.
+    const resize = () => {
+      const { width, height, changed } = G.resizeCanvas(canvas);
+      if (!changed && grid) return false;
+      aspect = width / height;
+      // Cap the cell count, keeping the canvas's shape.
+      const scale = Math.min(1, Math.sqrt(MAX_CELLS / (width * height)));
+      gw = Math.max(8, Math.round(width * scale));
+      gh = Math.max(8, Math.round(height * scale));
+      cells = gw * gh;
+      grid?.b.destroy();
+      grid = G.createStorageBuffer(cells * 4);
+      fade.setResources({ grid: grid.b });
+      draw.setResources({ grid: grid.b });
+      if (parts) sim.setResources({ parts: parts.b, grid: grid.b });
+      return true;
+    };
+
+    resize();
+    allocParticles();
+
+    // ---- pointer -------------------------------------------------------------------------------
+    const toWorld = e => {
+      const r = canvas.getBoundingClientRect();
+      target = [
+        ((e.clientX - r.left) / r.width * 2 - 1) * aspect,
+        -((e.clientY - r.top) / r.height * 2 - 1),
+      ];
+      pointer = true;
+    };
+    canvas.addEventListener('pointermove', toWorld);
+    canvas.addEventListener('pointerdown', e => {
+      held = true;
+      canvas.setPointerCapture(e.pointerId);
+      toWorld(e);
+    });
+    for (const ev of ['pointerup', 'pointercancel']) canvas.addEventListener(ev, () => { held = false; });
+    canvas.addEventListener('pointerleave', () => { pointer = false; held = false; });
+
+    // ---- controls --------------------------------------------------------------------------------
+    const setCount = d => {
+      countIdx = Math.max(0, Math.min(COUNTS.length - 1, countIdx + d));
+      N = COUNTS[countIdx];
+      allocParticles();
+    };
+    el('fewer').onclick = () => setCount(-1);
+    el('more').onclick = () => setCount(1);
+    el('reset').onclick = () => { allocParticles(); grid.clear(); };
+    el('repel').onclick = e => { repel = !repel; e.target.setAttribute('aria-pressed', repel); };
+    el('swirlBtn').onclick = e => { swirl = !swirl; e.target.setAttribute('aria-pressed', swirl); };
+
+    // ---- the loop ---------------------------------------------------------------------------------
+    let last = performance.now(), fps = 0, tick = 0;
+    const frame = now => {
+      const dt = Math.min((now - last) / 1000, 1 / 20);      // a backgrounded tab must not teleport
+      last = now;
+      fps += (1000 / Math.max(now - (frame.prev ?? now - 16), 1) - fps) * 0.08;
+      frame.prev = now;
+
+      resize();                                              // reallocates only when the box changed
+
+      // With no pointer, the attractor drifts on its own so the page is alive on arrival.
+      if (!pointer) {
+        const t = now * 0.00042;
+        target = [Math.cos(t * 1.3) * 0.62 * aspect, Math.sin(t * 1.7) * 0.62];
+      }
+      attract = [attract[0] + (target[0] - attract[0]) * 0.12,
+                 attract[1] + (target[1] - attract[1]) * 0.12];
+
+      G.beginFrame();                                        // fade + sim + draw: one submit
+      fade.setUniforms({ cells, keep: 232 });
+      fade.dispatch(Math.ceil(cells / FADE_WG));
+
+      sim.setUniforms({
+        attract, dt, aspect,
+        pull: (repel ? -0.55 : 1.0) * (held ? 2.2 : 1.0),
+        swirl: swirl ? 1.6 : 0.0,
+        damp: 0.992, n: N, gw, gh,
+      });
+      sim.dispatch(Math.ceil(N / WG));
+
+      // More particles per cell means each one should count for less, or dense areas clip to white.
+      draw.setUniforms({ gw, gh, gain: 26 / (N / cells + 26) * 0.55 });
+      draw.drawTo();
+      G.endFrame();
+
+      if ((tick++ & 15) === 0) {
+        el('stats').textContent =
+          `${N.toLocaleString('en-US')} particles · ${gw}×${gh} grid ` +
+          `(${(cells / 1e6).toFixed(2)}M cells) · ${fps.toFixed(0)} fps · ` +
+          `${(N * 16 / 1048576).toFixed(1)} MB of particle state`;
+      }
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  </script>
+</body>
+
+</html>

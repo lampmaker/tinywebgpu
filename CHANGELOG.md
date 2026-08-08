@@ -2,6 +2,41 @@
 
 All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API.
 
+## Unreleased
+
+Documentation and examples only — `tinywebgpu.js` is untouched, so there is nothing to upgrade.
+
+**Added**
+
+- **`tutorial.html`** — a sixteen-step guided tour, from a single coloured pixel to a particle
+  system. Every code box on the page is live: it is edited in place and recompiled against the
+  reader's own GPU, with animation loops stopped when a box is re-run or scrolls out of view. The
+  boxes share one device (a device per box would be a lot of memory for a page you scroll), so one
+  canvas demo animates at a time. `window.__runAll()` runs every box and reports what broke.
+- **`examples/6_evolution.html`** — differential evolution, a gradient-free global optimizer, run
+  population-parallel: one thread per individual, no communication between them, and the whole
+  population advanced in a single dispatch. The population is stored dimension-major so
+  neighbouring threads read neighbouring addresses, generations ping-pong between two offsets in
+  one buffer so the bind group is built once rather than once per generation, and trial vectors
+  are generated, scored and stored one dimension at a time so nothing per-individual sits in
+  registers. Finding the best individual is a workgroup-shared-memory tree reduction, since WGSL
+  has no `atomic<f32>` to `atomicMin` a float fitness with. Four standard objectives — Rastrigin,
+  Ackley, Rosenbrock, Schwefel — each with the crossover rate it actually needs, measured rather
+  than assumed. Self-checks hold the WGSL objectives against an independent CPU implementation and
+  then confirm the search reaches Rastrigin's optimum in 32 dimensions.
+- **`examples/7_particles.html`** — up to 800k particles with no vertex buffers: the simulation
+  splats each one into a density grid with an `atomicAdd`, and a fullscreen pass colours it, so
+  the particle count is arithmetic rather than draw calls. Fade, simulate and draw go out in one
+  submit; the grid follows the window through `resizeCanvas`. Its self-check asserts an exact
+  splat count rather than eyeballing the picture.
+
+**Changed**
+
+- Examples 1–5 now carry a viewport meta and responsive CSS, so they lay out at the device width
+  on a phone instead of at 980px scaled down. Canvases take the width they are given and keep
+  their aspect ratio; the text-only examples wrap instead of scrolling sideways.
+- `index.html` leads with the tutorial and lists the two new examples.
+
 ## 0.4.0 — 2026-08-08
 
 Bug-fix release with two additions. Three of the fixes change behavior — read the first two if

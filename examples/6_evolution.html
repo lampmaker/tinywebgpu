@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<!-- TinyWebGPU example 6: differential evolution — a global optimizer, run population-parallel.
+     Serve this folder (python3 -m http.server) and open /examples/6_evolution.html
+
+     Differential evolution is a real black-box optimizer: it needs no gradients, no convexity
+     and no restarts, and it is what people reach for when the objective is a simulation rather
+     than a formula. It also happens to be shaped exactly like a GPU: one thread per individual,
+     no communication between them, and the whole population stepped at once.
+
+     What is on screen is a 2D slice through a D-dimensional problem — the search really is
+     happening in 32 (or 128) dimensions, and the picture is the plane through the current best
+     individual. The four objectives are the standard hard cases, and they fail in different
+     ways on purpose: Rastrigin is a minefield of local minima, Ackley is almost flat until you
+     are close, Rosenbrock is a narrow curved valley, and Schwefel puts the global optimum far
+     away from the best local one, near the boundary.
+
+     The parts worth stealing:
+       one function        the whole objective is `objStep` + `objDone` below. Swap those two
+                           and everything else — search, selection, display — is unchanged.
+       structure of arrays the population is stored dimension-major, so neighbouring threads
+                           read neighbouring addresses. Individual-major would stride by D and
+                           waste most of every memory transaction.
+       one buffer, two     generations ping-pong inside a single buffer at two offsets, so the
+                           bind group is built once instead of once per generation.
+       streamed objective  the trial vector is generated, scored and stored one dimension at a
+                           time, so nothing per-individual ever lives in registers.
+       real reduction      finding the best individual is a workgroup-shared-memory tree
+                           reduction — WGSL has no atomic<f32>, so an atomicMin is not on the
+                           table for float fitness. -->
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TinyWebGPU — differential evolution</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: max(0.75rem, env(safe-area-inset-top)) 0.75rem 1.5rem;
+      background: #0c0c10; color: #e8e8ec;
+      font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-text-size-adjust: 100%;
+    }
+    main { max-width: 34rem; margin: 0 auto; display: grid; gap: 0.85rem; }
+    h1 { font-size: 1.15rem; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+    p { margin: 0; color: #9a9aa6; font-size: 0.9rem; }
+    /* The domain is square, so the canvas is too. */
+    canvas {
+      display: block; width: 100%; max-width: 34rem; aspect-ratio: 1 / 1; height: auto;
+      border: 1px solid #2a2a32; border-radius: 10px; background: #08080b;
+      touch-action: manipulation;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+    button {
+      flex: 1 1 6rem; min-height: 44px; padding: 0.5rem 0.6rem; font: inherit; font-size: 0.86rem;
+      color: inherit; background: #16161c; border: 1px solid #2c2c36; border-radius: 8px;
+      cursor: pointer; white-space: nowrap;
+    }
+    button:hover { border-color: #7aa2ff; }
+    button[aria-pressed="true"] { background: #22223a; border-color: #7aa2ff; color: #cfd9ff; }
+    .readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0.5rem; }
+    .cell { background: #16161c; border: 1px solid #2a2a32; border-radius: 9px; padding: 0.55rem 0.7rem; }
+    .cell b {
+      display: block; font: 600 1.05rem/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+    }
+    .cell span { color: #9a9aa6; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    #status { font: 0.8rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #8b8b96; margin: 0; }
+    #err { display: none; background: #2c1a1a; border: 1px solid #6b3030; border-radius: 8px; padding: 0.75rem 0.9rem; }
+    a { color: #7aa2ff; }
+  </style>
+</head>
+
+<body>
+  <main>
+    <h1>Differential evolution</h1>
+    <p id="blurb">A 2D slice through a 32-dimensional search. Bright is good, dark is bad; the ring
+      marks the true optimum, the cross marks the best individual so far.</p>
+    <div id="err"></div>
+    <canvas id="c" width="640" height="640"></canvas>
+
+    <div class="row" id="fns"></div>
+    <div class="row">
+      <button id="dims">Dim 32</button>
+      <button id="pops">Pop 32k</button>
+      <button id="pause">Pause</button>
+      <button id="reset">Reset</button>
+    </div>
+
+    <div class="readout">
+      <div class="cell"><span>best fitness</span><b id="best">—</b></div>
+      <div class="cell"><span>distance to optimum</span><b id="dist">—</b></div>
+      <div class="cell"><span>generation</span><b id="gen">—</b></div>
+      <div class="cell"><span>evaluations / sec</span><b id="rate">—</b></div>
+    </div>
+    <p id="status">starting…</p>
+    <p>The objective is one WGSL function — replace <code>objStep</code>/<code>objDone</code> with
+      your own and the rest of the machinery is unchanged.
+      <a href="../tutorial.html#atomics">The tutorial covers the pieces.</a></p>
+  </main>
+
+  <script type="module">
+    import { WEBGPU } from '../tinywebgpu.js';
+
+    const canvas = document.getElementById('c');
+    const el = id => document.getElementById(id);
+
+    const WG = 64;            // threads per workgroup for the population kernels
+    const RED_WG = 256;       // threads in the single-workgroup reduction
+    const GRID = 256;         // population scatter grid, GRID x GRID
+    const GENS_PER_FRAME = 4;
+    const MAX_GENOME = 4 << 20;   // cap on population x dimensions, so a phone survives "Pop 128k"
+
+    // Each objective, its box, its optimum, and a rough worst value used only to normalise the
+    // colour ramp. These are the textbook definitions — nothing here is tuned to flatter the
+    // optimizer.
+    // `cr` is the crossover rate, and it is not a detail: it decides how many dimensions a trial
+    // vector inherits from the mutant. Separable objectives — where each dimension can be fixed
+    // independently — want it low, so the search improves one coordinate at a time; a coupled
+    // objective like Rosenbrock needs it high, or the coordinates can never move together. These
+    // values are measured, not folklore: at D=32 over 1500 generations, Rastrigin reaches 3e-5 at
+    // CR=0.05 and 157 at CR=0.9, while Schwefel goes from 2.2 to 5750.
+    const FNS = [
+      { id: 0, name: 'Rastrigin', lo: -5.12, hi: 5.12, opt: 0, cr: 0.05,
+        worst: d => 46.2 * d, note: 'a regular lattice of local minima — roughly 10^D of them' },
+      { id: 1, name: 'Ackley', lo: -32.768, hi: 32.768, opt: 0, cr: 0.1,
+        worst: () => 22.4, note: 'nearly flat far out, so there is almost no gradient to follow' },
+      { id: 2, name: 'Rosenbrock', lo: -2.048, hi: 2.048, opt: 1, cr: 0.9,
+        worst: d => 3910 * Math.max(d - 1, 1), note: 'a narrow curved valley — easy to enter, slow to walk, and the one case here that needs a high crossover rate' },
+      { id: 3, name: 'Schwefel', lo: -500, hi: 500, opt: 420.9687, cr: 0.1,
+        worst: d => 838 * d, note: 'the global optimum sits far from the best local one, near the wall' },
+    ];
+
+    // The same four objectives in f64 on the CPU, for a constant vector x = (v, v, … v). Used
+    // only by the self-check below, to hold the WGSL to an independent implementation.
+    const constValue = (fid, v, d) => {
+      switch (fid) {
+        case 0: return 10 * d + d * (v * v - 10 * Math.cos(2 * Math.PI * v));
+        case 1: return -20 * Math.exp(-0.2 * Math.abs(v)) - Math.exp(Math.cos(2 * Math.PI * v)) + 20 + Math.E;
+        case 2: { const t = v - v * v, u = 1 - v; return (d - 1) * (100 * t * t + u * u); }
+        default: return 418.9828872724339 * d - d * v * Math.sin(Math.sqrt(Math.abs(v)));
+      }
+    };
+
+    let G;
+    try {
+      G = await WEBGPU().init(canvas.getContext('webgpu'));
+    } catch (e) {
+      el('err').style.display = 'block';
+      el('err').textContent = `WebGPU unavailable: ${e.message}. Needs Chrome/Edge 113+, ` +
+        `Firefox 141+ (Windows) or Safari 26+, over https or localhost.`;
+      el('status').textContent = '';
+      window.__result = { ok: false, msg: 'no webgpu: ' + e.message };
+      throw e;
+    }
+
+    // ---- shared WGSL ------------------------------------------------------------------------
+    // Prepended to every pipeline below, so the search kernel and the picture are guaranteed to
+    // be scoring the same function.
+    //
+    // The objective is evaluated in a stream: one dimension at a time, carrying two running sums
+    // and the previous coordinate. That is what lets a trial vector be generated, scored and
+    // written without ever holding all D components at once — the difference between a kernel
+    // that works at D = 128 and one that spills.
+    const OBJECTIVE = `
+      const TAU = 6.283185307179586;
+
+      struct Acc {
+        a: f32,
+        b: f32,
+        prev: f32,
+      }
+
+      fn objStep(acc: ptr<function, Acc>, fid: u32, x: f32, j: u32) {
+        switch fid {
+          case 0u: {                                   // Rastrigin
+            (*acc).a += x * x - 10.0 * cos(TAU * x);
+          }
+          case 1u: {                                   // Ackley
+            (*acc).a += x * x;
+            (*acc).b += cos(TAU * x);
+          }
+          case 2u: {                                   // Rosenbrock — couples adjacent dimensions
+            if (j > 0u) {
+              let p = (*acc).prev;
+              let t = x - p * p;
+              let u = 1.0 - p;
+              (*acc).a += 100.0 * t * t + u * u;
+            }
+          }
+          default: {                                   // Schwefel
+            (*acc).a += x * sin(sqrt(abs(x)));
+          }
+        }
+        (*acc).prev = x;
+      }
+
+      fn objDone(acc: Acc, fid: u32, d: u32) -> f32 {
+        let n = f32(d);
+        switch fid {
+          case 0u: { return 10.0 * n + acc.a; }
+          case 1u: { return -20.0 * exp(-0.2 * sqrt(acc.a / n)) - exp(acc.b / n) + 20.0 + 2.718281828459045; }
+          case 2u: { return acc.a; }
+          default: { return 418.9828872724339 * n - acc.a; }
+        }
+      }
+
+      fn rnd(state: ptr<function, u32>) -> f32 {
+        let x = *state * 747796405u + 2891336453u;
+        *state = x;
+        let w = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+        return f32((w >> 22u) ^ w) * 2.3283064365386963e-10;   // * 2^-32  ->  [0,1)
+      }
+
+      // A uniform index in [0, n) that never equals the skipped one.
+      fn other(state: ptr<function, u32>, n: u32, skip: u32) -> u32 {
+        let r = u32(rnd(state) * f32(n - 1u));
+        return select(r, r + 1u, r >= skip);
+      }`;
+
+    // ---- seed: a uniform random population, scored ------------------------------------------
+    const seed = await G.makeCompute(OBJECTIVE, `
+        let i = gid.x;
+        if (i >= UB.pop) { return; }
+        var s = (i * 747796405u) ^ (UB.gen * 2891336453u) ^ 0x85EBCA6Bu;
+
+        var acc = Acc(0.0, 0.0, 0.0);
+        for (var j = 0u; j < UB.dim; j = j + 1u) {
+          let x = UB.lo + rnd(&s) * (UB.hi - UB.lo);
+          pop[UB.dstOff + j * UB.pop + i] = x;
+          objStep(&acc, UB.fid, x, j);
+        }
+        fit[UB.fitDst + i] = objDone(acc, UB.fid, UB.dim);
+      `,
+      { pop: 'u32', dim: 'u32', dstOff: 'u32', fitDst: 'u32', gen: 'u32', fid: 'u32',
+        lo: 'f32', hi: 'f32' },
+      { pop: 'array<f32>', fit: 'array<f32>' }, { wg: [WG, 1, 1] });
+
+    // ---- step: one generation of DE/rand/1/bin ------------------------------------------------
+    // Thread i owns individual i and nothing else. It reads three other individuals from the
+    // source half of the buffer and writes only its own slot in the destination half, so there
+    // is no race and no barrier — the entire population advances in one dispatch.
+    const step = await G.makeCompute(OBJECTIVE, `
+        let i = gid.x;
+        if (i >= UB.pop) { return; }
+        var s = (i * 2654435761u) ^ (UB.gen * 2246822519u) ^ 0x9E3779B9u;
+
+        // Three partners, none of them i. Two of the three coincide with each other about once
+        // in every population-many draws; the difference vector is then zero and the trial is a
+        // copy of the first partner, which is harmless and much cheaper than rejection sampling.
+        let r1 = other(&s, UB.pop, i);
+        let r2 = other(&s, UB.pop, i);
+        let r3 = other(&s, UB.pop, i);
+
+        let f = UB.f0 + rnd(&s) * UB.fJit;             // dithered F: more robust than a fixed one
+        let jrand = u32(rnd(&s) * f32(UB.dim));        // one dimension always mutates
+
+        var acc = Acc(0.0, 0.0, 0.0);
+        for (var j = 0u; j < UB.dim; j = j + 1u) {
+          let base = j * UB.pop;
+          var v = pop[UB.srcOff + base + i];
+          if (rnd(&s) < UB.cr || j == jrand) {
+            v = pop[UB.srcOff + base + r1]
+              + f * (pop[UB.srcOff + base + r2] - pop[UB.srcOff + base + r3]);
+            // Reflect off the walls instead of clamping — clamping piles individuals onto the
+            // boundary and quietly kills diversity there.
+            if (v < UB.lo) { v = UB.lo + (UB.lo - v); }
+            if (v > UB.hi) { v = UB.hi - (v - UB.hi); }
+            v = clamp(v, UB.lo, UB.hi);                // a wild step can reflect past the far wall
+          }
+          pop[UB.dstOff + base + i] = v;
+          objStep(&acc, UB.fid, v, j);
+        }
+
+        let trial = objDone(acc, UB.fid, UB.dim);
+        let parent = fit[UB.fitSrc + i];
+        if (trial <= parent) {
+          fit[UB.fitDst + i] = trial;                  // the trial is already written
+        } else {
+          for (var j = 0u; j < UB.dim; j = j + 1u) {   // parent survives: carry it over
+            let base = j * UB.pop;
+            pop[UB.dstOff + base + i] = pop[UB.srcOff + base + i];
+          }
+          fit[UB.fitDst + i] = parent;
+        }
+      `,
+      { pop: 'u32', dim: 'u32', srcOff: 'u32', dstOff: 'u32', fitSrc: 'u32', fitDst: 'u32',
+        gen: 'u32', fid: 'u32', lo: 'f32', hi: 'f32', f0: 'f32', fJit: 'f32', cr: 'f32' },
+      { pop: 'array<f32>', fit: 'array<f32>' }, { wg: [WG, 1, 1] });
+
+    // ---- scatter: the population's first two coordinates, splatted ----------------------------
+    const scatter = await G.makeCompute('', `
+        let i = gid.x;
+        if (i >= UB.pop) { return; }
+        let x = (pop[UB.srcOff + i] - UB.lo) / (UB.hi - UB.lo);
+        let y = (pop[UB.srcOff + UB.pop + i] - UB.lo) / (UB.hi - UB.lo);
+        let cx = min(u32(clamp(x, 0.0, 1.0) * ${GRID}.0), ${GRID}u - 1u);
+        let cy = min(u32(clamp(y, 0.0, 1.0) * ${GRID}.0), ${GRID}u - 1u);
+        atomicAdd(&density[cy * ${GRID}u + cx], 1u);
+      `,
+      { pop: 'u32', srcOff: 'u32', lo: 'f32', hi: 'f32' },
+      { pop: 'array<f32>', density: 'array<atomic<u32>>' }, { wg: [WG, 1, 1] });
+
+    // ---- reduce: find the best individual -----------------------------------------------------
+    // WGSL has no atomic<f32>, so the usual atomicMin trick is unavailable for float fitness.
+    // This is the textbook answer instead: one workgroup strides the whole population keeping a
+    // private minimum, then the 256 partial answers are folded pairwise through workgroup memory.
+    // One dispatch, and it hands back the value, the index and the genome together.
+    const reduce = await G.makeCompute(`
+        var<workgroup> sFit: array<f32, ${RED_WG}>;
+        var<workgroup> sIdx: array<u32, ${RED_WG}>;`, `
+        let t = lid.x;
+        var bf = 3.402823e38;
+        var bi = 0u;
+        for (var i = t; i < UB.pop; i = i + ${RED_WG}u) {
+          let f = fit[UB.fitSrc + i];
+          if (f < bf) { bf = f; bi = i; }
+        }
+        sFit[t] = bf;
+        sIdx[t] = bi;
+        workgroupBarrier();
+
+        // The barrier has to sit in uniform control flow, so it lives outside the branch.
+        for (var half = ${RED_WG >> 1}u; half > 0u; half = half >> 1u) {
+          if (t < half && sFit[t + half] < sFit[t]) {
+            sFit[t] = sFit[t + half];
+            sIdx[t] = sIdx[t + half];
+          }
+          workgroupBarrier();
+        }
+
+        let winner = sIdx[0];
+        if (t == 0u) {
+          best[0] = sFit[0];
+          best[1] = f32(winner);
+        }
+        if (t < UB.dim) {                              // dim <= ${RED_WG}, so one pass is enough
+          best[2u + t] = pop[UB.srcOff + t * UB.pop + winner];
+        }
+      `,
+      { pop: 'u32', dim: 'u32', srcOff: 'u32', fitSrc: 'u32' },
+      { pop: 'array<f32>', fit: 'array<f32>', best: 'array<f32>' }, { wg: [RED_WG, 1, 1] });
+
+    // ---- show: the landscape slice, the population, the markers --------------------------------
+    // The slice is recomputed per pixel every frame, because it genuinely changes: it is the
+    // plane through the current best individual, and that individual keeps moving.
+    const show = await G.makeRender(OBJECTIVE + `
+        fn ramp(t: f32) -> vec3<f32> {
+          let a = vec3<f32>(0.82, 0.97, 1.00);         // low fitness — where you want to end up
+          let b = vec3<f32>(0.16, 0.42, 0.74);
+          let c = vec3<f32>(0.06, 0.10, 0.24);
+          let d = vec3<f32>(0.01, 0.01, 0.03);         // high fitness
+          return mix(mix(mix(a, b, smoothstep(0.0, 0.22, t)), c, smoothstep(0.18, 0.58, t)),
+                     d, smoothstep(0.52, 1.0, t));
+        }
+        fn frag(uv: vec2<f32>) -> vec4<f32> {
+          let span = UB.hi - UB.lo;
+          var acc = Acc(0.0, 0.0, 0.0);
+          for (var j = 0u; j < UB.dim; j = j + 1u) {
+            var v = best[2u + j];                      // the other dimensions: held at the best
+            if (j == 0u) { v = UB.lo + uv.x * span; }
+            if (j == 1u) { v = UB.lo + uv.y * span; }
+            objStep(&acc, UB.fid, v, j);
+          }
+          let f = objDone(acc, UB.fid, UB.dim);
+          var col = ramp(clamp(log(1.0 + max(f, 0.0)) / log(1.0 + UB.worst), 0.0, 1.0));
+
+          // the population itself
+          let cx = min(u32(uv.x * ${GRID}.0), ${GRID}u - 1u);
+          let cy = min(u32(uv.y * ${GRID}.0), ${GRID}u - 1u);
+          let n = f32(density[cy * ${GRID}u + cx]);
+          col += vec3<f32>(1.00, 0.62, 0.22) * (1.0 - exp(-n * UB.dotGain));
+
+          // ring: the true optimum. cross: the best individual so far.
+          let o = vec2<f32>((UB.opt - UB.lo) / span);
+          col += vec3<f32>(0.35, 1.0, 0.65)
+               * smoothstep(0.0045, 0.0, abs(length(uv - o) - 0.022));
+          let bp = (vec2<f32>(best[2], best[3]) - vec2<f32>(UB.lo)) / span;
+          let d = abs(uv - bp);
+          col += vec3<f32>(1.0, 1.0, 1.0)
+               * smoothstep(0.0022, 0.0, min(max(d.x, d.y - 0.014), max(d.y, d.x - 0.014)));
+          return vec4<f32>(col, 1.0);
+        }`,
+      { dim: 'u32', fid: 'u32', lo: 'f32', hi: 'f32', worst: 'f32', dotGain: 'f32', opt: 'f32' },
+      { best: 'array<f32>', density: 'array<u32>' });
+
+    // ---- self-check ------------------------------------------------------------------------
+    // Runs on its own small buffers, before the canvas is ever acquired, so results can be read
+    // back. Two claims are tested, and both are numbers:
+    //   1. the WGSL objectives agree with an independent f64 implementation on the CPU. Seeding
+    //      with lo = hi puts the whole population on a constant vector, whose value has a closed
+    //      form, so no RNG has to be replicated to compare them.
+    //   2. the search actually finds a known optimum from a random start, on the hardest of the
+    //      four. The kernels are race-free and the RNG is seeded from (individual, generation),
+    //      so this is reproducible rather than a coin toss.
+    const checks = [];
+    {
+      const P = 512, D = 32, GENS = 1500;
+      const pop = G.createStorageBuffer(2 * P * D * 4);
+      const fit = G.createStorageBuffer(2 * P * 4);
+      seed.setResources({ pop: pop.b, fit: fit.b });
+      step.setResources({ pop: pop.b, fit: fit.b });
+
+      let worstRel = 0, agree = true;
+      for (const fn of FNS) {
+        for (const v of [fn.opt, 0.37 * fn.hi, -0.61 * fn.hi]) {
+          seed.setUniforms({ pop: P, dim: D, dstOff: 0, fitDst: 0, gen: 1, fid: fn.id,
+                             lo: v, hi: v });                 // lo = hi: a constant vector
+          seed.dispatch(Math.ceil(P / WG));
+          const [got] = await fit.r(4, 0, Float32Array);
+          const want = constValue(fn.id, v, D);
+          // The tolerance is a fraction of each objective's own range. Schwefel needs most of
+          // it: sin(sqrt(420.97)) in f32 is off by ~1e-4, which the x·sin term multiplies up to
+          // about 0.07 per dimension. That error is also the floor on its best-fitness readout.
+          const tol = 1e-4 * fn.worst(D);
+          worstRel = Math.max(worstRel, Math.abs(got - want) / fn.worst(D));
+          agree &&= Math.abs(got - want) <= tol;
+        }
+      }
+      checks.push(['objectives match an independent CPU implementation', agree,
+                   `worst error ${worstRel.toExponential(1)} of range`]);
+
+      const fn = FNS[0];                                       // Rastrigin: the multimodal one
+      seed.setUniforms({ pop: P, dim: D, dstOff: 0, fitDst: 0, gen: 7, fid: fn.id,
+                         lo: fn.lo, hi: fn.hi });
+      seed.dispatch(Math.ceil(P / WG));
+
+      G.beginCompute();                                        // every generation, one submit
+      step.use();
+      for (let g = 0; g < GENS; g++) {
+        const p = g & 1;
+        step.setUniforms({
+          pop: P, dim: D, srcOff: p * P * D, dstOff: (1 - p) * P * D,
+          fitSrc: p * P, fitDst: (1 - p) * P, gen: g + 1, fid: fn.id,
+          lo: fn.lo, hi: fn.hi, f0: 0.5, fJit: 0.3, cr: fn.cr,
+        });
+        step.dispatchOn(null, Math.ceil(P / WG));
+      }
+      G.endCompute();
+
+      const all = await fit.r(P * 4, (GENS & 1) * P * 4, Float32Array);
+      const bestFit = Math.min(...all);
+      // 3.05e-5 is not a near miss: it is where f32 stops. Rastrigin at the optimum sums 32
+      // terms of -10 against a +320 constant, and that cancellation has no more digits to give.
+      checks.push([`DE finds Rastrigin's optimum in ${D}D`, bestFit < 1e-3, bestFit.toExponential(2)]);
+      pop.b.destroy();
+      fit.b.destroy();
+    }
+    {
+      const ok = checks.every(c => c[1]);
+      window.__result = { ok, msg: checks.map(c => `${c[0]}: ${c[2]}`).join(' | ') };
+      el('status').textContent = ok
+        ? `self-check passed — ${checks.map(c => c[2]).join(', ')}`
+        : 'self-check FAILED — ' + checks.filter(c => !c[1]).map(c => `${c[0]} (${c[2]})`).join('; ');
+    }
+
+    // ---- live state -----------------------------------------------------------------------------
+    const DIMS = [2, 8, 32, 128];
+    const POPS = [1024, 8192, 65536];
+    let dimIdx = 2, popIdx = 1, fnIdx = 0;
+    let D = 0, P = 0, fn = FNS[0];
+    let pop = null, fit = null, best = null, density = null;
+    let gen = 0, parity = 0, running = true, inFlight = false;
+    let evals = 0, rate = 0, lastT = performance.now();
+
+    const fmtPop = n => n >= 1024 ? `${Math.round(n / 1024)}k` : String(n);
+
+    const alloc = () => {
+      D = DIMS[dimIdx];
+      P = POPS[popIdx];
+      while (P * D > MAX_GENOME && P > 1024) P = P / 2;         // keep the allocation sane
+      pop?.b.destroy();
+      fit?.b.destroy();
+      best?.b.destroy();
+      pop = G.createStorageBuffer(2 * P * D * 4);
+      fit = G.createStorageBuffer(2 * P * 4);
+      best = G.createStorageBuffer((2 + D) * 4);
+      density ??= G.createStorageBuffer(GRID * GRID * 4);
+
+      seed.setResources({ pop: pop.b, fit: fit.b });
+      step.setResources({ pop: pop.b, fit: fit.b });
+      scatter.setResources({ pop: pop.b, density: density.b });
+      reduce.setResources({ pop: pop.b, fit: fit.b, best: best.b });
+      show.setResources({ best: best.b, density: density.b });
+
+      gen = 0;
+      parity = 0;
+      evals = 0;
+      seed.setUniforms({ pop: P, dim: D, dstOff: 0, fitDst: 0, gen: (Math.random() * 1e6) | 0,
+                         fid: fn.id, lo: fn.lo, hi: fn.hi });
+      seed.dispatch(Math.ceil(P / WG));
+      for (const id of ['best', 'dist', 'gen', 'rate']) el(id).textContent = '—';
+      el('dims').textContent = `Dim ${D}`;
+      el('pops').textContent = `Pop ${fmtPop(P)}`;
+      el('blurb').textContent =
+        `A 2D slice through a ${D}-dimensional search. ${fn.name}: ${fn.note}.`;
+    };
+
+    // Function buttons, built from the table so the two can never disagree.
+    for (const f of FNS) {
+      const b = document.createElement('button');
+      b.textContent = f.name;
+      b.onclick = () => { fnIdx = FNS.indexOf(f); fn = f; alloc(); paint(); };
+      el('fns').append(b);
+    }
+    const paint = () => [...el('fns').children]
+      .forEach((b, i) => b.setAttribute('aria-pressed', String(i === fnIdx)));
+
+    el('dims').onclick = () => { dimIdx = (dimIdx + 1) % DIMS.length; alloc(); };
+    el('pops').onclick = () => { popIdx = (popIdx + 1) % POPS.length; alloc(); };
+    el('reset').onclick = () => alloc();
+    el('pause').onclick = e => {
+      running = !running;
+      e.target.textContent = running ? 'Pause' : 'Resume';
+      if (running) { lastT = performance.now(); requestAnimationFrame(frame); }
+    };
+
+    alloc();
+    paint();
+
+    // ---- readouts ------------------------------------------------------------------------------
+    // Generation and throughput are facts the CPU already knows, so they are painted straight
+    // from the loop. Only the two numbers that live on the GPU wait for a readback — and that
+    // readback is never awaited inside the frame, because .r() waits for the GPU and the loop
+    // must not.
+    const paintCounters = () => {
+      el('gen').textContent = gen.toLocaleString('en-US');
+      el('rate').textContent = rate > 1e6
+        ? (rate / 1e6).toFixed(1) + 'M' : Math.round(rate).toLocaleString('en-US');
+    };
+    const sample = () => {
+      if (inFlight) return;
+      inFlight = true;
+      const d = D;                                     // D can change under a slow readback
+      best.r((2 + d) * 4, 0, Float32Array).then(v => {
+        inFlight = false;
+        if (d !== D || v.length < 2 + d) return;       // the population was reallocated: drop it
+        el('best').textContent = Math.abs(v[0]) < 1e-4 ? v[0].toExponential(2) : v[0].toFixed(6);
+        let sq = 0;
+        for (let j = 0; j < d; j++) sq += (v[2 + j] - fn.opt) ** 2;
+        el('dist').textContent = Math.sqrt(sq).toExponential(2);
+      }, () => { inFlight = false; });
+    };
+
+    // ---- the loop ------------------------------------------------------------------------------------
+    const frame = now => {
+      if (!running) return;
+      const dt = (now - lastT) / 1000;
+      lastT = now;
+      rate += ((GENS_PER_FRAME * P) / Math.max(dt, 1e-3) - rate) * 0.1;
+
+      G.beginFrame();                                   // every generation plus the picture: one submit
+      for (let g = 0; g < GENS_PER_FRAME; g++) {
+        step.setUniforms({
+          pop: P, dim: D, srcOff: parity * P * D, dstOff: (1 - parity) * P * D,
+          fitSrc: parity * P, fitDst: (1 - parity) * P, gen: ++gen, fid: fn.id,
+          lo: fn.lo, hi: fn.hi, f0: 0.5, fJit: 0.3, cr: fn.cr,
+        });
+        step.dispatch(Math.ceil(P / WG));
+        parity = 1 - parity;                            // ping-pong is an offset, not a rebind
+      }
+      evals += GENS_PER_FRAME * P;
+
+      density.clear();                                  // the scatter shows now, not a trail
+      scatter.setUniforms({ pop: P, srcOff: parity * P * D, lo: fn.lo, hi: fn.hi });
+      scatter.dispatch(Math.ceil(P / WG));
+
+      reduce.setUniforms({ pop: P, dim: D, srcOff: parity * P * D, fitSrc: parity * P });
+      reduce.dispatch(1);
+
+      show.setUniforms({
+        dim: D, fid: fn.id, lo: fn.lo, hi: fn.hi, worst: fn.worst(D),
+        dotGain: 12 / (P / (GRID * GRID) + 12) * 0.9, opt: fn.opt,
+      });
+      show.drawTo();
+      G.endFrame();
+
+      if ((gen % 12) < GENS_PER_FRAME) { paintCounters(); sample(); }
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  </script>
+</body>
+
+</html>
