@@ -2,8 +2,30 @@
 <!-- TinyWebGPU example 3: ping-pong compute + present (Conway's game of life).
      Shows the frame API: one submit per frame for step + draw.
      Serve this folder (python3 -m http.server) and open /examples/3_life.html -->
-<body style="margin:0; background:#111">
-  <canvas id="c" width="512" height="512" style="image-rendering:pixelated"></canvas>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TinyWebGPU — game of life</title>
+  <style>
+    body {
+      margin: 0; min-height: 100vh; padding: 1rem; display: grid; place-items: center;
+      background: #111; color: #ddd;
+      font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-text-size-adjust: 100%;
+    }
+    /* Takes the width it is given and keeps its shape, so it fits any phone. */
+    canvas {
+      display: block; width: 100%; max-width: 512px; height: auto;
+      aspect-ratio: 1 / 1;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="c" width="512" height="512"></canvas>
   <script type="module">
     import { WEBGPU } from '../tinywebgpu.js';
 
@@ -53,3 +75,5 @@
     frame();
   </script>
 </body>
+
+</html>

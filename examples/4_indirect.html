@@ -4,7 +4,24 @@
      them atomically; a prep kernel converts the count into dispatch args; the next
      kernel runs with exactly that many workgroups — no CPU round-trip in the frame.
      Serve this folder (python3 -m http.server) and open /examples/4_indirect.html -->
-<body style="font:14px monospace; background:#111; color:#ddd">
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TinyWebGPU — indirect dispatch</title>
+  <style>
+    body {
+      margin: 0; padding: 1rem; background: #111; color: #ddd;
+      font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      -webkit-text-size-adjust: 100%;
+    }
+    /* Wrap rather than scroll sideways: these examples print long lines. */
+    pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  </style>
+</head>
+
+<body>
   <pre id="out">running…</pre>
   <script type="module">
     import { WEBGPU } from '../tinywebgpu.js';
@@ -67,3 +84,5 @@
     window.__result = { ok, msg: `count=${count} sum=${totalV}` };
   </script>
 </body>
+
+</html>

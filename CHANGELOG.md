@@ -2,6 +2,34 @@
 
 All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API.
 
+## Unreleased
+
+Documentation and examples only — `tinywebgpu.js` is untouched, so there is nothing to upgrade.
+
+**Added**
+
+- **`tutorial.html`** — a sixteen-step guided tour, from a single coloured pixel to a particle
+  system. Every code box on the page is live: it is edited in place and recompiled against the
+  reader's own GPU, with animation loops stopped when a box is re-run or scrolls out of view. The
+  boxes share one device (a device per box would be a lot of memory for a page you scroll), so one
+  canvas demo animates at a time. `window.__runAll()` runs every box and reports what broke.
+- **`examples/6_pi.html`** — Monte Carlo π. Per-thread RNG streams, a private tally published with
+  a single `atomicAdd` per thread, and a density grid drawn from the same buffer the compute pass
+  writes. Counters accumulate on the GPU and are sampled without ever awaiting inside the frame,
+  because `.r()` stalls. Self-checks 2.1M darts against π before the first frame is presented.
+- **`examples/7_particles.html`** — up to 800k particles with no vertex buffers: the simulation
+  splats each one into a density grid with an `atomicAdd`, and a fullscreen pass colours it, so
+  the particle count is arithmetic rather than draw calls. Fade, simulate and draw go out in one
+  submit; the grid follows the window through `resizeCanvas`. Its self-check asserts an exact
+  splat count rather than eyeballing the picture.
+
+**Changed**
+
+- Examples 1–5 now carry a viewport meta and responsive CSS, so they lay out at the device width
+  on a phone instead of at 980px scaled down. Canvases take the width they are given and keep
+  their aspect ratio; the text-only examples wrap instead of scrolling sideways.
+- `index.html` leads with the tutorial and lists the two new examples.
+
 ## 0.4.0 — 2026-08-08
 
 Bug-fix release with two additions. Three of the fixes change behavior — read the first two if

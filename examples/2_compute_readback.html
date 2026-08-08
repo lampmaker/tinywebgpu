@@ -1,7 +1,24 @@
 <!DOCTYPE html>
 <!-- TinyWebGPU example 2: compute → storage buffer → readback. No canvas needed.
      Serve this folder (python3 -m http.server) and open /examples/2_compute_readback.html -->
-<body style="font:14px monospace; background:#111; color:#ddd">
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TinyWebGPU — compute readback</title>
+  <style>
+    body {
+      margin: 0; padding: 1rem; background: #111; color: #ddd;
+      font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      -webkit-text-size-adjust: 100%;
+    }
+    /* Wrap rather than scroll sideways: these examples print long lines. */
+    pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  </style>
+</head>
+
+<body>
   <pre id="out">running…</pre>
   <script type="module">
     import { WEBGPU } from '../tinywebgpu.js';
@@ -27,3 +44,5 @@
     window.__result = { ok: squares[5] === 25, msg: [...squares].join(',') };
   </script>
 </body>
+
+</html>

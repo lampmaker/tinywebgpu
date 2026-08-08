@@ -1,0 +1,1344 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TinyWebGPU — tutorial</title>
+  <meta name="description" content="A step-by-step tutorial for TinyWebGPU: from one fullscreen
+    shader to compute, atomics and a particle system. Every code box on the page really runs.">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff; --fg: #1b1b1f; --muted: #5c5c68; --line: #e3e3e8;
+      --card: #fafafb; --code-bg: #f6f6f8; --accent: #2f6df6; --accent-fg: #ffffff;
+      --warn-bg: #fff6e5; --warn-fg: #7a4b00; --err: #b3261e; --ok: #1b7f4b;
+      --canvas-bg: #0d0d12;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #131317; --fg: #e8e8ec; --muted: #9a9aa6; --line: #2a2a32;
+        --card: #1a1a20; --code-bg: #101015; --accent: #7aa2ff; --accent-fg: #10131c;
+        --warn-bg: #2c2413; --warn-fg: #e8c983; --err: #ff9d94; --ok: #6ee7a8;
+        --canvas-bg: #08080b;
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 4.2rem; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-text-size-adjust: 100%;
+    }
+    main {
+      max-width: 48rem; margin: 0 auto;
+      padding: 1.5rem 1rem calc(4rem + env(safe-area-inset-bottom));
+    }
+    h1 { font-size: clamp(1.7rem, 6vw, 2.3rem); margin: 0 0 .35rem; letter-spacing: -.02em; line-height: 1.15; }
+    h2 {
+      font-size: clamp(1.15rem, 4.4vw, 1.4rem); margin: 0 0 .5rem; letter-spacing: -.01em;
+      line-height: 1.25; scroll-margin-top: 4.2rem;
+    }
+    h2 .num {
+      display: inline-block; min-width: 1.9rem; color: var(--accent);
+      font-variant-numeric: tabular-nums; font-size: .85em;
+    }
+    h3 { font-size: 1rem; margin: 1.5rem 0 .4rem; }
+    p { margin: 0 0 .85rem; }
+    .lede { color: var(--muted); font-size: 1.03rem; }
+    a { color: var(--accent); }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .88em; background: var(--code-bg); border: 1px solid var(--line);
+      border-radius: 4px; padding: .08em .32em; overflow-wrap: anywhere;
+    }
+    pre.static {
+      background: var(--code-bg); border: 1px solid var(--line); border-radius: 9px;
+      padding: .8rem .9rem; overflow-x: auto;
+      font: .85rem/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    pre.static code { background: none; border: 0; padding: 0; font-size: inherit; }
+    .note, .warn {
+      border: 1px solid var(--line); border-left: 3px solid var(--accent);
+      background: var(--card); border-radius: 0 9px 9px 0;
+      padding: .7rem .9rem; margin: 0 0 .9rem; font-size: .93rem;
+    }
+    .warn { border-left-color: var(--warn-fg); background: var(--warn-bg); color: var(--warn-fg); }
+    .warn code { background: rgba(0, 0, 0, .06); border-color: transparent; }
+
+    /* ---- sticky contents ------------------------------------------------------------ */
+    nav.toc {
+      position: sticky; top: 0; z-index: 20; background: var(--bg);
+      border-bottom: 1px solid var(--line); padding: .5rem 1rem;
+      /* Full-bleed: it is a sibling of <main>, so it must not borrow main's padding. */
+      margin: 0;
+    }
+    nav.toc details { max-width: 48rem; margin: 0 auto; }
+    nav.toc summary {
+      cursor: pointer; font-size: .9rem; color: var(--muted); list-style: none;
+      padding: .25rem 0; min-height: 34px; display: flex; align-items: center; gap: .4rem;
+    }
+    nav.toc summary::-webkit-details-marker { display: none; }
+    nav.toc summary::before { content: "▸"; transition: transform .15s ease; }
+    nav.toc details[open] summary::before { transform: rotate(90deg); }
+    nav.toc ol {
+      margin: .4rem 0 .3rem; padding: 0 0 0 1.4rem; columns: 2; column-gap: 1.4rem;
+      font-size: .88rem;
+    }
+    nav.toc li { margin: .15rem 0; break-inside: avoid; }
+    nav.toc a { text-decoration: none; }
+    nav.toc a:hover { text-decoration: underline; }
+    @media (max-width: 34rem) { nav.toc ol { columns: 1; } }
+
+    /* ---- steps ---------------------------------------------------------------------- */
+    section.step { margin: 0 0 3rem; }
+    section.step > .body > :last-child { margin-bottom: 0; }
+
+    /* ---- live demo card ------------------------------------------------------------- */
+    .demo {
+      border: 1px solid var(--line); border-radius: 11px; background: var(--card);
+      margin: 1rem 0 .9rem; overflow: hidden;
+    }
+    .demo canvas {
+      display: block; width: 100%; height: auto; aspect-ratio: 16 / 9;
+      background: var(--canvas-bg); border-bottom: 1px solid var(--line);
+      touch-action: none;
+    }
+    .demo.square canvas { aspect-ratio: 1 / 1; max-height: 78vh; }
+    .demo textarea {
+      display: block; width: 100%; border: 0; border-bottom: 1px solid var(--line);
+      background: var(--code-bg); color: var(--fg); resize: vertical;
+      padding: .8rem .9rem;
+      /* 16px keeps iOS from zooming the viewport when the box takes focus. */
+      font: 16px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      tab-size: 2;
+    }
+    @media (min-width: 40rem) { .demo textarea { font-size: 13.5px; line-height: 1.55; } }
+    .demo textarea:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .bar {
+      display: flex; flex-wrap: wrap; gap: .45rem; align-items: center;
+      padding: .55rem .6rem; background: var(--card);
+    }
+    .bar button {
+      min-height: 40px; padding: .35rem .95rem; font: inherit; font-size: .88rem;
+      border-radius: 7px; border: 1px solid var(--line); background: var(--bg);
+      color: inherit; cursor: pointer;
+    }
+    .bar button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; font-weight: 600; }
+    .bar button:hover { border-color: var(--accent); }
+    .bar .status {
+      margin-left: auto; font: .8rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: var(--muted); padding-right: .3rem;
+    }
+    .bar .status.err { color: var(--err); }
+    .bar .status.ok { color: var(--ok); }
+    .demo pre.out {
+      margin: 0; padding: .75rem .9rem; border-top: 1px solid var(--line);
+      background: var(--code-bg); overflow-x: auto; max-height: 17rem; overflow-y: auto;
+      font: .82rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .demo pre.out:empty { display: none; }
+    .demo pre.out.err { color: var(--err); }
+    .try {
+      padding: .6rem .9rem; border-top: 1px solid var(--line); font-size: .88rem; color: var(--muted);
+    }
+    .try b { color: var(--fg); font-weight: 600; }
+    /* On a narrow screen the card takes the full width: the editor has to hold code at 16px
+       (anything smaller makes iOS zoom the page on focus), so every character counts. */
+    @media (max-width: 30rem) {
+      .demo {
+        margin-left: -1rem; margin-right: -1rem;
+        border-radius: 0; border-left: 0; border-right: 0;
+      }
+      .demo textarea { padding: .75rem .7rem; }
+      .demo pre.out, .bar, .try { padding-left: .7rem; padding-right: .7rem; }
+    }
+
+    #unsupported {
+      display: none; background: var(--warn-bg); color: var(--warn-fg);
+      border: 1px solid color-mix(in srgb, var(--warn-fg) 30%, transparent);
+      border-radius: 9px; padding: .85rem 1rem; margin: 0 0 1.5rem;
+    }
+    footer {
+      margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--line);
+      color: var(--muted); font-size: .92rem;
+    }
+    table { border-collapse: collapse; width: 100%; font-size: .9rem; margin: 0 0 .9rem; display: block; overflow-x: auto; }
+    th, td { border: 1px solid var(--line); padding: .4rem .55rem; text-align: left; vertical-align: top; }
+    th { background: var(--card); }
+  </style>
+</head>
+
+<body>
+  <nav class="toc">
+    <details id="toc">
+      <summary>Contents</summary>
+      <ol id="toclist"></ol>
+    </details>
+  </nav>
+
+  <main>
+    <h1>TinyWebGPU, step by step</h1>
+    <p class="lede">From one coloured pixel to a few hundred thousand particles. Every code box
+      below is live: edit it, press <b>Run</b>, and it recompiles against your actual GPU.</p>
+
+    <div id="unsupported">
+      <strong>WebGPU isn’t available in this browser.</strong> The text still reads fine, but no
+      box will run. You need Chrome/Edge 113+, Firefox 141+ (Windows) or Safari 26+, over https
+      or localhost.
+    </div>
+
+    <div class="note">
+      <p><b>How the boxes work.</b> Each one is a function body with three things already in
+        scope: <code>G</code> (an initialised TinyWebGPU), <code>canvas</code> (the one above the
+        code, when there is one) and <code>log(…)</code>, which writes to the output panel. In a
+        file of your own, those first lines would be:</p>
+      <pre class="static"><code>import { WEBGPU } from './tinywebgpu.js';
+const G = await WEBGPU().init(canvas.getContext('webgpu'));</code></pre>
+      <p style="margin-bottom:0">Everything else is ordinary code — <code>await</code> at the top
+        level included. Animation loops are stopped when a box is re-run or scrolls out of view,
+        so nothing keeps burning your battery further up the page.</p>
+    </div>
+    <section class="step" id="setup">
+      <h2><span class="num">01</span>Getting a device</h2>
+      <div class="body">
+        <p>Everything starts with one call. <code>init()</code> asks the browser for an adapter,
+          asks the adapter for a device with its own maximum buffer limits, and — if you hand it a
+          canvas context — configures that canvas for you.</p>
+        <pre class="static"><code>const G = await WEBGPU().init(canvas.getContext('webgpu'));  // with a canvas
+const G = await WEBGPU().init();                             // compute only</code></pre>
+        <p>That is the whole setup. There is no renderer to construct, no scene, no asset pipeline.
+          Here is what your machine reported:</p>
+        <div class="demo">
+          <script type="text/plain" class="code">
+            log('canvas format:', G.format);
+            log('max storage buffer:',
+                (G.device.limits.maxStorageBufferBindingSize / 1048576).toFixed(0), 'MB');
+            log('max invocations per workgroup:',
+                G.device.limits.maxComputeInvocationsPerWorkgroup);
+            log('max workgroups per dispatch:',
+                G.device.limits.maxComputeWorkgroupsPerDimension);
+            log('features:', [...G.features].join(', ') || '(only the defaults)');
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+        </div>
+        <p>Those limits are worth a glance now rather than later: they are the numbers that decide
+          how big a buffer you can bind and how many threads a workgroup can hold.</p>
+      </div>
+    </section>
+
+    <section class="step" id="first-pixels">
+      <h2><span class="num">02</span>Your first pixels</h2>
+      <div class="body">
+        <p>TinyWebGPU draws exactly one thing: a triangle big enough to cover the screen. You never
+          see it. You write a function called <code>frag</code> that turns a coordinate into a
+          colour, and the library generates the vertex shader and the plumbing around it.</p>
+        <p><code>uv</code> runs from <code>(0,0)</code> at the bottom-left to <code>(1,1)</code> at
+          the top-right. Everything else is up to you.</p>
+        <div class="demo">
+          <canvas></canvas>
+          <script type="text/plain" class="code">
+            const quad = await G.drawQuad({
+              frag: `
+                fn frag(uv: vec2<f32>) -> vec4<f32> {
+                  return vec4<f32>(uv.x, uv.y, 0.6, 1.0);
+                }`,
+            });
+
+            quad.run();
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> swap <code>uv.y</code> for <code>1.0 - uv.y</code> and watch
+            the gradient flip. Or return <code>vec4&lt;f32&gt;(step(0.5, uv.x))</code> for a hard
+            edge. Break the WGSL on purpose — the error tells you the line.</div>
+        </div>
+        <p><code>drawQuad</code> is a convenience wrapper: it builds the pipeline and gives you
+          <code>run()</code>, which uploads uniforms and draws in one call. The longer form,
+          <code>makeRender</code>, is the same thing without the wrapper.</p>
+      </div>
+    </section>
+
+    <section class="step" id="time">
+      <h2><span class="num">03</span>Uniforms, and making it move</h2>
+      <div class="body">
+        <p>A shader with no inputs can only ever draw one image. Uniforms are the inputs, and this
+          is where TinyWebGPU earns its keep. You declare them as a plain JS object:</p>
+        <pre class="static"><code>uniforms: { time: 'f32' }</code></pre>
+        <p>and the library generates the WGSL struct, binds it at
+          <code>@group(0) @binding(0)</code>, and gives you a setter that writes the right bytes at
+          the right offsets. Inside the shader they live on <code>UB</code>. There is nothing to
+          keep in sync by hand — the JS object <em>is</em> the layout.</p>
+        <div class="demo">
+          <canvas></canvas>
+          <script type="text/plain" class="code">
+            const quad = await G.drawQuad({
+              frag: `
+                fn frag(uv: vec2<f32>) -> vec4<f32> {
+                  let c = 0.5 + 0.5 * cos(UB.time + uv.xyx * 4.0
+                                          + vec3<f32>(0.0, 2.0, 4.0));
+                  return vec4<f32>(c, 1.0);
+                }`,
+              uniforms: { time: 'f32' },
+            });
+
+            const loop = t => {
+              quad.run({ time: t * 0.001 });
+              requestAnimationFrame(loop);
+            };
+            requestAnimationFrame(loop);
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> add <code>speed: 'f32'</code> to the uniforms, pass it in
+            <code>run()</code>, and multiply <code>UB.time</code> by it. Nothing else needs to
+            change — no struct to edit, no offsets to count.</div>
+        </div>
+        <p>Uniform types cover the usual ground: <code>f32</code>, <code>i32</code>,
+          <code>u32</code>, <code>vec2/3/4</code> of each, and <code>mat4x4&lt;f32&gt;</code>.
+          Vectors and matrices take arrays; scalars take numbers.</p>
+      </div>
+    </section>
+
+    <section class="step" id="resolution">
+      <h2><span class="num">04</span>Resolution, aspect and the pointer</h2>
+      <div class="body">
+        <p>Two things bite everyone once. First, a canvas has a CSS size and a backing-store size,
+          and they are not the same on a phone — <code>G.resizeCanvas()</code> sets the second from
+          the first times <code>devicePixelRatio</code> and hands back the pixel size, ready to
+          drop into a <code>vec2&lt;f32&gt;</code>. Second, <code>uv</code> is normalised, so
+          circles drawn in it come out as ellipses until you divide by the aspect ratio.</p>
+        <div class="demo">
+          <canvas></canvas>
+          <script type="text/plain" class="code">
+            const quad = await G.drawQuad({
+              frag: `
+                fn frag(uv: vec2<f32>) -> vec4<f32> {
+                  // square up the coordinates, so a circle stays a circle
+                  let a = UB.res.x / UB.res.y;
+                  let p = vec2<f32>((uv.x - 0.5) * a, uv.y - 0.5);
+                  let m = vec2<f32>((UB.mouse.x - 0.5) * a, UB.mouse.y - 0.5);
+
+                  let d = length(p - m);
+                  let glow = 0.04 / (d + 0.03);
+                  let rings = 0.5 + 0.5 * sin(d * 55.0 - UB.time * 3.0);
+                  let col = vec3<f32>(0.45, 0.72, 1.0) * glow
+                          + vec3<f32>(0.10, 0.13, 0.30) * rings;
+                  return vec4<f32>(col, 1.0);
+                }`,
+              uniforms: { res: 'vec2<f32>', mouse: 'vec2<f32>', time: 'f32' },
+            });
+
+            let mouse = [0.5, 0.5];
+            canvas.onpointermove = e => {
+              const r = canvas.getBoundingClientRect();
+              mouse = [(e.clientX - r.left) / r.width,
+                       1 - (e.clientY - r.top) / r.height];
+            };
+
+            const loop = t => {
+              const { width, height } = G.resizeCanvas(canvas);
+              quad.run({ res: [width, height], mouse, time: t * 0.001 });
+              requestAnimationFrame(loop);
+            };
+            requestAnimationFrame(loop);
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> touch or drag on the canvas — pointer events cover mouse and
+            touch alike. Then delete the <code>* a</code> on both lines to see the stretch you were
+            correcting.</div>
+        </div>
+        <div class="note"><code>resizeCanvas()</code> returns <code>changed</code> as well as the
+          size. Gate any reallocation you do — render targets, grids, buffers sized to the
+          screen — on that flag, or you will rebuild them sixty times a second.</div>
+      </div>
+    </section>
+
+    <section class="step" id="wgsl">
+      <h2><span class="num">05</span>It is just WGSL above your frag</h2>
+      <div class="body">
+        <p>Anything you put in the <code>frag</code> string before the <code>frag</code> function is
+          ordinary module-scope WGSL: helper functions, structs, constants. The library only
+          appends its own wrapper at the end. That is enough to do real work — here are two signed
+          distance functions and a smooth minimum, which is most of a raymarcher in eight lines.</p>
+        <div class="demo">
+          <canvas></canvas>
+          <script type="text/plain" class="code">
+            const quad = await G.drawQuad({
+              frag: `
+                fn sdBox(p: vec2<f32>, b: vec2<f32>) -> f32 {
+                  let d = abs(p) - b;
+                  return length(max(d, vec2<f32>(0.0))) + min(max(d.x, d.y), 0.0);
+                }
+                fn smin(a: f32, b: f32, k: f32) -> f32 {
+                  let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+                  return mix(b, a, h) - k * h * (1.0 - h);
+                }
+                fn frag(uv: vec2<f32>) -> vec4<f32> {
+                  let a = UB.res.x / UB.res.y;
+                  let p = vec2<f32>((uv.x - 0.5) * a, uv.y - 0.5) * 2.2;
+                  let t = UB.time;
+
+                  let ball = length(p - vec2<f32>(cos(t) * 0.5, sin(t) * 0.3)) - 0.22;
+                  let box = sdBox(p - vec2<f32>(cos(t * 0.7) * 0.5, 0.0),
+                                  vec2<f32>(0.22, 0.17));
+                  let d = smin(ball, box, 0.28);      // they melt into each other
+
+                  let fill = smoothstep(0.02, -0.02, d);
+                  let edge = smoothstep(0.02, 0.0, abs(d));
+                  let col = mix(vec3<f32>(0.05, 0.06, 0.11),
+                                vec3<f32>(0.16, 0.42, 0.95), fill)
+                          + vec3<f32>(0.85, 0.93, 1.0) * edge * 0.9;
+                  return vec4<f32>(col, 1.0);
+                }`,
+              uniforms: { res: 'vec2<f32>', time: 'f32' },
+            });
+
+            const loop = t => {
+              const { width, height } = G.resizeCanvas(canvas);
+              quad.run({ res: [width, height], time: t * 0.001 });
+              requestAnimationFrame(loop);
+            };
+            requestAnimationFrame(loop);
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> change the <code>0.28</code> in <code>smin</code> to
+            <code>0.0</code> — the shapes stop melting and just overlap.</div>
+        </div>
+      </div>
+    </section>
+    <section class="step" id="compute">
+      <h2><span class="num">06</span>Your first compute pass</h2>
+      <div class="body">
+        <p>No canvas from here to step 8 — compute needs no pixels at all. A compute pipeline takes
+          two strings: declarations, and the body of the entry point. The body gets
+          <code>gid</code> (global invocation id), <code>lid</code> (local) and <code>wid</code>
+          (workgroup), and it runs once per thread.</p>
+        <p>Resources are the second schema. <code>{ data: 'array&lt;f32&gt;' }</code> becomes a
+          storage buffer binding, declared after the uniform block, in the order you wrote it.</p>
+        <div class="demo">
+          <script type="text/plain" class="code">
+            const p = await G.makeCompute('', `
+                let i = gid.x;
+                if (i >= UB.n) { return; }      // the last workgroup overhangs
+                data[i] = f32(i) * f32(i);
+              `,
+              { n: 'u32' },                     // uniforms  -> UB
+              { data: 'array<f32>' },           // resources -> storage buffer
+              { wg: [64, 1, 1] });              // threads per workgroup
+
+            const N = 16;
+            const buf = G.createStorageBuffer(N * 4);
+            p.setResources({ data: buf.b });
+            p.setUniforms({ n: N });
+            p.dispatch(Math.ceil(N / 64));      // 1 workgroup of 64 threads
+
+            log('squares:', await buf.r(N * 4, 0, Float32Array));
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> raise <code>N</code> to 100. One workgroup of 64 threads is
+            no longer enough, and <code>Math.ceil</code> quietly asks for two — which is exactly
+            why the guard on the first line has to be there.</div>
+        </div>
+        <p><code>buf.r()</code> copies the buffer back to the CPU and waits for the GPU to catch
+          up. It is a debugging tool, and it is the slowest thing on this page. Step 11 shows what
+          to do instead in a real loop.</p>
+      </div>
+    </section>
+
+    <section class="step" id="dispatch">
+      <h2><span class="num">07</span>Sizing a dispatch — and counting primes</h2>
+      <div class="body">
+        <p>A dispatch asks for a number of <em>workgroups</em>, not threads. With
+          <code>wg: [64,1,1]</code>, one workgroup is 64 threads, so covering <code>N</code> items
+          means <code>Math.ceil(N / 64)</code> workgroups — and the last one overhangs, which is
+          what the bounds check is for. Get that wrong and you write past the end of a buffer.</p>
+        <p>Primality by trial division is a fair demonstration of what changes on a GPU: every
+          number is independent, so a hundred thousand of them can be tested at once. The same loop
+          runs on this thread underneath, for scale. Note what the GPU number includes — the
+          dispatch, the readback stall, and a fixed setup cost that only starts to look small once
+          <code>N</code> is large.</p>
+        <div class="demo">
+          <script type="text/plain" class="code">
+            const N = 200000;      // edit me, then press Run
+            const WG = 64;
+
+            const primes = await G.makeCompute('', `
+                let n = gid.x;
+                if (n >= UB.n || n < 2u) { return; }
+                var d = 2u;
+                while (d * d <= n) {
+                  if (n % d == 0u) { return; }   // composite: this thread is done
+                  d = d + 1u;
+                }
+                atomicAdd(&count.n, 1u);
+              `,
+              { n: 'u32' },
+              { count: 'struct Count { n: atomic<u32> }' },
+              { wg: [WG, 1, 1] });
+
+            const count = G.createStorageBuffer(4);
+            primes.setResources({ count: count.b });
+            primes.setUniforms({ n: N });
+
+            const t0 = performance.now();
+            primes.dispatch(Math.ceil(N / WG));
+            const [gpu] = await count.r(4, 0, Uint32Array);
+            const gpuMs = performance.now() - t0;
+
+            const t1 = performance.now();
+            let cpu = 0;
+            for (let n = 2; n < N; n++) {
+              let isPrime = true;
+              for (let d = 2; d * d <= n; d++) {
+                if (n % d === 0) { isPrime = false; break; }
+              }
+              if (isPrime) cpu++;
+            }
+            const cpuMs = performance.now() - t1;
+
+            log('workgroups dispatched:', Math.ceil(N / WG),
+                'threads:', Math.ceil(N / WG) * WG);
+            log('primes below', N + ':', gpu,
+                gpu === cpu ? '— the CPU agrees' : '— MISMATCH, cpu says ' + cpu);
+            log('gpu', gpuMs.toFixed(1) + 'ms', '(including the readback stall)');
+            log('cpu', cpuMs.toFixed(1) + 'ms');
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> push <code>N</code> to a million. On real GPU hardware the
+            dispatch barely notices while the CPU line grows with it; if your browser has fallen
+            back to software rendering, expect the opposite, since both are then the same CPU.
+            (Be patient — the CPU loop blocks the page while it runs.)</div>
+        </div>
+        <div class="note">Every thread that finds a prime does an <code>atomicAdd</code> on the same
+          counter, which is the slow way round. Step 11 shows the version that counts in a register
+          first and touches the shared counter once.</div>
+      </div>
+    </section>
+
+    <section class="step" id="buffers">
+      <h2><span class="num">08</span>A storage buffer, driving pixels</h2>
+      <div class="body">
+        <p>Compute and render are not separate worlds. A buffer written by a compute pass can be
+          read by a fragment shader in the same frame, without ever going back to the CPU — the
+          data simply stays where it was made.</p>
+        <p>Note that the two pipelines declare the same buffer independently, each with the type it
+          needs. Bindings are per-pipeline; the buffer does not care.</p>
+        <div class="demo">
+          <canvas></canvas>
+          <script type="text/plain" class="code">
+            const W = 192, H = 108;
+
+            const field = await G.makeCompute('', `
+                let x = gid.x;
+                let y = gid.y;
+                if (x >= ${W}u || y >= ${H}u) { return; }
+                let p = vec2<f32>(f32(x) / ${W}.0, f32(y) / ${H}.0) * 6.0;
+                heat[y * ${W}u + x] =
+                    sin(p.x + UB.time) * cos(p.y * 1.3 - UB.time * 0.7)
+                  + 0.5 * sin(length(p - 3.0) * 4.0 - UB.time * 2.0);
+              `,
+              { time: 'f32' }, { heat: 'array<f32>' }, { wg: [8, 8, 1] });
+
+            const show = await G.makeRender(`
+                fn frag(uv: vec2<f32>) -> vec4<f32> {
+                  let x = min(u32(uv.x * ${W}.0), ${W}u - 1u);
+                  let y = min(u32(uv.y * ${H}.0), ${H}u - 1u);
+                  let v = heat[y * ${W}u + x];
+                  let warm = vec3<f32>(1.0, 0.55, 0.25);
+                  let cool = vec3<f32>(0.20, 0.45, 1.0);
+                  return vec4<f32>(mix(cool, warm, v * 0.5 + 0.5) * abs(v), 1.0);
+                }`,
+              {}, { heat: 'array<f32>' });
+
+            const buf = G.createStorageBuffer(W * H * 4);
+            field.setResources({ heat: buf.b });
+            show.setResources({ heat: buf.b });
+
+            const loop = t => {
+              field.setUniforms({ time: t * 0.001 });
+              field.dispatch(Math.ceil(W / 8), Math.ceil(H / 8));
+              show.drawTo();
+              requestAnimationFrame(loop);
+            };
+            requestAnimationFrame(loop);
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> raise <code>W</code> and <code>H</code> to 384 and 216. The
+            dispatch maths adapts on its own, because it is written in terms of the size.</div>
+        </div>
+        <p>This loop submits twice per frame — once for the dispatch, once for the draw. Step 10
+          fixes that.</p>
+      </div>
+    </section>
+
+    <section class="step" id="pingpong">
+      <h2><span class="num">09</span>Ping-pong: state that lives on the GPU</h2>
+      <div class="body">
+        <p>A simulation needs to read the previous state while writing the next one, and it cannot
+          do both to the same buffer — threads would race each other. The fix is two buffers,
+          swapped every step. Conway's life is the smallest honest example.</p>
+        <div class="demo">
+          <canvas></canvas>
+          <script type="text/plain" class="code">
+            const W = 192, H = 108;
+
+            const step = await G.makeCompute(`
+                fn idx(x: i32, y: i32) -> u32 {          // wraps at the edges
+                  return u32(((y + ${H}) % ${H}) * ${W} + ((x + ${W}) % ${W}));
+                }`, `
+                let x = i32(gid.x);
+                let y = i32(gid.y);
+                if (x >= ${W} || y >= ${H}) { return; }
+                var n = 0u;
+                for (var dy = -1; dy <= 1; dy++) {
+                  for (var dx = -1; dx <= 1; dx++) {
+                    if (dx != 0 || dy != 0) { n += src[idx(x + dx, y + dy)]; }
+                  }
+                }
+                let alive = src[idx(x, y)] == 1u;
+                dst[idx(x, y)] = select(select(0u, 1u, n == 3u),
+                                        select(0u, 1u, n == 2u || n == 3u), alive);
+              `,
+              {}, { src: 'array<u32>', dst: 'array<u32>' }, { wg: [8, 8, 1] });
+
+            const show = await G.makeRender(`
+                fn frag(uv: vec2<f32>) -> vec4<f32> {
+                  let x = min(u32(uv.x * ${W}.0), ${W}u - 1u);
+                  let y = min(u32((1.0 - uv.y) * ${H}.0), ${H}u - 1u);
+                  let c = f32(cells[y * ${W}u + x]);
+                  return vec4<f32>(c * 0.75, c * 0.95, c * 0.6 + 0.05, 1.0);
+                }`,
+              {}, { cells: 'array<u32>' });
+
+            // createStorageBuffer takes a TypedArray to size *and* fill in one call
+            let a = G.createStorageBuffer(
+              Uint32Array.from({ length: W * H }, () => Math.random() < 0.32 ? 1 : 0));
+            let b = G.createStorageBuffer(W * H * 4);
+
+            const loop = () => {
+              step.resources = { src: a.b, dst: b.b };
+              step.dispatch(Math.ceil(W / 8), Math.ceil(H / 8));
+              show.resources = { cells: b.b };
+              show.drawTo();
+              [a, b] = [b, a];                 // the ping-pong
+              requestAnimationFrame(loop);
+            };
+            requestAnimationFrame(loop);
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> change <code>0.32</code> to <code>0.08</code> for a sparse
+            start, or to <code>0.6</code> for a crowded one that mostly dies.</div>
+        </div>
+        <div class="note">Assigning <code>p.resources = {...}</code> rebuilds the bind group, and
+          it is compared by reference — passing the same object again is a no-op, passing a fresh
+          one forces the rebuild. In a hot loop, build both bind groups once and alternate.</div>
+      </div>
+    </section>
+    <section class="step" id="frames">
+      <h2><span class="num">10</span>One submit per frame</h2>
+      <div class="body">
+        <p>Every <code>dispatch()</code> and <code>drawTo()</code> so far submitted work to the
+          queue on its own. That is fine for one or two, and wasteful for ten.
+          <code>beginFrame()</code> opens a single encoder; everything recorded until
+          <code>endFrame()</code> goes to the GPU in one submit.</p>
+        <p>It buys something subtler too. Inside a frame, uniform writes are <em>staged</em> and
+          copied at the point in the frame where you made them — so three dispatches can each see
+          their own values, in one submit. Without that, they would all see whichever write landed
+          last. Here is the proof: three dispatches, three different values, one submit.</p>
+        <div class="demo">
+          <script type="text/plain" class="code">
+            const p = await G.makeCompute('', `
+                let i = gid.x;
+                if (i >= 4u) { return; }
+                out[UB.slot * 4u + i] = UB.value;   // each dispatch fills one row
+              `,
+              { slot: 'u32', value: 'f32' }, { out: 'array<f32>' }, { wg: [4, 1, 1] });
+
+            const buf = G.createStorageBuffer(3 * 4 * 4);
+            p.setResources({ out: buf.b });
+
+            G.beginFrame();                         // one encoder…
+            p.setUniforms({ slot: 0, value: 1.5 });
+            p.dispatch(1);
+            p.setUniforms({ slot: 1, value: 2.5 });
+            p.dispatch(1);
+            p.setUniforms({ slot: 2, value: 3.5 });
+            p.dispatch(1);
+            G.endFrame();                           // …one submit
+
+            log(await buf.r(12 * 4, 0, Float32Array));
+            log('');
+            log('Three rows, three values. Each dispatch saw the uniforms');
+            log('written just before it, inside a single submission.');
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> move all three <code>setUniforms</code> calls above
+            <code>beginFrame()</code>. Now the writes happen before the frame, every dispatch reads
+            the same struct, and all twelve numbers come back as 3.5.</div>
+        </div>
+        <p>The same applies to a real loop: fade, simulate and draw belong in one frame, and a
+          simulation that wants four steps per displayed frame just dispatches four times before
+          drawing.</p>
+        <pre class="static"><code>G.beginFrame();
+for (let i = 0; i &lt; STEPS; i++) { sim.dispatch(gx, gy); [a, b] = [b, a]; }
+show.drawTo();
+G.endFrame();</code></pre>
+        <p>There is a tighter variant, <code>beginCompute()</code>, which also keeps a single
+          compute <em>pass</em> open across chained dispatches — worth reaching for when you are
+          running the same kernel dozens of times in a row. Outside a frame it owns the submit
+          itself, so a chain of dispatches is self-contained.</p>
+      </div>
+    </section>
+
+    <section class="step" id="atomics">
+      <h2><span class="num">11</span>Atomics, reduction, and not stalling</h2>
+      <div class="body">
+        <p>Thousands of threads with one answer between them need an atomic. The trap is using it
+          per item: every thread queueing on the same address serialises the very thing you
+          parallelised. The fix is always the same shape — accumulate privately, publish once.</p>
+        <p>Monte Carlo π is the classic demonstration. Throw darts at the unit square; the fraction
+          landing inside the quarter circle is π/4. Each thread runs its own random stream, counts
+          its own hits in a register, and does exactly one <code>atomicAdd</code> at the end.</p>
+        <div class="demo">
+          <script type="text/plain" class="code">
+            const THREADS = 16384, K = 16, WG = 64, ROUNDS = 16;
+
+            const darts = await G.makeCompute(`
+                fn rnd(state: ptr<function, u32>) -> f32 {
+                  let x = *state * 747796405u + 2891336453u;
+                  *state = x;
+                  let w = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+                  return f32((w >> 22u) ^ w) * 2.3283064365386963e-10;
+                }`, `
+                let i = gid.x;
+                if (i >= UB.threads) { return; }
+                var seed = i * 2654435761u + UB.round * 2246822519u + 1u;
+
+                var hits = 0u;                       // private tally…
+                for (var k = 0u; k < UB.k; k = k + 1u) {
+                  let x = rnd(&seed);
+                  let y = rnd(&seed);
+                  if (x * x + y * y <= 1.0) { hits = hits + 1u; }
+                }
+                atomicAdd(&stats.hits, hits);        // …one shared write
+                atomicAdd(&stats.threads, 1u);
+              `,
+              { threads: 'u32', round: 'u32', k: 'u32' },
+              { stats: 'struct Stats { hits: atomic<u32>, threads: atomic<u32> }' },
+              { wg: [WG, 1, 1] });
+
+            const stats = G.createStorageBuffer(8);
+            darts.setResources({ stats: stats.b });
+
+            const t0 = performance.now();
+            G.beginCompute();                        // all rounds, one pass, one submit
+            darts.use();
+            for (let r = 0; r < ROUNDS; r++) {
+              darts.setUniforms({ threads: THREADS, round: r, k: K });
+              darts.dispatchOn(null, THREADS / WG);
+            }
+            G.endCompute();
+
+            const [hits, threads] = await stats.r(8, 0, Uint32Array);
+            const n = threads * K;
+            const est = 4 * hits / n;
+
+            log('darts thrown:', n, 'in', (performance.now() - t0).toFixed(0) + 'ms');
+            log('estimate:', est.toFixed(6), '   actual π:', Math.PI.toFixed(6));
+            log('error:', Math.abs(est - Math.PI).toExponential(2),
+                '  vs 1/√N =', (1 / Math.sqrt(n)).toExponential(2));
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> move <code>atomicAdd(&amp;stats.hits, 1u)</code> inside the
+            dart loop and delete the private tally. Same answer, far more contention. Then raise
+            <code>ROUNDS</code> and watch the error fall like 1/√N — a hundred times the darts for
+            each new decimal place.</div>
+        </div>
+        <div class="warn">
+          <b><code>.r()</code> stalls.</b> It waits for the GPU to finish and for the result to be
+          mapped back — the one thing you must not do inside a frame loop. Keep counters on the GPU
+          and sample them occasionally without awaiting in the loop, the way
+          <a href="examples/6_pi.html">example 6</a> does. Reading during an open frame is worse
+          still: it sees pre-frame data, and says so in the console.
+        </div>
+      </div>
+    </section>
+
+    <section class="step" id="indirect">
+      <h2><span class="num">12</span>Letting the GPU decide the workgroup count</h2>
+      <div class="body">
+        <p>Sometimes the amount of work is only known once the GPU has done some. Reading a count
+          back to the CPU just to size the next dispatch throws away the whole frame's pipelining.
+          Indirect dispatch keeps it on the GPU: one kernel writes <code>[x,y,z]</code> into a
+          buffer, and the next dispatch reads its own size from there.</p>
+        <div class="demo">
+          <script type="text/plain" class="code">
+            const N = 1000;
+
+            // 1. keep the multiples of 7, compacted, and count them
+            const filter = await G.makeCompute('', `
+                let i = gid.x;
+                if (i >= ${N}u) { return; }
+                if (i % 7u == 0u) {
+                  let slot = atomicAdd(&counters.n, 1u);   // returns the OLD value:
+                  survivors[slot] = i;                     // a unique slot per thread
+                }
+              `, {}, {
+                counters: 'struct Counters { n: atomic<u32> }',
+                survivors: 'array<u32>',
+              }, { wg: [64, 1, 1] });
+
+            // 2. turn that count into dispatch arguments
+            const prep = await G.makeCompute('', `
+                if (gid.x == 0u) {
+                  args[0] = (counters.n + 63u) / 64u;      // workgroups of 64
+                  args[1] = 1u;
+                  args[2] = 1u;
+                }
+              `, {}, {
+                counters: 'struct Counters { n: u32 }',
+                args: 'array<u32>',
+              }, { wg: [1, 1, 1] });
+
+            // 3. run over exactly the survivors, sized by the GPU
+            const sum = await G.makeCompute('', `
+                let i = gid.x;
+                if (i < counters.n) { atomicAdd(&total.v, survivors[i]); }
+              `, {}, {
+                counters: 'struct C2 { n: u32 }',
+                survivors: 'array<u32>',
+                total: 'struct Total { v: atomic<u32> }',
+              }, { wg: [64, 1, 1] });
+
+            const counters = G.createStorageBuffer(4);
+            const survivors = G.createStorageBuffer(N * 4);
+            const total = G.createStorageBuffer(4);
+            const indirect = G.createDispatchIndirectBuffer();
+
+            filter.setResources({ counters: counters.b, survivors: survivors.b });
+            prep.setResources({ counters: counters.b, args: indirect.b });
+            sum.setResources({ counters: counters.b, survivors: survivors.b,
+                               total: total.b });
+
+            G.beginFrame();                       // three kernels, one submit
+            filter.dispatch(Math.ceil(N / 64));
+            prep.dispatch(1);
+            sum.dispatchIndirect(indirect.b, 0);  // size came from the GPU
+            G.endFrame();
+
+            const [found] = await counters.r(4, 0, Uint32Array);
+            const [added] = await total.r(4, 0, Uint32Array);
+            log('multiples of 7 below', N + ':', found, '(expected 143)');
+            log('their sum:', added, '(expected 71071)');
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> change <code>7u</code> to <code>3u</code>. Three times the
+            survivors, three times the workgroups in step 3 — and not a line of JS knew about
+            it.</div>
+        </div>
+        <p>This is the wavefront pattern in miniature: cull, compact, count, and run the next stage
+          over what is left. It is how particle systems retire dead particles and how ray tracers
+          keep only the rays still in flight.</p>
+      </div>
+    </section>
+
+    <section class="step" id="textures">
+      <h2><span class="num">13</span>Textures and samplers</h2>
+      <div class="body">
+        <p>Pixels get in two ways: raw bytes with <code>writeTexture</code>, or anything the
+          browser can decode with <code>loadTexture</code> — a URL, a <code>Blob</code>, an
+          <code>&lt;img&gt;</code>, a <code>&lt;canvas&gt;</code>, even a <code>&lt;video&gt;</code>.
+          Both give you a texture you can declare as a resource and sample.</p>
+        <div class="demo">
+          <canvas></canvas>
+          <script type="text/plain" class="code">
+            // a 4x4 image, straight from bytes — row 0 is the bottom (v = 0)
+            const tex = G.createTexture2D(4, 4);
+            const px = new Uint8Array(4 * 4 * 4);
+            for (let i = 0; i < 16; i++) {
+              px[i * 4 + 0] = (i % 4) * 85;
+              px[i * 4 + 1] = Math.floor(i / 4) * 85;
+              px[i * 4 + 2] = 220 - i * 12;
+              px[i * 4 + 3] = 255;
+            }
+            G.writeTexture(tex, px);
+
+            const quad = await G.drawQuad({
+              frag: `
+                fn frag(uv: vec2<f32>) -> vec4<f32> {
+                  let p = uv * 2.0 + vec2<f32>(UB.time * 0.06, 0.0);
+                  return textureSample(img, samp, p);
+                }`,
+              uniforms: { time: 'f32' },
+              resources: { img: 'texture_2d<f32>', samp: 'sampler' },
+            });
+
+            quad.setResources({
+              img: tex,                                     // textures bind directly
+              samp: G.createSampler({ magFilter: 'nearest', wrapU: 'repeat',
+                                      wrapV: 'repeat' }),
+            });
+
+            const loop = t => { quad.run({ time: t * 0.001 }); requestAnimationFrame(loop); };
+            requestAnimationFrame(loop);
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> switch <code>magFilter</code> to <code>'linear'</code> —
+            sixteen texels become a smooth gradient. Or replace the whole texture with
+            <code>const tex = await G.loadTexture('https://…/some.png');</code></div>
+        </div>
+        <p>Textures come back out too: <code>await G.readTexture(tex)</code> returns tightly packed
+          rows, typed from the format, with the 256-byte row padding WebGPU demands already
+          stripped. Like buffer readback, it stalls — treat it as a debugging and export tool.</p>
+      </div>
+    </section>
+    <section class="step" id="particles">
+      <h2><span class="num">14</span>Putting it together: particles</h2>
+      <div class="body">
+        <p>TinyWebGPU has no vertex buffers and no point sprites, which sounds like a problem for a
+          particle system and turns out to be the interesting part. Instead of drawing N points,
+          the simulation <em>splats</em> each particle into a density grid with one
+          <code>atomicAdd</code>, and a fullscreen pass colours the grid. The particle count stops
+          being a draw-call problem and becomes arithmetic.</p>
+        <p>Three passes, one submit: fade the grid (which doubles as the clear, and leaves trails),
+          integrate and splat, then colour. Everything you have read so far is in here.</p>
+        <div class="demo">
+          <canvas></canvas>
+          <script type="text/plain" class="code">
+            const N = 60000, WG = 64;
+            const { width, height } = G.resizeCanvas(canvas);
+            const gw = Math.round(width / 2), gh = Math.round(height / 2);
+            const cells = gw * gh, aspect = width / height;
+
+            // 1. fade — bound as plain u32: only this pass writes it
+            const fade = await G.makeCompute('', `
+                let i = gid.x;
+                if (i >= UB.cells) { return; }
+                grid[i] = grid[i] * 232u / 256u;
+              `,
+              { cells: 'u32' }, { grid: 'array<u32>' }, { wg: [256, 1, 1] });
+
+            // 2. simulate and splat — world space is x in [-aspect, aspect], y in [-1, 1]
+            const sim = await G.makeCompute(`
+                struct Particle {
+                  pos: vec2<f32>,
+                  vel: vec2<f32>,
+                }`, `
+                let i = gid.x;
+                if (i >= UB.n) { return; }
+                var p = parts[i];
+
+                let d = UB.attract - p.pos;
+                let r2 = dot(d, d) + 0.02;          // softened: no singularity
+                let inv = inverseSqrt(r2);
+                let dir = d * inv;
+                let tang = vec2<f32>(-dir.y, dir.x);  // perpendicular -> orbits
+
+                p.vel += (dir * min(UB.pull / r2, 50.0) + tang * 1.5 * inv) * UB.dt;
+                p.vel *= 0.99;
+                p.pos += p.vel * UB.dt;
+
+                let lim = vec2<f32>(UB.aspect, 1.0);
+                p.pos = clamp(p.pos, -lim, lim);
+                parts[i] = p;
+
+                let uv = (p.pos / lim) * 0.5 + vec2<f32>(0.5);
+                let cx = min(u32(uv.x * f32(UB.gw)), UB.gw - 1u);
+                let cy = min(u32(uv.y * f32(UB.gh)), UB.gh - 1u);
+                atomicAdd(&grid[cy * UB.gw + cx], 1u);   // the whole "draw call"
+              `,
+              { attract: 'vec2<f32>', dt: 'f32', aspect: 'f32', pull: 'f32',
+                n: 'u32', gw: 'u32', gh: 'u32' },
+              { parts: 'array<Particle>', grid: 'array<atomic<u32>>' },
+              { wg: [WG, 1, 1] });
+
+            // 3. colour the grid
+            const draw = await G.makeRender(`
+                fn frag(uv: vec2<f32>) -> vec4<f32> {
+                  let cx = min(u32(uv.x * f32(UB.gw)), UB.gw - 1u);
+                  let cy = min(u32(uv.y * f32(UB.gh)), UB.gh - 1u);
+                  let b = 1.0 - exp(-f32(grid[cy * UB.gw + cx]) * 0.3);
+                  return vec4<f32>(mix(vec3<f32>(0.03, 0.02, 0.09),
+                                       vec3<f32>(1.0, 0.5, 0.42), b)
+                                   + vec3<f32>(b * b * b * 0.6), 1.0);
+                }`,
+              { gw: 'u32', gh: 'u32' }, { grid: 'array<u32>' });
+
+            // 4 floats per particle: pos.xy, vel.xy — a spinning disc to start
+            const init = new Float32Array(N * 4);
+            for (let i = 0; i < N; i++) {
+              const th = Math.random() * 6.2832, r = Math.sqrt(Math.random()) * 0.8;
+              const x = Math.cos(th) * r * aspect, y = Math.sin(th) * r;
+              init.set([x, y, -y * 0.5, x * 0.5], i * 4);
+            }
+            const parts = G.createStorageBuffer(init);
+            const grid = G.createStorageBuffer(cells * 4);
+            fade.setResources({ grid: grid.b });
+            sim.setResources({ parts: parts.b, grid: grid.b });
+            draw.setResources({ grid: grid.b });
+
+            let attract = [0, 0], pointer = false;
+            canvas.onpointermove = e => {
+              const r = canvas.getBoundingClientRect();
+              attract = [((e.clientX - r.left) / r.width * 2 - 1) * aspect,
+                         -((e.clientY - r.top) / r.height * 2 - 1)];
+              pointer = true;
+            };
+
+            const loop = t => {
+              if (!pointer) attract = [Math.cos(t * 0.0005) * 0.6 * aspect,
+                                       Math.sin(t * 0.0007) * 0.6];
+              G.beginFrame();
+              fade.setUniforms({ cells });
+              fade.dispatch(Math.ceil(cells / 256));
+              sim.setUniforms({ attract, dt: 1 / 60, aspect, pull: 1.0, n: N, gw, gh });
+              sim.dispatch(Math.ceil(N / WG));
+              draw.setUniforms({ gw, gh });
+              draw.drawTo();
+              G.endFrame();
+              requestAnimationFrame(loop);
+            };
+            requestAnimationFrame(loop);
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> move the pointer over the canvas. Then make
+            <code>pull</code> negative for a repeller, or raise <code>N</code> to 400000 —
+            it is one number, and nothing else in the loop changes.</div>
+        </div>
+        <p>The particles here stick when they reach the wall, because <code>clamp</code> is one
+          line and a bounce is four. <a href="examples/7_particles.html">Example 7</a> is the same
+          program with the bounce, a resizable grid, and controls.</p>
+      </div>
+    </section>
+
+    <section class="step" id="edges">
+      <h2><span class="num">15</span>Sharp edges</h2>
+      <div class="body">
+        <p>The handful of things that will otherwise cost you an evening.</p>
+        <h3>A resource your shader never mentions disappears</h3>
+        <p>Pipelines are built with <code>layout: 'auto'</code>, which strips bindings nothing
+          references. Declare <code>debug: 'array&lt;f32&gt;'</code>, comment out the line that
+          writes to it, and the binding is gone — the library warns in the console and carries on.
+          If a resource seems unbound, check that the shader still uses its name.</p>
+        <h3>vec3 is not three floats</h3>
+        <p><code>vec3&lt;f32&gt;</code> aligns to 16 bytes but occupies 12, so a scalar declared
+          after one packs into its tail. The generated struct follows WGSL's rules exactly, which
+          is the point of declaring uniforms as a schema rather than counting offsets — but it
+          means the order you declare them in changes the layout. When in doubt, put the wide types
+          first.</p>
+        <h3>Readback stalls, and inside a frame it lies</h3>
+        <p><code>.r()</code> and <code>readTexture()</code> wait for the GPU. Called during an open
+          frame they return pre-frame data and warn. Finish the frame first, and keep them out of
+          your render loop.</p>
+        <h3>Format has to match the target</h3>
+        <p><code>makeRender</code> defaults to the canvas format. Drawing to an offscreen texture
+          in a different format needs <code>{ format: 'rgba8unorm' }</code> — or whatever you
+          created — or the pipeline will not match the attachment.</p>
+        <h3>Turn on the warnings while you build</h3>
+        <p><code>G.debug = true</code> reports uniform writes that overflow a field or push a
+          non-integer into an integer one. WGSL compile errors always throw, with the offending
+          source line printed.</p>
+      </div>
+    </section>
+
+    <section class="step" id="shipping">
+      <h2><span class="num">16</span>Shipping it</h2>
+      <div class="body">
+        <p>There is no build step. Copy <code>tinywebgpu.js</code> next to your HTML and import it.
+          Two things to know:</p>
+        <ul>
+          <li><b>Serve it over http.</b> ES modules and WebGPU both need a real origin —
+            <code>python3 -m http.server</code> is enough. Opening the file from disk will
+            not work.</li>
+          <li><b>Ship the minified build if you care.</b> <code>tinywebgpu.min.js</code> is about
+            18&nbsp;KB, 7&nbsp;KB gzipped. It is console-free: errors still throw with their
+            messages, but the warnings and the pretty compile-error log are stripped. Develop
+            against the readable file, switch at the end.</li>
+        </ul>
+        <p>On GitHub Pages, keep the empty <code>.nojekyll</code> file at the root — without it,
+          Jekyll ignores directories beginning with an underscore and can quietly drop files.</p>
+        <h3>Where to go next</h3>
+        <ul>
+          <li><a href="examples/6_pi.html">Example 6</a> — Monte Carlo π, with the density grid
+            drawn and a non-blocking readback.</li>
+          <li><a href="examples/7_particles.html">Example 7</a> — the particle system with bouncing
+            walls, a grid that follows the window, and up to 800k particles.</li>
+          <li><a href="examples/4_indirect.html">Example 4</a> — indirect dispatch on its own.</li>
+          <li><a href="https://github.com/lampmaker/tinywebgpu/blob/main/API.md">API.md</a> — the
+            complete surface, including the escape hatches for when the schema is not enough.</li>
+        </ul>
+        <p>And when the wrapper stops helping, every raw handle is still there:
+          <code>G.device</code>, <code>G.context</code>, <code>p.pipeline</code>. Nothing here
+          stops you from dropping to plain WebGPU for one pass and coming back.</p>
+      </div>
+    </section>
+
+    <footer>
+      <a href="index.html">Demos</a> ·
+      <a href="https://github.com/lampmaker/tinywebgpu">Source</a> ·
+      <a href="https://github.com/lampmaker/tinywebgpu#readme">README</a> ·
+      <a href="https://github.com/lampmaker/tinywebgpu/blob/main/API.md">API reference</a>
+      · MIT licensed.
+    </footer>
+  </main>
+
+  <script type="module">
+    import { WEBGPU } from './tinywebgpu.js';
+
+    const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor;
+    const supported = !!navigator.gpu;
+    if (!supported) document.getElementById('unsupported').style.display = 'block';
+
+    // One device for the whole page. A device per demo would be tidier in theory and a lot of
+    // memory in practice, so the demos share one and the canvas context is swapped in as each
+    // takes the stage — which is why only one canvas demo animates at a time.
+    let G = null, initPromise = null;
+    const configured = new WeakSet();
+
+    const getG = () => (initPromise ??= WEBGPU().init());
+
+    const useCanvas = canvas => {
+      if (!canvas) return;
+      const ctx = canvas.getContext('webgpu');
+      if (!configured.has(canvas)) {
+        ctx.configure({ device: G.device, format: G.format, alphaMode: 'opaque' });
+        configured.add(canvas);
+      }
+      G.context = ctx;
+    };
+
+    const fmt = v => {
+      if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(4).replace(/0+$/, '');
+      if (typeof v === 'string') return v;
+      if (ArrayBuffer.isView(v)) return `[${[...v].map(fmt).join(', ')}]`;
+      if (Array.isArray(v)) return `[${v.map(fmt).join(', ')}]`;
+      try { return JSON.stringify(v); } catch { return String(v); }
+    };
+
+    const demos = [];
+    let activeCanvasDemo = null;
+
+    class Demo {
+      constructor(root) {
+        this.root = root;
+        this.canvas = root.querySelector('canvas');
+        this.editor = root.querySelector('textarea');
+        this.out = root.querySelector('pre.out');
+        this.status = root.querySelector('.status');
+        this.source = this.editor.value;
+        this.gen = 0;
+        this.ran = false;
+      }
+      setStatus(text, cls = '') { this.status.textContent = text; this.status.className = 'status ' + cls; }
+      stop() { this.gen++; if (activeCanvasDemo === this) activeCanvasDemo = null; }
+
+      async run() {
+        if (!supported) { this.setStatus('no WebGPU', 'err'); return; }
+        this.gen++;
+        const gen = this.gen;
+        const alive = () => gen === this.gen && !this.dead;
+        this.out.textContent = '';
+        this.out.classList.remove('err');
+        this.setStatus('running…');
+
+        // Loops registered here die with the generation, so a re-run or a scroll-away never
+        // leaves an orphaned rAF chain running against a stale pipeline.
+        const raf = cb => alive() ? requestAnimationFrame(t => { if (alive()) cb(t); }) : 0;
+        const log = (...a) => { this.out.textContent += a.map(fmt).join(' ') + '\n'; };
+
+        try {
+          G ??= await getG();
+          if (!alive()) return;
+          if (this.canvas) {
+            if (activeCanvasDemo && activeCanvasDemo !== this) activeCanvasDemo.stop();
+            activeCanvasDemo = this;
+            G.resizeCanvas(this.canvas);
+            useCanvas(this.canvas);
+          }
+          const fn = new AsyncFunction('G', 'canvas', 'log', 'requestAnimationFrame', this.editor.value);
+          await fn(G, this.canvas, log, raf);
+          if (alive()) this.setStatus(this.canvas ? 'running' : 'done', 'ok');
+          this.ran = true;
+        } catch (e) {
+          if (!alive()) return;
+          this.out.classList.add('err');
+          this.out.textContent += (this.out.textContent ? '\n' : '') + (e?.message ?? String(e));
+          this.setStatus('error', 'err');
+        }
+      }
+    }
+
+    const wire = () => {
+      for (const root of document.querySelectorAll('.demo')) {
+        const src = root.querySelector('script.code');
+        const ta = document.createElement('textarea');
+        // Dedent: the source is indented to sit nicely in the HTML, not in the editor.
+        const lines = src.textContent.replace(/^\n/, '').replace(/\s+$/, '').split('\n');
+        const pad = Math.min(...lines.filter(l => l.trim()).map(l => l.match(/^ */)[0].length));
+        ta.value = lines.map(l => l.slice(pad)).join('\n');
+        ta.spellcheck = false;
+        ta.setAttribute('autocapitalize', 'off');
+        ta.setAttribute('autocomplete', 'off');
+        ta.setAttribute('aria-label', 'editable example code');
+        ta.rows = Math.min(ta.value.split('\n').length + 1, 30);
+        src.replaceWith(ta);
+
+        const bar = root.querySelector('.bar');
+        const demo = new Demo(root);
+        demos.push(demo);
+        bar.querySelector('.run').onclick = () => demo.run();
+        bar.querySelector('.reset').onclick = () => {
+          demo.editor.value = demo.source;
+          demo.editor.rows = Math.min(demo.source.split('\n').length + 1, 30);
+          demo.run();
+        };
+        // Ctrl/Cmd+Enter runs, because everyone tries it.
+        demo.editor.addEventListener('keydown', e => {
+          if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); demo.run(); }
+        });
+      }
+
+      // Run a box when it scrolls into view; stop animations when it leaves. Compute-only boxes
+      // keep their output and are not re-run, since their answer will not have changed.
+      const io = new IntersectionObserver(entries => {
+        for (const e of entries) {
+          const demo = demos.find(d => d.root === e.target);
+          if (!demo) continue;
+          if (e.isIntersecting) {
+            if (!demo.ran || demo.canvas) demo.run();
+          } else if (demo.canvas) {
+            demo.stop();
+            if (demo.status.textContent === 'running') demo.setStatus('paused');
+          }
+        }
+      }, { rootMargin: '0px 0px -25% 0px', threshold: 0.25 });
+      // ?noauto lets the headless checks drive the boxes one at a time, without the observer
+      // starting a second one behind their back.
+      if (!new URLSearchParams(location.search).has('noauto')) for (const d of demos) io.observe(d.root);
+    };
+
+    // Table of contents from the section headings.
+    const buildToc = () => {
+      const list = document.getElementById('toclist');
+      for (const h of document.querySelectorAll('section.step > h2')) {
+        const li = document.createElement('li');
+        const a = document.createElement('a');
+        a.href = '#' + h.id;
+        a.textContent = h.textContent.replace(/^\s*\d+\s*/, '');
+        li.append(a);
+        list.append(li);
+      }
+      // Open to start with, so the shape of the page is visible — but it is sticky, so it has
+      // to get out of the way the moment the reader starts moving.
+      const toc = document.getElementById('toc');
+      toc.open = window.innerWidth > 640 && window.scrollY < 40;
+      const collapse = () => {
+        if (window.scrollY > 120) { toc.open = false; removeEventListener('scroll', collapse); }
+      };
+      addEventListener('scroll', collapse, { passive: true });
+      list.addEventListener('click', () => { toc.open = false; });
+    };
+
+    buildToc();
+    wire();
+
+    // Test hooks, also handy from the devtools console: `__G` is the shared TinyWebGPU
+    // instance (null until the first box runs) and `__demos` is the list of boxes.
+    Object.defineProperty(window, '__G', { get: () => G });
+    window.__demos = demos;
+
+    // Runs every box in order and reports what broke. Used by the repo's headless checks;
+    // harmless in a browser.
+    window.__runAll = async (only = null) => {
+      const results = [];
+      for (const d of demos) {
+        const id = d.root.closest('section')?.id ?? '?';
+        if (only && id !== only) continue;
+        d.ran = false;
+        await d.run();
+        // Give an animation loop a few frames to fall over, if it is going to.
+        await new Promise(r => setTimeout(r, d.canvas ? 700 : 60));
+        results.push({ id, status: d.status.textContent, out: d.out.textContent.trim().slice(0, 300) });
+      }
+      const bad = results.filter(r => r.status === 'error');
+      window.__result = {
+        ok: bad.length === 0,
+        msg: bad.length ? bad.map(b => `${b.id}: ${b.out.replace(/\s+/g, ' ')}`).join(' || ')
+                        : `${results.length} boxes ok`,
+      };
+      return results;
+    };
+  </script>
+</body>
+
+</html>

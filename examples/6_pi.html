@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<!-- TinyWebGPU example 6: estimating pi by Monte Carlo — the shape of most GPGPU work.
+     Serve this folder (python3 -m http.server) and open /examples/6_pi.html
+
+     Throw darts at the unit square; the fraction landing inside the quarter circle is pi/4.
+     It is a poor way to compute pi — the error falls as 1/sqrt(N), so every extra decimal
+     costs 100x the darts — and a very good way to show what a GPU is for: millions of
+     independent trials per frame, then a reduction.
+
+     Four things worth stealing:
+       per-thread RNG      each invocation hashes its own index into an independent stream, so
+                           no thread ever waits on another for a random number
+       count locally       each thread tallies its own hits in a register and does ONE atomicAdd
+                           at the end instead of one per dart — the contention difference is the
+                           whole ballgame
+       self-check first    a few dispatches and one readback before anything is drawn, so the
+                           page can prove its own arithmetic
+       don't stall a loop  .r() waits for the GPU. Awaiting one every frame would serialise CPU
+                           and GPU, so the counters accumulate on the GPU and JS samples them
+                           occasionally, without ever blocking the frame -->
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TinyWebGPU — Monte Carlo π</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: max(0.75rem, env(safe-area-inset-top)) 0.75rem 1.5rem;
+      background: #0e0e12; color: #e8e8ec;
+      font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-text-size-adjust: 100%;
+    }
+    main { max-width: 34rem; margin: 0 auto; display: grid; gap: 0.9rem; }
+    h1 { font-size: 1.15rem; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+    p.lede { margin: 0; color: #9a9aa6; font-size: 0.92rem; }
+    /* The dartboard is square at every width: it *is* the unit square. */
+    canvas {
+      display: block; width: 100%; max-width: 34rem; aspect-ratio: 1 / 1; height: auto;
+      border: 1px solid #2a2a32; border-radius: 10px; background: #08080b;
+      touch-action: manipulation;
+    }
+    .readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: 0.55rem; }
+    .cell { background: #16161c; border: 1px solid #2a2a32; border-radius: 9px; padding: 0.6rem 0.75rem; }
+    .cell b {
+      display: block; font: 600 1.15rem/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+    }
+    .cell span { color: #9a9aa6; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .digits em { font-style: normal; color: #6ee7a8; }        /* digits that agree with pi */
+    .digits s { text-decoration: none; color: #8b8b96; }       /* the first wrong one onwards */
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    button {
+      flex: 1 1 8rem; min-height: 44px; padding: 0.55rem 1rem; font: inherit; font-size: 0.92rem;
+      color: inherit; background: #1d1d25; border: 1px solid #33333d; border-radius: 8px; cursor: pointer;
+    }
+    button:hover { border-color: #7aa2ff; }
+    .note { color: #9a9aa6; font-size: 0.82rem; margin: 0; }
+    #status { font: 0.82rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #8b8b96; margin: 0; }
+    #err { display: none; background: #2c1a1a; border: 1px solid #6b3030; border-radius: 8px; padding: 0.75rem 0.9rem; }
+    a { color: #7aa2ff; }
+  </style>
+</head>
+
+<body>
+  <main>
+    <h1>Monte Carlo π</h1>
+    <p class="lede">Every frame, 16 384 GPU threads throw 8 darts each at the unit square.
+      Brightness is how many darts landed in that cell.</p>
+    <div id="err"></div>
+    <canvas id="c" width="640" height="640"></canvas>
+    <div class="readout">
+      <div class="cell"><span>estimate</span><b class="digits" id="est">—</b></div>
+      <div class="cell"><span>darts counted</span><b id="n">—</b></div>
+      <div class="cell"><span>absolute error</span><b id="abserr">—</b></div>
+      <div class="cell"><span>1/√N (expected)</span><b id="pred">—</b></div>
+    </div>
+    <div class="row">
+      <button id="pause">Pause</button>
+      <button id="reset">Reset</button>
+    </div>
+    <p id="status">starting…</p>
+    <p class="note">Green digits agree with π. Watch how expensive the fourth one is: the error
+      shrinks like 1/√N, so each new decimal place costs a hundred times more darts than the last.
+      <a href="../tutorial.html#atomics">The tutorial builds this up step by step.</a></p>
+  </main>
+
+  <script type="module">
+    import { WEBGPU } from '../tinywebgpu.js';
+
+    const canvas = document.getElementById('c');
+    const el = id => document.getElementById(id);
+
+    const GRID = 256;        // density grid, GRID x GRID cells
+    const THREADS = 16384;   // one independent RNG stream each
+    const WG = 64;           // threads per workgroup
+    const K = 8;             // darts per thread per frame  ->  131 072 darts/frame
+
+    let G;
+    try {
+      G = await WEBGPU().init(canvas.getContext('webgpu'));
+    } catch (e) {
+      el('err').style.display = 'block';
+      el('err').textContent = `WebGPU unavailable: ${e.message}. Needs Chrome/Edge 113+, ` +
+        `Firefox 141+ (Windows) or Safari 26+, over https or localhost.`;
+      el('status').textContent = '';
+      window.__result = { ok: false, msg: 'no webgpu: ' + e.message };
+      throw e;
+    }
+
+    // ---- the kernel ------------------------------------------------------------------------
+    // PCG-style hash: each call advances this thread's own state, so the streams are
+    // independent with no synchronisation between threads at all.
+    //
+    // `total` counts *threads*, not darts, so the u32 has room for hours of running: at 60 fps
+    // it takes about four hours to wrap, where counting darts directly would wrap in nine minutes.
+    const darts = await G.makeCompute(`
+        fn rnd(state: ptr<function, u32>) -> f32 {
+          let x = *state * 747796405u + 2891336453u;
+          *state = x;
+          let w = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+          return f32((w >> 22u) ^ w) * 2.3283064365386963e-10;    // * 2^-32  ->  [0,1)
+        }`, `
+        let i = gid.x;
+        if (i >= UB.threads) { return; }
+
+        // Seeded from (thread, frame), so every frame is a fresh set of darts.
+        var seed = i * 2654435761u + UB.frame * 2246822519u + 1u;
+
+        // Tally in a register; touch the shared counter once, at the end.
+        var hits = 0u;
+        for (var k = 0u; k < ${K}u; k = k + 1u) {
+          let x = rnd(&seed);
+          let y = rnd(&seed);
+          if (x * x + y * y <= 1.0) { hits = hits + 1u; }
+
+          let cx = min(u32(x * ${GRID}.0), ${GRID}u - 1u);
+          let cy = min(u32(y * ${GRID}.0), ${GRID}u - 1u);
+          atomicAdd(&grid[cy * ${GRID}u + cx], 1u);
+        }
+        atomicAdd(&stats.hits, hits);
+        atomicAdd(&stats.threads, 1u);
+      `,
+      { threads: 'u32', frame: 'u32' },
+      {
+        stats: 'struct Stats { hits: atomic<u32>, threads: atomic<u32> }',
+        grid: 'array<atomic<u32>>',
+      },
+      { wg: [WG, 1, 1] });
+
+    // ---- the picture -----------------------------------------------------------------------
+    // The same buffer, bound to this pipeline as a plain array<u32>: the renderer only reads it,
+    // so it has no use for the atomic type. uv.y runs from 0 at the bottom, which is already the
+    // orientation the darts were generated in.
+    const show = await G.makeRender(`
+        fn frag(uv: vec2<f32>) -> vec4<f32> {
+          let cx = min(u32(uv.x * ${GRID}.0), ${GRID}u - 1u);
+          let cy = min(u32(uv.y * ${GRID}.0), ${GRID}u - 1u);
+          let n = f32(grid[cy * ${GRID}u + cx]);
+
+          // Normalise against the mean count per cell so the image keeps its exposure as darts
+          // pile up, instead of saturating to white after a few seconds.
+          let d = n / max(UB.mean, 1.0);
+          let b = 1.0 - exp(-1.35 * d);
+
+          let inside = dot(uv, uv) <= 1.0;
+          let warm = vec3<f32>(1.0, 0.68, 0.30);
+          let cool = vec3<f32>(0.32, 0.56, 1.0);
+          var col = select(cool, warm, inside) * b;
+
+          // the arc itself
+          col += vec3<f32>(0.55, 0.85, 0.70) * smoothstep(0.006, 0.0, abs(length(uv) - 1.0));
+          return vec4<f32>(col, 1.0);
+        }`,
+      { mean: 'f32' }, { grid: 'array<u32>' });
+
+    const stats = G.createStorageBuffer(8);                  // hits, threads — accumulated on the GPU
+    const grid = G.createStorageBuffer(GRID * GRID * 4);
+    darts.setResources({ stats: stats.b, grid: grid.b });
+    show.setResources({ grid: grid.b });
+
+    let frame = 0;
+    // beginCompute() chains dispatches into a single compute pass and, outside a frame, owns the
+    // submit itself. Nothing here touches the canvas — the self-check below runs before the first
+    // pixel is ever presented.
+    const run = n => {
+      G.beginCompute();
+      darts.use();
+      for (let i = 0; i < n; i++) {
+        darts.setUniforms({ threads: THREADS, frame: frame++ });   // frame-ordered between dispatches
+        darts.dispatchOn(null, THREADS / WG);
+      }
+      G.endCompute();
+    };
+
+    // ---- self-check ------------------------------------------------------------------------
+    // 2.1M darts is enough that a correct kernel lands within 0.01 of pi about as reliably as
+    // anything statistical gets (that bound is ~9 sigma). Done before the first frame is
+    // presented, so the page reports on its own arithmetic rather than on how the canvas looks.
+    el('status').textContent = 'self-check: throwing 2 097 152 darts…';
+    run(16);
+    {
+      const [hits, threads] = await stats.r(8, 0, Uint32Array);
+      const est = 4 * hits / (threads * K);
+      const ok = Math.abs(est - Math.PI) < 0.01;
+      window.__result = { ok, msg: `self-check: pi≈${est.toFixed(6)} from ${threads * K} darts` };
+      el('status').textContent = ok
+        ? `self-check passed: π ≈ ${est.toFixed(6)} from ${(threads * K).toLocaleString('en-US')} darts`
+        : `self-check FAILED: got ${est}`;
+    }
+    stats.clear();
+    grid.clear();
+    frame = 0;
+
+    // ---- the live loop ---------------------------------------------------------------------
+    // No await in here. The counters live on the GPU; a readback is kicked off every 15 frames
+    // and lands whenever it lands. `dispatched` is the CPU's own tally, used only for exposure.
+    let dispatched = 0, running = true, inFlight = false;
+    const PI = Math.PI.toFixed(10);
+
+    // Mark the leading digits that agree with pi, so convergence is visible rather than implied.
+    const digits = est => {
+      const s = est.toFixed(10);
+      let i = 0;
+      while (i < s.length && s[i] === PI[i]) i++;
+      return `<em>${s.slice(0, i)}</em><s>${s.slice(i)}</s>`;
+    };
+
+    const sample = () => {
+      if (inFlight) return;
+      inFlight = true;
+      stats.r(8, 0, Uint32Array).then(([hits, threads]) => {
+        inFlight = false;
+        const n = threads * K;
+        if (!n) return;
+        const est = 4 * hits / n;
+        el('est').innerHTML = digits(est);
+        el('n').textContent = n.toLocaleString('en-US');
+        el('abserr').textContent = Math.abs(est - Math.PI).toExponential(2);
+        el('pred').textContent = (1 / Math.sqrt(n)).toExponential(2);
+      }, () => { inFlight = false; });
+    };
+
+    const step = () => {
+      if (!running) return;
+      G.beginFrame();                                        // dispatch + draw: one submit
+      darts.setUniforms({ threads: THREADS, frame: frame++ });
+      darts.dispatch(THREADS / WG);
+      show.setUniforms({ mean: dispatched / (GRID * GRID) });
+      show.drawTo();
+      G.endFrame();
+
+      dispatched += THREADS * K;
+      if (frame % 15 === 0) sample();
+      requestAnimationFrame(step);
+    };
+
+    el('pause').onclick = e => {
+      running = !running;
+      e.target.textContent = running ? 'Pause' : 'Resume';
+      if (running) requestAnimationFrame(step);
+    };
+    el('reset').onclick = () => {
+      stats.clear();
+      grid.clear();
+      dispatched = 0;
+      frame = 0;
+      for (const id of ['est', 'n', 'abserr', 'pred']) el(id).textContent = '—';
+    };
+
+    requestAnimationFrame(step);
+  </script>
+</body>
+
+</html>
