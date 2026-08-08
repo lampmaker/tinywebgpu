@@ -2,6 +2,49 @@
 
 All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API.
 
+## 0.4.0 — 2026-08-08
+
+Bug-fix release with two additions. Three of the fixes change behavior — read the first two if
+you use `beginCompute()`.
+
+**Fixed**
+
+- **`beginCompute()` outside a frame silently dropped every dispatch.** It parked its command
+  encoder on the frame slot and `endCompute()` never submitted it, so the chained dispatches never
+  ran — *and every later `dispatch()`/`drawTo()` stopped self-submitting too*, because they saw an
+  open frame that would never end. Readbacks then reported pre-frame data. `endCompute()` now
+  submits the encoder it opened. A `beginCompute()` inside `beginFrame()` is unchanged: the frame
+  still owns the submit.
+- **A uniform or buffer write between two chained dispatches broke the pass.** Copies cannot be
+  encoded inside a pass, so the staged write had to close it; the next `dispatchOn()` then threw
+  `No active compute pass`. The pass is now reopened and the pipeline/bind group from the last
+  `use()` re-applied, so per-dispatch uniforms — the pattern the frame API is *for* — work.
+- **The pipeline cache was keyed on the source before `G.pre` ran**, while the shader cache keyed
+  on the source after. Changing `G.pre` and rebuilding the same shader handed back the pipeline
+  compiled under the previous hook. `G.pre` is now applied once, before the key is computed.
+- **`createStorageBuffer(byteLength)` did not round up to 4 bytes** the way the create-and-fill
+  path did, so odd sizes produced a buffer WebGPU rejects.
+- **A pipeline that failed validation stayed in the cache**, so the second build of the same
+  source silently reused it and reported nothing. It is now evicted.
+- A schema resource the shader never references is stripped from the bind group (with a warning) —
+  but resource validation still demanded you pass one. It no longer does.
+- `w()` on a buffer handle now throws on a plain `Array` instead of writing `d.length` bytes of
+  garbage; it takes a TypedArray or ArrayBuffer.
+- `drawTo()` / `drawQuad().run()` with no canvas context raised a null-deref `TypeError`; they now
+  say what is wrong.
+- Bind-group rebuilds reuse a memoized `createView()` per texture instead of allocating a new view
+  every time.
+
+**Added**
+
+- **`G.readTexture(tex, opts?)`** — pixels back out of a texture, the mirror of `writeTexture` and
+  the texture counterpart of `createStorageBuffer().r()`. Handles the 256-byte `bytesPerRow`
+  alignment and returns tightly packed rows, typed from the format. Same caveat as `.r()`: it
+  stalls the pipeline.
+- **`G.resizeCanvas(canvas?, opts?)`** — sizes the backing store to the CSS box × `devicePixelRatio`,
+  clamped to `maxTextureDimension2D`. Returns `{ width, height, changed }`, so it drops into a
+  resolution uniform and lets you gate reallocating render targets.
+
 ## 0.3.0 — 2026-08-06
 
 Adds a minified build. No public API change.
