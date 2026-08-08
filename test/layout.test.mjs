@@ -79,6 +79,32 @@ const layoutOf = uniforms => {
 
   const odd = S.createStorageBuffer(new Uint8Array(6));
   check('createStorageBuffer(data) rounds size up to 4 bytes', odd.b.size, 8);
+
+  // the byte-length path used to skip the rounding the data path did, producing a size
+  // WebGPU rejects for a STORAGE buffer
+  check('createStorageBuffer(bytes) rounds size up to 4 bytes', S.createStorageBuffer(6).b.size, 8);
+
+  // a plain Array has no byteLength; the old `?? d.length` fallback wrote 3 bytes of garbage
+  let threw = '';
+  try { bySize.w([1, 2, 3]); } catch (e) { threw = e.message; }
+  check('w() rejects plain Arrays', /TypedArray or ArrayBuffer/.test(threw), true);
+}
+
+// --- readTexture: rows come back tightly packed, without the 256-byte padding -------------
+{
+  globalThis.GPUMapMode ??= { READ: 1 };
+  const W = 2, H = 2, tight = W * 4, padded = 256;          // rgba8unorm, one 256-byte row each
+  const mapped = new Uint8Array(padded * H);
+  for (let y = 0; y < H; y++)
+    for (let i = 0; i < tight; i++) mapped[y * padded + i] = y * tight + i + 1;
+
+  S.device.createCommandEncoder = () => ({ copyTextureToBuffer: () => { }, finish: () => { } });
+  S.device.queue.submit = () => { };
+  S._acquireStaging = () => ({ mapAsync: async () => { }, getMappedRange: () => mapped.buffer, unmap: () => { } });
+  S._releaseStaging = () => { };
+
+  const px = await S.readTexture({ format: 'rgba8unorm', width: W, height: H });
+  check('readTexture strips row padding', [...px], Array.from({ length: tight * H }, (_, i) => i + 1));
 }
 
 // --- wgsl_shorthand ---------------------------------------------------------

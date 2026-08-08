@@ -127,12 +127,36 @@ per-dispatch pass overhead — use with `p.use()` + `p.dispatchOn()`. Calling pl
 `p.dispatch()` (or `drawTo`) while a chained pass is open auto-closes that pass first; chained
 dispatches after it need a fresh `beginCompute()`.
 
+`beginCompute()` works with or without an enclosing frame. Inside `beginFrame()` the frame owns
+the submit, as usual. **Outside one, `beginCompute()` opens its own encoder and `endCompute()`
+submits it** — so a chained sequence on its own is self-contained:
+
+```js
+G.beginCompute();  a.use(); a.dispatchOn(null, 64);  b.use(); b.dispatchOn(null, 64);
+G.endCompute();    // submits
+```
+
 While a frame is open, uniform writes, storage `w()` and `clear()` are **frame-ordered**: the
 toolkit stages the bytes and encodes a buffer-to-buffer copy at that point in the frame, so
 consecutive dispatches see the values set just before them — per-dispatch uniforms work in a
 single submit. Outside a frame, writes are plain queue writes as
 before. `createStorageBuffer().r()` during an open frame reads *pre-frame* data and warns —
 `endFrame()` first.
+
+A copy cannot be encoded inside a pass, so a staged write during a chained sequence closes the
+compute pass and reopens it, restoring the pipeline and bind group from the last `p.use()`. Writing
+uniforms between `dispatchOn()` calls is therefore fine:
+
+```js
+G.beginFrame(); G.beginCompute();
+p.use();
+p.setUniforms({ step: 0 }); p.dispatchOn(null, 64);
+p.setUniforms({ step: 1 }); p.dispatchOn(null, 64);   // sees step = 1
+G.endCompute(); G.endFrame();
+```
+
+If you interleave *two* pipelines, call `use()` again after switching — the reopened pass restores
+whichever pipeline `use()` named last.
 
 ## Buffers, textures, samplers
 
@@ -146,6 +170,8 @@ before. `createStorageBuffer().r()` during an open frame reads *pre-frame* data 
 | `G.createStorageTexture2D(w, h, format='rgba32float')` | `GPUTexture` | `textureStore`/`textureLoad` |
 | `G.createSampler({ magFilter, minFilter, wrapU, wrapV })` | `GPUSampler` | defaults nearest/clamp |
 | `G.writeTexture(tex, data, { width?, height?, x?, y?, bytesPerRow?, mipLevel? })` | `GPUTexture` | Raw pixel bytes in (LUTs, generated data). `width`/`height` default to the whole texture; `bytesPerRow` is derived from the format unless you pass it. Needs COPY_DST. |
+| `await G.readTexture(tex, { x?, y?, width?, height?, mipLevel?, Ctor? })` | `Promise<TypedArray>` | Pixels back out. Rows come back **tightly packed** — the 256-byte `bytesPerRow` padding `copyTextureToBuffer` requires is stripped for you. `Ctor` defaults from the format (`*32float` → `Float32Array`, `*32uint` → `Uint32Array`, `*32sint` → `Int32Array`, else `Uint8Array`). Needs COPY_SRC — both texture creators include it. Like `.r()`, it **stalls the pipeline**, and during an open frame it reads pre-frame data and warns. |
+| `G.resizeCanvas(canvas?, { dpr? })` | `{ width, height, changed }` | Sizes the canvas backing store to its CSS box × `devicePixelRatio`, clamped to `maxTextureDimension2D`. `canvas` defaults to the one `init()` configured. `changed` is false when it was already the right size, so you can gate reallocating render targets; the returned size drops straight into a `vec2<f32>` resolution uniform. |
 | `await G.loadTexture(src, { texture?, format?, usage?, flipY?, premultipliedAlpha?, colorSpace? })` | `Promise<GPUTexture>` | `src` = URL string, `Blob`, `ImageBitmap`, `<img>`, `<canvas>`, `OffscreenCanvas` or `<video>`. Creates a texture sized from the source unless you pass `texture` to reuse one. |
 | `G.writeUniforms(buf, typedArrayOrDataView, byteOffset?)` | — | raw write |
 

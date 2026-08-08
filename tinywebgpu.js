@@ -55,56 +55,70 @@ const DIAG = true;
  * Creates an independent toolkit instance. Call `await G.init(ctx?)` before anything else.
  * Also settable on the instance: `G.debug`, `G.pre`, `G.onDeviceLost` (see their comments).
  */
-export let WEBGPU = (U) => {
+export const WEBGPU = () => {
   let S = {
-    device: null, context: null, format: null,
+    device: null, context: null, format: null, features: null,
     // performance + diagnostics
     debug: false,
     shaderCache: new Map(),
     pipelineCache: new Map(),
-    frame: { encoder: null, view: null, cpass: null },
+    // `owned` = the encoder was opened by beginCompute() rather than beginFrame(), so endCompute()
+    // is the only thing that will ever submit it. `bound` re-applies the last use() to a reopened pass.
+    frame: { encoder: null, view: null, cpass: null, owned: false, bound: null },
+    // Close the chained compute pass without submitting. Internal: callers below still need the
+    // encoder alive to keep recording. Public endCompute() is the one that may submit.
+    _endPass: () => { try { S.frame.cpass?.end(); } catch { } S.frame.cpass = null; },
     // Frame API: batch multiple passes into one submission
     beginFrame: (opts = {}) => {
       // If a frame is already open, end it to avoid dangling encoders
+      S._endPass();                        // an open compute pass would make finish() throw
       if (S.frame.encoder) {
-        S.endCompute(); // an open compute pass would make finish() throw
-        S._flushRing();
-        try {
-          S.device.queue.submit([S.frame.encoder.finish()]);
-        } catch (e) {
+        try { S.endFrame(); }
+        catch (e) {
           console.error('[TinyWebGPU] beginFrame: previous frame encoder could not be submitted — that frame was dropped.', e);
+          S.frame.encoder = null;
         }
       }
-      const enc = S.device.createCommandEncoder({ label: 'frame' });
-      const view = opts.view ?? (S.context?.getCurrentTexture()?.createView());
-      S.frame.encoder = enc;
-      S.frame.view = view ?? null;
+      S.frame.encoder = S.device.createCommandEncoder({ label: 'frame' });
+      S.frame.view = opts.view ?? (S.context?.getCurrentTexture()?.createView()) ?? null;
       S.frame.cpass = null;
+      S.frame.owned = false;
       return S.frame;
     },
     endFrame: () => {
       if (!S.frame.encoder) return;
-      // Ensure any open compute pass is closed
-      try { S.frame.cpass?.end(); } catch {}
-      S.frame.cpass = null;
+      S._endPass();                        // ensure any open compute pass is closed
       S._flushRing();
-      S.device.queue.submit([S.frame.encoder.finish()]);
-      S.frame.encoder = null;
+      const enc = S.frame.encoder;
+      S.frame.encoder = null;              // cleared first: a throwing finish() must not leave it dangling
       S.frame.view = null;
+      S.frame.owned = false;
+      S.frame.bound = null;
+      S.device.queue.submit([enc.finish()]);
     },
     // Keep a single compute pass open to chain dispatches
     beginCompute: (opts = {}) => {
-      const enc = S.frame.encoder ?? S.device.createCommandEncoder();
-      if (!S.frame.encoder) { S.frame.encoder = enc; }
       if (S.frame.cpass) return S.frame.cpass;
-      const pass = enc.beginComputePass(opts);
-      S.frame.cpass = pass;
-      return pass;
+      if (!S.frame.encoder) {
+        // No frame is open, so this encoder is ours: endCompute() has to submit it, otherwise
+        // every dispatch recorded into it — and every later one — would silently never run.
+        S.frame.encoder = S.device.createCommandEncoder({ label: 'compute' });
+        S.frame.owned = true;
+      }
+      S.frame.bound = null;                // fresh chain: nothing to restore yet
+      return (S.frame.cpass = S.frame.encoder.beginComputePass(opts));
     },
     endCompute: () => {
-      if (!S.frame.cpass) return;
-      try { S.frame.cpass.end(); } catch {}
-      S.frame.cpass = null;
+      S._endPass();
+      if (S.frame.owned) S.endFrame();     // beginCompute() opened the encoder; nothing else submits it
+    },
+    // Buffer copies cannot be encoded inside a pass. Close the chained pass, encode, then reopen
+    // it and restore the pipeline/bind group from the last use(), so a mid-chain write is invisible.
+    _outsidePass: encode => {
+      const had = S.frame.cpass;
+      S._endPass();
+      encode();
+      if (had) S.frame.bound?.(S.frame.cpass = S.frame.encoder.beginComputePass());
     },
     // Called when the GPU device is lost (context crash, driver reset, tab backgrounding).
     // Receives the GPUDeviceLostInfo. The library logs regardless; set this to recover/rebuild.
@@ -112,11 +126,10 @@ export let WEBGPU = (U) => {
     //=============================================================================================================================
     // Staging ring: while a frame is open, uniform/buffer writes are staged CPU-side and
     // copyBufferToBuffer'd inside the frame encoder, so writes order against *dispatches*
-    // (per-dispatch uniforms in one submit) instead of against whole submits. DESIGN.md §4.
+    // (per-dispatch uniforms in one submit) instead of against whole submits.
     _ring: { chunks: [], i: 0, chunkSize: 1 << 18 },
     _stageCopy: (dst, dstOff, data, size) => {
       const r = S._ring;
-      S.endCompute();                     // copies must be encoded outside any pass
       const need = (size + 3) & ~3;       // copyBufferToBuffer needs 4-byte multiples
       while (r.chunks[r.i] && r.chunks[r.i].buf.size - r.chunks[r.i].cursor < need) r.i++;
       let c = r.chunks[r.i];
@@ -131,7 +144,8 @@ export let WEBGPU = (U) => {
         ? new Uint8Array(data.buffer, data.byteOffset, size)
         : new Uint8Array(data, 0, size);
       c.cpu.set(src, c.cursor);
-      S.frame.encoder.copyBufferToBuffer(c.buf, c.cursor, dst, dstOff, need);
+      const off = c.cursor;
+      S._outsidePass(() => S.frame.encoder.copyBufferToBuffer(c.buf, off, dst, dstOff, need));
       c.cursor += need;
     },
     // Upload all staged chunk contents; must run just before submitting the frame encoder
@@ -209,8 +223,10 @@ export let WEBGPU = (U) => {
      * pretty source-window log; warnings are logged.
      * @param {string} code @returns {Promise<GPUShaderModule>}
      */
-    makeShader: code => {
-      if (S.pre) code = S.pre(code);
+    // `applyPre` is false when the caller already ran S.pre (makePipeline does, so that its own
+    // cache key is computed on the post-pre source — see the pipeline cache below).
+    makeShader: (code, applyPre = true) => {
+      if (applyPre && S.pre) code = S.pre(code);
       // hash + length guards against 32-bit hash collisions returning the wrong module
       const key = S._hash(code) + ':' + code.length;
       let promise = S.shaderCache.get(key);
@@ -313,17 +329,25 @@ export let WEBGPU = (U) => {
         }
       } catch {}
     },
+    // Shared buffer writer: staged inside an open frame so writes order against dispatches,
+    // a plain queue write outside. Rejects plain Arrays — `[1,2,3]` has no byteLength, and the
+    // old `?? d.length` fallback silently wrote 3 bytes of nothing.
+    _writer: b => (d, o = 0) => {
+      if (!(ArrayBuffer.isView(d) || d instanceof ArrayBuffer))
+        throw new Error('buffer write: expected a TypedArray or ArrayBuffer.');
+      return S.frame.encoder
+        ? S._stageCopy(b, o, d, d.byteLength)
+        : S.device.queue.writeBuffer(b, o, d.buffer ?? d, d.byteOffset ?? 0, d.byteLength);
+    },
     createStorageBuffer: sizeOrData => {
       const init = typeof sizeOrData === 'number' ? null : sizeOrData;
-      const n = init ? (init.byteLength + 3) & ~3 : sizeOrData;   // buffer sizes stay 4-byte aligned
+      const n = ((init ? init.byteLength : sizeOrData) + 3) & ~3;  // buffer sizes stay 4-byte aligned
       S._checkBufferSize(n, true);
       const b = S.device.createBuffer({
         size: n, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
         label: `storage ${n}B`
       });
-      const w = (d, o = 0) => S.frame.encoder
-        ? S._stageCopy(b, o, d, d.byteLength ?? d.length ?? n)   // frame open: order against dispatches
-        : S.device.queue.writeBuffer(b, o, d.buffer ?? d, d.byteOffset ?? 0, d.byteLength ?? d.length ?? n);
+      const w = S._writer(b);
       const r = async (nbytes = n, o = 0, C = Uint8Array) => {
         if (S.frame.encoder) console.warn('[TinyWebGPU] readback during an open frame reads pre-frame data — call endFrame() first.');
         const rb = S._acquireStaging(nbytes);
@@ -336,23 +360,20 @@ export let WEBGPU = (U) => {
         return C ? new C(ab) : ab;                               // C e.g. Uint32Array, Float32Array
       };
       const clear = () => {
-        if (S.frame.encoder) { S.endCompute(); S.frame.encoder.clearBuffer(b, 0, n); return; }
+        if (S.frame.encoder) return S._outsidePass(() => S.frame.encoder.clearBuffer(b, 0, n));
         const enc = S.device.createCommandEncoder({ label: 'clear' });
         enc.clearBuffer(b, 0, n);
         S.device.queue.submit([enc.finish()]);
       };
       if (init) w(init);
-      return { b, w, r,clear };  // b=GPUBuffer, w=write, r=read
+      return { b, w, r, clear };  // b=GPUBuffer, w=write, r=read
     },
 
     // Generic buffer creator with explicit usage flags; minimal helpers
     createBuffer: (size, usage) => {
       S._checkBufferSize(size, !!(usage & GPUBufferUsage.STORAGE));
       const b = S.device.createBuffer({ size, usage, label: `buffer ${size}B` });
-      const w = (d, o = 0) => S.frame.encoder
-        ? S._stageCopy(b, o, d, d.byteLength ?? d.length ?? size)
-        : S.device.queue.writeBuffer(b, o, d.buffer ?? d, d.byteOffset ?? 0, d.byteLength ?? d.length ?? size);
-      return { b, w };
+      return { b, w: S._writer(b) };
     },
 
     // Convenience: 3*u32 dispatch indirect args buffer [x,y,z]
@@ -380,8 +401,38 @@ export let WEBGPU = (U) => {
     //   - wrapV: 'clamp-to-edge', 'repeat', or 'mirror-repeat' (default: 'clamp-to-edge')    
     createSampler: (opts = {}) => S.device.createSampler({ magFilter: opts.magFilter ?? 'nearest', minFilter: opts.minFilter ?? 'nearest', addressModeU: opts.wrapU ?? 'clamp-to-edge', addressModeV: opts.wrapV ?? 'clamp-to-edge' }),
     //=============================================================================================================================
-    // Bytes per texel, for the formats these helpers can produce. Only used to derive a
-    // default bytesPerRow in writeTexture; pass bytesPerRow explicitly for anything exotic.
+    // The default view of a texture, memoized — bind groups are rebuilt often and a fresh
+    // createView() per rebind is pure garbage.
+    _views: new WeakMap(),
+    _viewOf: t => { let v = S._views.get(t); if (!v) S._views.set(t, v = t.createView()); return v; },
+    // Where a render pass draws when the caller didn't say: the frame's view, else the swapchain.
+    _view: () => {
+      const v = S.frame.view ?? S.context?.getCurrentTexture().createView();
+      if (!v) throw new Error('No render target: init() was called without a canvas context — pass an explicit view.');
+      return v;
+    },
+    /**
+     * Sizes the canvas backing store to its CSS box × devicePixelRatio, clamped to the device's
+     * max texture dimension. Returns the pixel size — drop it straight into a `vec2<f32>` uniform —
+     * and whether it changed, so callers can gate reallocating their own render targets.
+     * @param {HTMLCanvasElement|OffscreenCanvas} [canvas] defaults to the canvas init() configured
+     * @param {{dpr?: number}} [opts]
+     * @returns {{width: number, height: number, changed: boolean}}
+     */
+    resizeCanvas: (canvas = S.context?.canvas, opts = {}) => {
+      if (!canvas) throw new Error('resizeCanvas: no canvas — init() with a context, or pass one.');
+      const dpr = opts.dpr ?? globalThis.devicePixelRatio ?? 1;
+      const max = S.device?.limits.maxTextureDimension2D ?? Infinity;
+      // clientWidth is 0 on an OffscreenCanvas (no CSS box) — fall back to the current size.
+      const fit = (css, cur) => Math.max(1, Math.min(max, Math.round((css || cur) * dpr)));
+      const width = fit(canvas.clientWidth, canvas.width), height = fit(canvas.clientHeight, canvas.height);
+      const changed = canvas.width !== width || canvas.height !== height;
+      if (changed) { canvas.width = width; canvas.height = height; }
+      return { width, height, changed };
+    },
+    //=============================================================================================================================
+    // Bytes per texel, for the formats these helpers can produce. Derives the default bytesPerRow
+    // in writeTexture/readTexture; pass bytesPerRow explicitly for anything exotic.
     _texelBytes: {
       'r8unorm': 1, 'r8uint': 1, 'r8sint': 1,
       'rg8unorm': 2, 'r16float': 2, 'r16uint': 2, 'r16sint': 2,
@@ -444,6 +495,37 @@ export let WEBGPU = (U) => {
       // ImageBitmaps we created ourselves are ours to release; caller-owned sources are not.
       if (source !== src && typeof source.close === 'function') source.close();
       return tex;
+    },
+    /**
+     * Reads pixels back from a texture. The mirror of `writeTexture`, and the texture counterpart
+     * of `createStorageBuffer().r` — a debug/export tool with the same caveat: it stalls the
+     * pipeline. The texture needs COPY_SRC; both texture creators include it by default.
+     * @param {GPUTexture} tex
+     * @param {{x?:number,y?:number,width?:number,height?:number,mipLevel?:number,Ctor?:Function}} [opts]
+     *   width/height default to the whole texture; `Ctor` defaults from the format.
+     * @returns {Promise<*>} tightly packed rows (row padding removed), as `Ctor`
+     */
+    readTexture: async (tex, opts = {}) => {
+      if (S.frame.encoder) console.warn('[TinyWebGPU] readTexture during an open frame reads pre-frame data — call endFrame() first.');
+      const w = opts.width ?? tex.width, h = opts.height ?? tex.height;
+      const bpt = S._texelBytes[tex.format];
+      if (!bpt) throw new Error(`readTexture: unknown bytes-per-texel for format '${tex.format}'.`);
+      const tight = w * bpt, padded = (tight + 255) & ~255;   // copyTextureToBuffer wants 256-byte rows
+      const rb = S._acquireStaging(padded * h);
+      const enc = S.device.createCommandEncoder({ label: 'readTexture' });
+      enc.copyTextureToBuffer(
+        { texture: tex, mipLevel: opts.mipLevel ?? 0, origin: { x: opts.x ?? 0, y: opts.y ?? 0 } },
+        { buffer: rb, bytesPerRow: padded, rowsPerImage: h }, { width: w, height: h });
+      S.device.queue.submit([enc.finish()]);
+      await rb.mapAsync(GPUMapMode.READ);
+      const src = new Uint8Array(rb.getMappedRange(0, padded * h));
+      const out = new Uint8Array(tight * h);
+      for (let y = 0; y < h; y++) out.set(src.subarray(y * padded, y * padded + tight), y * tight);  // drop row padding
+      rb.unmap();
+      S._releaseStaging(rb);
+      const f = tex.format;
+      const C = opts.Ctor ?? (/32float$/.test(f) ? Float32Array : /32uint$/.test(f) ? Uint32Array : /32sint$/.test(f) ? Int32Array : Uint8Array);
+      return C === Uint8Array ? out : new C(out.buffer);
     },
     // ------------------------------
     // 6) Bind groups: connect buffers/textures to @group(N)/@binding(M)
@@ -582,7 +664,7 @@ ${structFields.join('\n')}
           let resource = values[name];
           if (!resource) return null;
           if (info.isTex && resource.createView) {
-            resource = resource.createView();
+            resource = S._viewOf(resource);
           } else if (info.isBuf) {
             resource = { buffer: resource };
           }
@@ -610,12 +692,14 @@ ${structFields.join('\n')}
   // uniforms: object with WGSL basic types (f32, vec2<f32>, etc.)
   // resources: object with full WGSL resource types (texture_storage_2d<...>, array<...>, etc.)
 
-  const makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format, isCompute = false, wg = [8, 8, 1], blend = null }) => {
+  const makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format, isCompute = false, blend = null }) => {
     // Process dual schema
-    const schemaResult = S.makeUniformsAndResources(uniforms, resources, { group: 0, startBinding: 0 });
+    const schemaResult = S.makeUniformsAndResources(uniforms, resources, { g: 0, startBinding: 0 });
 
-    // Prepend schema-generated WGSL to shader code
-    const finalCode = schemaResult.wgsl ? `${schemaResult.wgsl}\n${code}` : code;
+    // Prepend schema-generated WGSL to shader code, then run the G.pre hook once, here — the
+    // pipeline cache keys on the result, so switching G.pre can't hand back a stale pipeline.
+    const preCode = schemaResult.wgsl ? `${schemaResult.wgsl}\n${code}` : code;
+    const finalCode = S.pre ? S.pre(preCode) : preCode;
 
     // Pipelines use layout:'auto', which strips bindings the shader never references.
     // A bind-group entry for a stripped binding is a validation error, so detect schema
@@ -644,11 +728,15 @@ ${structFields.join('\n')}
     const cacheKey = (isCompute ? `C|` : `R|${format}|${blendKey}`) + S._hash(finalCode) + ':' + finalCode.length;
     let pipeline = S.pipelineCache.get(cacheKey);
     if (!pipeline) {
-      const module = await S.makeShader(finalCode);
+      const module = await S.makeShader(finalCode, false);   // S.pre already applied above
       S.device.pushErrorScope('validation');
       pipeline = isCompute ? S.makeComputePipeline(module) : S.makeRenderPipeline(module, module, format, 'triangle-list', blend);
       S.device.popErrorScope().then(err => {
-        if (err) console.error(`[TinyWebGPU] Pipeline creation failed (${cacheKey}):\n${err.message}`);
+        if (!err) return;
+        // Evict, or the next build of the same source would reuse the broken pipeline and,
+        // having skipped this branch entirely, report nothing at all.
+        S.pipelineCache.delete(cacheKey);
+        console.error(`[TinyWebGPU] Pipeline creation failed (${cacheKey}):\n${err.message}`);
       }).catch(() => { });   // scope pop rejects if the device is lost meanwhile
       S.pipelineCache.set(cacheKey, pipeline);
     }
@@ -662,9 +750,12 @@ ${structFields.join('\n')}
       const mismatched = [];
       const vals = resourceValues || {};
       for (const name of expected) {
+        const info = schemaResult.resourceLayout?.[name];
+        // Auto layout already dropped this binding (warned about above) and its entry is filtered
+        // out — demanding a value for it would be asking for something we then throw away.
+        if (strippedBindings.has(info?.binding)) continue;
         if (!(name in vals) || vals[name] == null) { missing.push(name); continue; }
         const v = vals[name];
-        const info = schemaResult.resourceLayout?.[name];
         const expectedType = info?.wgslType ?? resources[name];
         // Heuristic checks to catch obvious mismatches while avoiding false positives
         if (info?.isBuf) {
@@ -718,15 +809,22 @@ ${structFields.join('\n')}
       rebindResources({});
     }
 
+    // Applies this pipeline's state to a compute pass. Also stashed on the frame by use(), so a
+    // pass torn down and reopened around a staged write comes back with the same state.
+    const bind = pass => {
+      pass.setPipeline(pipeline);
+      if (bindGroup) pass.setBindGroup(0, bindGroup);
+    };
+
     // Helper to execute compute/render pass
-  const runPass = (args, encoder = null) => {
+    const runPass = (args, encoder = null) => {
       const enc = encoder ?? S.frame.encoder ?? S.device.createCommandEncoder();
       // A chained compute pass (beginCompute) may still be open on the frame encoder;
       // close it before opening another pass — two open passes is a validation error.
-      if (enc === S.frame.encoder && S.frame.cpass) S.endCompute();
+      // _endPass, not endCompute: `enc` is that same encoder and must stay open to record into.
+      if (enc === S.frame.encoder && S.frame.cpass) S._endPass();
       const pass = isCompute ? enc.beginComputePass() : enc.beginRenderPass(args.renderPassDesc);
-      pass.setPipeline(pipeline);
-      if (bindGroup) pass.setBindGroup(0, bindGroup);
+      bind(pass);
       if (isCompute) pass.dispatchWorkgroups(...args.dispatch);
       else pass.draw(3, 1, 0, 0);
       pass.end();
@@ -749,10 +847,9 @@ ${structFields.join('\n')}
       dispatch: (x = 1, y = 1, z = 1, encoder = null) => runPass({ dispatch: [x, y, z] }, encoder),
       dispatchIndirect: (buffer, byteOffset = 0, encoder = null) => {
         const enc = encoder ?? S.frame.encoder ?? S.device.createCommandEncoder();
-        if (enc === S.frame.encoder && S.frame.cpass) S.endCompute();
+        if (enc === S.frame.encoder && S.frame.cpass) S._endPass();
         const pass = enc.beginComputePass();
-        pass.setPipeline(pipeline);
-        if (bindGroup) pass.setBindGroup(0, bindGroup);
+        bind(pass);
         pass.dispatchWorkgroupsIndirect(buffer, byteOffset);
         pass.end();
         if (!encoder && !S.frame.encoder) S.device.queue.submit([enc.finish()]);
@@ -760,8 +857,10 @@ ${structFields.join('\n')}
       // New: reuse an existing compute pass for chaining
       use: (pass = S.frame.cpass) => {
         if (!pass) throw new Error('No active compute pass. Call WG.beginCompute() first or pass a compute pass.');
-        pass.setPipeline(pipeline);
-        if (bindGroup) pass.setBindGroup(0, bindGroup);
+        bind(pass);
+        // Remember it: a staged write mid-chain has to close and reopen the pass, and the
+        // reopened one starts with no pipeline bound.
+        if (pass === S.frame.cpass) S.frame.bound = bind;
       },
       dispatchOn: (pass, x = 1, y = 1, z = 1) => {
         const p = pass ?? S.frame.cpass; if (!p) throw new Error('No active compute pass');
@@ -772,7 +871,7 @@ ${structFields.join('\n')}
         p.dispatchWorkgroupsIndirect(buffer, byteOffset);
       }
     }) : Object.assign(common, {
-      drawTo: (view = (S.frame.view ?? S.context.getCurrentTexture().createView()), clear = [0, 0, 0, 1], encoder = null) => {
+      drawTo: (view = S._view(), clear = [0, 0, 0, 1], encoder = null) => {
         const loadOp = clear === 'load' ? 'load' : 'clear';
         const cv = Array.isArray(clear) ? { r: clear[0], g: clear[1], b: clear[2], a: clear[3] } : { r: 0, g: 0, b: 0, a: 1 };
         return runPass({
@@ -809,7 +908,7 @@ ${main}
 }
 `.trim();
 
-    return makePipeline({ code, uniforms, resources, isCompute: true, wg });
+    return makePipeline({ code, uniforms, resources, isCompute: true });
   };
 
   /**
@@ -845,7 +944,7 @@ ${frag}
   S.drawQuad = async ({ frag, uniforms = {}, resources = {}, clear = [0, 0, 0, 1], format = S.format, blend = null }) => {
     const p = await S.makeRender(frag, uniforms, resources, { format, blend });
     return Object.assign(p, {
-      run: (u = {}, view = (S.frame.view ?? S.context.getCurrentTexture().createView())) => {
+      run: (u = {}, view = S._view()) => {
         if (u && Object.keys(u).length) p.uniforms = u;
         p.drawTo(view, clear);
       }
