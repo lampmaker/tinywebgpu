@@ -811,10 +811,10 @@ G.endFrame();</code></pre>
         </div>
         <div class="warn">
           <b><code>.r()</code> stalls.</b> It waits for the GPU to finish and for the result to be
-          mapped back — the one thing you must not do inside a frame loop. Keep counters on the GPU
+          mapped back — the one thing you must not do inside a frame loop. Keep results on the GPU
           and sample them occasionally without awaiting in the loop, the way
-          <a href="examples/6_pi.html">example 6</a> does. Reading during an open frame is worse
-          still: it sees pre-frame data, and says so in the console.
+          <a href="examples/6_evolution.html">example 6</a> does. Reading during an open frame is
+          worse still: it sees pre-frame data, and says so in the console.
         </div>
       </div>
     </section>
@@ -1129,8 +1129,9 @@ G.endFrame();</code></pre>
           Jekyll ignores directories beginning with an underscore and can quietly drop files.</p>
         <h3>Where to go next</h3>
         <ul>
-          <li><a href="examples/6_pi.html">Example 6</a> — Monte Carlo π, with the density grid
-            drawn and a non-blocking readback.</li>
+          <li><a href="examples/6_evolution.html">Example 6</a> — differential evolution: a real
+            gradient-free optimizer, one thread per individual, with a workgroup-shared-memory
+            reduction and a non-blocking readback.</li>
           <li><a href="examples/7_particles.html">Example 7</a> — the particle system with bouncing
             walls, a grid that follows the window, and up to 800k particles.</li>
           <li><a href="examples/4_indirect.html">Example 4</a> — indirect dispatch on its own.</li>

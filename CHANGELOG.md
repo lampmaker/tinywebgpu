@@ -13,10 +13,17 @@ Documentation and examples only — `tinywebgpu.js` is untouched, so there is no
   reader's own GPU, with animation loops stopped when a box is re-run or scrolls out of view. The
   boxes share one device (a device per box would be a lot of memory for a page you scroll), so one
   canvas demo animates at a time. `window.__runAll()` runs every box and reports what broke.
-- **`examples/6_pi.html`** — Monte Carlo π. Per-thread RNG streams, a private tally published with
-  a single `atomicAdd` per thread, and a density grid drawn from the same buffer the compute pass
-  writes. Counters accumulate on the GPU and are sampled without ever awaiting inside the frame,
-  because `.r()` stalls. Self-checks 2.1M darts against π before the first frame is presented.
+- **`examples/6_evolution.html`** — differential evolution, a gradient-free global optimizer, run
+  population-parallel: one thread per individual, no communication between them, and the whole
+  population advanced in a single dispatch. The population is stored dimension-major so
+  neighbouring threads read neighbouring addresses, generations ping-pong between two offsets in
+  one buffer so the bind group is built once rather than once per generation, and trial vectors
+  are generated, scored and stored one dimension at a time so nothing per-individual sits in
+  registers. Finding the best individual is a workgroup-shared-memory tree reduction, since WGSL
+  has no `atomic<f32>` to `atomicMin` a float fitness with. Four standard objectives — Rastrigin,
+  Ackley, Rosenbrock, Schwefel — each with the crossover rate it actually needs, measured rather
+  than assumed. Self-checks hold the WGSL objectives against an independent CPU implementation and
+  then confirm the search reaches Rastrigin's optimum in 32 dimensions.
 - **`examples/7_particles.html`** — up to 800k particles with no vertex buffers: the simulation
   splats each one into a density grid with an `atomicAdd`, and a fullscreen pass colours it, so
   the particle count is arithmetic rather than draw calls. Fade, simulate and draw go out in one
