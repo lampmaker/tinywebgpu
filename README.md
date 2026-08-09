@@ -40,9 +40,9 @@ const p = await G.makeCompute(/* declarations */ '', /* main body */ `
   { wg: [64, 1, 1] });
 
 const buf = G.createStorageBuffer(1024 * 4);
-p.setResources({ data: buf.b });
+p.setResources({ data: buf });
 p.setUniforms({ n: 1024 });
-p.dispatch(Math.ceil(1024 / 64));
+p.run(1024);                     // items, not workgroups — run() divides by wg for you
 console.log(await buf.r(64, 0, Float32Array));   // debug readback
 ```
 
@@ -132,7 +132,7 @@ glow.drawTo(view, 'load');           // 'load' keeps the existing contents
 
 ## Minified build
 
-`tinywebgpu.min.js` — **17.6 KB** (6.8 KB gzipped), versus 52.3 KB for the source. Rebuild it
+`tinywebgpu.min.js` — **18.9 KB** (7.2 KB gzipped), versus 57.2 KB for the source. Rebuild it
 with `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
 
 It is a **production artifact and it is silent**: every `console` warning is stripped, and so is
@@ -162,7 +162,7 @@ G.pre = shorthand({ RAY: 'MyRay', ...TOKENS });
 |---|---|
 | Setup | `init(ctx?)` (no ctx = compute-only) · `resizeCanvas()` · `debug` · `pre` · `onDeviceLost` |
 | Pipelines | `makeRender(frag, uniforms?, resources?, {format?})` · `makeCompute(body, main, uniforms?, resources?, {wg?})` |
-| Pipeline object | `p.uniforms = {…}` / `setUniform(s)` · `p.resources = {…}` / `setResources` · `dispatch(x,y,z)` · `dispatchIndirect(buf, off)` · `drawTo(view?, clear?)` |
+| Pipeline object | `p.uniforms = {…}` / `setUniform(s)` · `p.resources = {…}` / `setResources` · `run(w,h,d)` (items) · `dispatch(x,y,z)` (workgroups) · `dispatchIndirect(buf, off)` · `drawTo(view?, clear?)` |
 | One-liners | `drawQuad({frag, uniforms, …})` · `compute2D({body, size, wg, …})` |
 | Frame API | `beginFrame()` / `endFrame()` · `beginCompute()` / `endCompute()` + `p.use()` / `p.dispatchOn()` for chained passes |
 | Buffers | `createUniformBuffer(bytes)` · `createStorageBuffer(bytes \| data)` → `{b, w, r, clear}` · `createBuffer(bytes, usage)` · `createDispatchIndirectBuffer()` |
@@ -178,8 +178,8 @@ autocomplete — no TypeScript build needed.
   group (`@group(0)`), binding order = schema key order (your ABI).
 - **A schema resource the shader never references is skipped** (auto layout strips it; you get
   a console warning). Keep schema and WGSL in sync.
-- **Resource rebinds compare by object reference** — pass a fresh object to force a rebind;
-  prebuild and reuse objects in hot loops.
+- **Resources merge and compare by value** — `setResources({grid})` updates just that one and
+  leaves the rest bound, and re-passing identical resources does not rebuild anything.
 - **A staged write inside a chained compute pass closes and reopens it** (copies can't be encoded
   in a pass). The last `p.use()` is restored automatically — but if you interleave two pipelines,
   call `use()` again after switching.

@@ -4,9 +4,51 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
-Documentation and examples only — `tinywebgpu.js` is untouched, so there is nothing to upgrade.
+**Fixed**
+
+- **`compute2D` never ran anything.** It passed its `body` to `makeCompute` as *declarations* and
+  generated an empty entry point, so the shader was invalid WGSL (statements at module scope) and
+  `main` did nothing. `body` is now the entry-point statements, as documented; helper functions
+  and structs go in the new `decls` field.
+- **Uniform values given as TypedArrays wrote a single `NaN`.** The packer tested `Array.isArray`,
+  so a `Float32Array` mat4 out of a maths library fell into the scalar path. Arrays and TypedArrays
+  are now both accepted.
+- **A uniform name that is not in the schema was silently dropped.** `setUniforms({ tiem: 1 })` did
+  nothing at all, in any mode. It now throws and lists the declared fields.
+- **`loadTexture` could not read a `<video>`.** A video element always *has* a `width` property, and
+  it is `0` until the layout attribute is set, so the `??` chain picked the zero and never reached
+  `videoWidth`. Sizes now fall through on falsy.
+- **In-frame buffer writes could smear stale bytes.** Staged copies round up to 4 bytes, and the
+  ring's padding was left holding the previous frame's data; the tail is zeroed now. A staged write
+  at a non-4-byte offset also throws with the reason instead of failing in the driver.
+- **`createBuffer` did not round its size up to 4 bytes** the way `createStorageBuffer` does, so a
+  storage buffer made through it with an odd size was rejected by WebGPU.
+
+**Changed**
+
+- **Resources merge and compare by value.** `setResources` used to compare the object by reference
+  and demand every field on every call — so a fresh literal per frame rebuilt the bind group every
+  frame, and mutating a reused object silently did nothing. Partial updates are now legal, repeat
+  calls with the same resources are free, and buffer handles (`{b,w,r}`) may be passed directly
+  instead of unwrapping `.b` by hand.
+- **The swapchain texture is acquired lazily**, on the first `drawTo()` of a frame rather than in
+  `beginFrame()`, so a compute-only frame no longer touches the canvas. This also unwedges a real
+  hang: on a page with a canvas, `beginFrame(); dispatch(); endFrame(); await buf.r()` could never
+  resolve, because the frame had acquired a swapchain texture it then never presented.
+- `createStorageTexture2D` takes a `usage` override and includes `COPY_DST` by default, so
+  `writeTexture` works on it — matching `createTexture2D`.
 
 **Added**
+
+- **`p.run(w, h, d)` on compute pipelines** — dispatch by item count, dividing by the workgroup
+  size and rounding up, instead of writing `Math.ceil(n / 64)` at every call site. `p.dispatch`
+  still counts workgroups.
+- **Resource validation checks usage flags**: a texture bound to a `texture_storage_2d` without
+  `STORAGE_BINDING`, or a buffer bound to an `array<T>` without `STORAGE`, is named in the error
+  rather than producing a wall of driver text. Dispatching before `setResources` now says which
+  call is missing instead of "bind group 0 is not set".
+- More formats in the texel-size table (`rgb10a2unorm`, `rg11b10ufloat`, the 8/16-bit int and
+  snorm variants), so `writeTexture`/`readTexture` accept them without an explicit `bytesPerRow`.
 
 - **`tutorial.html`** — a sixteen-step guided tour, from a single coloured pixel to a particle
   system. Every code box on the page is live: it is edited in place and recompiled against the

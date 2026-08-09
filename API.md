@@ -91,15 +91,16 @@ inside the generated entry point, which receives `gid` (global), `lid` (local), 
 ### Pipeline object (both kinds)
 | Member | Meaning |
 |---|---|
-| `p.uniforms = {vals}` / `p.setUniforms(vals)` / `p.setUniform(name, v)` | Merge values into the CPU staging struct and upload the whole buffer. Vectors/matrices take arrays (or scalars for 1-wide). |
-| `p.resources = {vals}` / `p.setResources(vals)` | (Re)build the bind group. Pass `GPUBuffer`s for buffer-likes (the `.b` of buffer handles), textures or views for textures. Reference-compared: pass a fresh object to force rebind. |
+| `p.uniforms = {vals}` / `p.setUniforms(vals)` / `p.setUniform(name, v)` | Merge values into the CPU staging struct and upload the whole buffer. Vectors/matrices take arrays or TypedArrays (or scalars for 1-wide). A name that is not in the schema throws. |
+| `p.resources = {vals}` / `p.setResources(vals)` | (Re)build the bind group. Pass buffer handles (`{b,w,r}`) or raw `GPUBuffer`s, and textures or views for textures. **Merged** into what is already bound, so partial updates are fine, and **compared by value**, so re-passing the same resources every frame is free. |
 | `p.pipeline` | The raw `GPURenderPipeline`/`GPUComputePipeline`. |
 | `p.uniformFields` / `p.resourceFields` | Names, in binding order. |
 
 Compute-only:
 | Member | Meaning |
 |---|---|
-| `p.dispatch(x=1, y=1, z=1, encoder?)` | Dispatch; self-submits unless a frame encoder is open or one is passed. |
+| `p.dispatch(x=1, y=1, z=1, encoder?)` | Dispatch **workgroups**; self-submits unless a frame encoder is open or one is passed. |
+| `p.run(w=1, h=1, d=1, encoder?)` | Same, but counts **items**: divides by `wg` and rounds up. Bounds-check the tail with `if (gid.x >= n) { return; }`. |
 | `p.dispatchIndirect(gpuBuffer, byteOffset=0, encoder?)` | Indirect dispatch from a `[x,y,z]: 3×u32` buffer. |
 | `p.use(pass?)`, `p.dispatchOn(pass?, x,y,z)`, `p.dispatchIndirectOn(pass?, buf, off)` | Chain multiple pipelines inside one compute pass (see Frame API). |
 
@@ -110,8 +111,9 @@ Render-only:
 
 ### One-liners
 - `await G.drawQuad({ frag, uniforms, resources, clear, format, blend })` → pipeline + `run(u?, view?)`
-- `await G.compute2D({ body, uniforms, resources, size, wg })` → pipeline + `run(w?, h?, d=1)`
-  (dispatches `ceil(w/wg[0]), ceil(h/wg[1]), ceil(d/wg[2])` workgroups)
+- `await G.compute2D({ body, decls, uniforms, resources, size, wg })` → `makeCompute` with a default
+  `size`, so `run()` with no arguments covers the whole grid. `body` is the entry-point statements;
+  `decls` is for helper functions and structs.
 
 ## Frame API (batching)
 
@@ -141,7 +143,11 @@ toolkit stages the bytes and encodes a buffer-to-buffer copy at that point in th
 consecutive dispatches see the values set just before them — per-dispatch uniforms work in a
 single submit. Outside a frame, writes are plain queue writes as
 before. `createStorageBuffer().r()` during an open frame reads *pre-frame* data and warns —
-`endFrame()` first.
+`endFrame()` first. Staged writes go through a buffer copy, so a `w(data, byteOffset)` inside a
+frame needs a 4-byte-aligned `byteOffset` (it throws saying so); outside one, any offset works.
+
+The swapchain texture is acquired lazily on the first `drawTo()` of a frame and reused by the rest
+of it, so a compute-only `beginFrame()`/`endFrame()` never touches the canvas.
 
 A copy cannot be encoded inside a pass, so a staged write during a chained sequence closes the
 compute pass and reopens it, restoring the pipeline and bind group from the last `p.use()`. Writing
@@ -164,10 +170,10 @@ whichever pipeline `use()` named last.
 |---|---|---|
 | `G.createUniformBuffer(bytes)` | `GPUBuffer` | UNIFORM \| COPY_DST |
 | `G.createStorageBuffer(bytesOrData)` | `{ b, w(data, off?), r(nbytes?, off?, Ctor?), clear() }` | STORAGE \| COPY_SRC \| COPY_DST. Pass a byte length, or a TypedArray/ArrayBuffer to size **and** fill in one call. `r` is an async debug readback (stalls!; staging pooled). `w`/`clear` are frame-ordered inside `beginFrame()`. |
-| `G.createBuffer(bytes, usage)` | `{ b, w }` | explicit usage flags |
+| `G.createBuffer(bytes, usage)` | `{ b, w }` | explicit usage flags; size rounded up to 4 bytes |
 | `G.createDispatchIndirectBuffer()` | `{ b, w }` | 12 bytes, INDIRECT \| STORAGE \| COPY_DST |
 | `G.createTexture2D(w, h, format='rgba8unorm', usage?)` | `GPUTexture` | render target / sampled. Default usage is RENDER_ATTACHMENT \| TEXTURE_BINDING \| COPY_SRC \| COPY_DST, so uploads work without opting in. |
-| `G.createStorageTexture2D(w, h, format='rgba32float')` | `GPUTexture` | `textureStore`/`textureLoad` |
+| `G.createStorageTexture2D(w, h, format='rgba32float', usage?)` | `GPUTexture` | `textureStore`/`textureLoad`. Default usage is TEXTURE_BINDING \| STORAGE_BINDING \| COPY_SRC \| COPY_DST. |
 | `G.createSampler({ magFilter, minFilter, wrapU, wrapV })` | `GPUSampler` | defaults nearest/clamp |
 | `G.writeTexture(tex, data, { width?, height?, x?, y?, bytesPerRow?, mipLevel? })` | `GPUTexture` | Raw pixel bytes in (LUTs, generated data). `width`/`height` default to the whole texture; `bytesPerRow` is derived from the format unless you pass it. Needs COPY_DST. |
 | `await G.readTexture(tex, { x?, y?, width?, height?, mipLevel?, Ctor? })` | `Promise<TypedArray>` | Pixels back out. Rows come back **tightly packed** — the 256-byte `bytesPerRow` padding `copyTextureToBuffer` requires is stripped for you. `Ctor` defaults from the format (`*32float` → `Float32Array`, `*32uint` → `Uint32Array`, `*32sint` → `Int32Array`, else `Uint8Array`). Needs COPY_SRC — both texture creators include it. Like `.r()`, it **stalls the pipeline**, and during an open frame it reads pre-frame data and warns. |
