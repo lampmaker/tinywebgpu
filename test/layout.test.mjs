@@ -90,6 +90,59 @@ const layoutOf = uniforms => {
   check('w() rejects plain Arrays', /TypedArray or ArrayBuffer/.test(threw), true);
 }
 
+// --- uniform writes: typed arrays and unknown names ------------------------
+{
+  const { write } = layoutOf({ m: 'mat4x4<f32>' });
+  // a Float32Array out of a maths library used to hit the scalar path and write one NaN
+  write({ m: Float32Array.from({ length: 16 }, (_, i) => i + 1) });
+  check('uniform write accepts a TypedArray', [...new Float32Array(lastWrite)].slice(0, 5), [1, 2, 3, 4, 5]);
+
+  const { write: w2 } = layoutOf({ time: 'f32' });
+  let threw = '';
+  try { w2({ tiem: 1 }); } catch (e) { threw = e.message; }
+  check('uniform write rejects an unknown name', /Unknown uniform 'tiem'/.test(threw), true);
+}
+
+// --- pipeline: generated entry point, dispatch sizing, resource binding -----
+{
+  let lastCode = null, dispatched = null;
+  const pass = { setPipeline: () => { }, setBindGroup: () => { }, dispatchWorkgroups: (...a) => { dispatched = a; }, end: () => { } };
+  let bindGroups = 0;
+  Object.assign(S.device, {
+    createShaderModule: ({ code }) => { lastCode = code; return { getCompilationInfo: async () => ({ messages: [] }) }; },
+    createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }),
+    createBindGroup: () => { bindGroups++; return {}; },
+    createCommandEncoder: () => ({ beginComputePass: () => pass, finish: () => { } }),
+    pushErrorScope: () => { }, popErrorScope: async () => null,
+  });
+  S.device.queue.submit = () => { };
+
+  const p = await S.compute2D({
+    body: 'if (gid.x < UB.n) { a[gid.x] = b[gid.x]; }',
+    uniforms: { n: 'u32' }, resources: { a: 'array<f32>', b: 'array<f32>' },
+    wg: [64, 1, 1],
+  });
+  // compute2D used to pass `body` as declarations and generate an empty main, so the shader
+  // was invalid WGSL and the entry point did nothing
+  check('compute2D puts the body in the entry point',
+    /\{\nif \(gid\.x < UB\.n\) \{ a\[gid\.x\] = b\[gid\.x\]; \}\n\}/.test(lastCode), true);
+
+  const A = S.createStorageBuffer(16), B = S.createStorageBuffer(16);
+  A.b.usage = B.b.usage = GPUBufferUsage.STORAGE;
+  A.b.mapAsync = B.b.mapAsync = () => { };
+  p.setResources({ a: A, b: B });                 // handles, not .b
+  check('setResources unwraps buffer handles', bindGroups, 1);
+  p.setResources({ a: A, b: B });
+  check('setResources compares by value, not reference', bindGroups, 1);
+  p.setResources({ b: A });                        // partial update merges over what is bound
+  check('setResources merges partial updates', bindGroups, 2);
+
+  p.run(1000);
+  check('run() divides item count by the workgroup size', dispatched, [16, 1, 1]);
+  p.dispatch(1000);
+  check('dispatch() still counts workgroups', dispatched, [1000, 1, 1]);
+}
+
 // --- readTexture: rows come back tightly packed, without the 256-byte padding -------------
 {
   globalThis.GPUMapMode ??= { READ: 1 };

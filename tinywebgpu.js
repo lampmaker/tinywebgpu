@@ -35,6 +35,7 @@ Terminology cheatsheet (quick):
  *
  * @typedef {PipelineCommon & {
  *   dispatch: (x?: number, y?: number, z?: number, encoder?: GPUCommandEncoder) => void,
+ *   run: (w?: number, h?: number, d?: number, encoder?: GPUCommandEncoder) => void,
  *   dispatchIndirect: (buffer: GPUBuffer, byteOffset?: number, encoder?: GPUCommandEncoder) => void,
  *   use: (pass?: GPUComputePassEncoder) => void,
  *   dispatchOn: (pass: GPUComputePassEncoder|null, x?: number, y?: number, z?: number) => void,
@@ -80,7 +81,9 @@ export const WEBGPU = () => {
         }
       }
       S.frame.encoder = S.device.createCommandEncoder({ label: 'frame' });
-      S.frame.view = opts.view ?? (S.context?.getCurrentTexture()?.createView()) ?? null;
+      // Left null unless the caller named a target: the swapchain texture is acquired lazily by
+      // _view(), so a compute-only frame never touches (and never presents) the canvas.
+      S.frame.view = opts.view ?? null;
       S.frame.cpass = null;
       S.frame.owned = false;
       return S.frame;
@@ -144,6 +147,9 @@ export const WEBGPU = () => {
         ? new Uint8Array(data.buffer, data.byteOffset, size)
         : new Uint8Array(data, 0, size);
       c.cpu.set(src, c.cursor);
+      // The copy is rounded up to 4 bytes; zero the tail so a short write cannot smear
+      // whatever the previous frame left in the ring into the bytes past the caller's data.
+      if (need > size) c.cpu.fill(0, c.cursor + size, c.cursor + need);
       const off = c.cursor;
       S._outsidePass(() => S.frame.encoder.copyBufferToBuffer(c.buf, off, dst, dstOff, need));
       c.cursor += need;
@@ -335,9 +341,12 @@ export const WEBGPU = () => {
     _writer: b => (d, o = 0) => {
       if (!(ArrayBuffer.isView(d) || d instanceof ArrayBuffer))
         throw new Error('buffer write: expected a TypedArray or ArrayBuffer.');
-      return S.frame.encoder
-        ? S._stageCopy(b, o, d, d.byteLength)
-        : S.device.queue.writeBuffer(b, o, d.buffer ?? d, d.byteOffset ?? 0, d.byteLength);
+      if (!S.frame.encoder) return S.device.queue.writeBuffer(b, o, d.buffer ?? d, d.byteOffset ?? 0, d.byteLength);
+      // Staged writes go through copyBufferToBuffer, which only takes 4-byte offsets. Outside a
+      // frame the same call would have been fine, so name the constraint instead of letting the
+      // driver reject it.
+      if (o & 3) throw new Error(`buffer write: byteOffset must be a multiple of 4 inside beginFrame() (got ${o}).`);
+      return S._stageCopy(b, o, d, d.byteLength);
     },
     createStorageBuffer: sizeOrData => {
       const init = typeof sizeOrData === 'number' ? null : sizeOrData;
@@ -371,8 +380,9 @@ export const WEBGPU = () => {
 
     // Generic buffer creator with explicit usage flags; minimal helpers
     createBuffer: (size, usage) => {
-      S._checkBufferSize(size, !!(usage & GPUBufferUsage.STORAGE));
-      const b = S.device.createBuffer({ size, usage, label: `buffer ${size}B` });
+      const n = (size + 3) & ~3;                 // same 4-byte rounding createStorageBuffer does
+      S._checkBufferSize(n, !!(usage & GPUBufferUsage.STORAGE));
+      const b = S.device.createBuffer({ size: n, usage, label: `buffer ${n}B` });
       return { b, w: S._writer(b) };
     },
 
@@ -391,7 +401,8 @@ export const WEBGPU = () => {
     // Creates a storage texture — good for compute shaders, ray tracing accumulation,
     // GPGPU processing, or any case you need to read+write pixels directly in a shader.
     // Writable from WGSL via textureStore() / readable via textureLoad().
-    createStorageTexture2D: (width, height, format = 'rgba32float') => S.device.createTexture({ size: { width, height }, format, mipLevelCount: 1, sampleCount: 1, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC, label: `storageTexture2D ${width}x${height} ${format}` }),
+    // COPY_DST is in the default set, like createTexture2D, so writeTexture works without opting in.
+    createStorageTexture2D: (width, height, format = 'rgba32float', usage) => S.device.createTexture({ size: { width, height }, format, mipLevelCount: 1, sampleCount: 1, usage: usage ?? (GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST), label: `storageTexture2D ${width}x${height} ${format}` }),
     //=============================================================================================================================
     // creates a sampler (how to read textures: nearest/linear, clamp/repeat).,   it tells the GPU how to read pixels from a texture when it’s sampled in a shader.
     // options are:
@@ -406,9 +417,12 @@ export const WEBGPU = () => {
     _views: new WeakMap(),
     _viewOf: t => { let v = S._views.get(t); if (!v) S._views.set(t, v = t.createView()); return v; },
     // Where a render pass draws when the caller didn't say: the frame's view, else the swapchain.
+    // Acquired on first use and, inside a frame, cached — so every pass of one frame draws into
+    // the same swapchain texture, and a frame that never draws never acquires one at all.
     _view: () => {
       const v = S.frame.view ?? S.context?.getCurrentTexture().createView();
       if (!v) throw new Error('No render target: init() was called without a canvas context — pass an explicit view.');
+      if (S.frame.encoder) S.frame.view = v;
       return v;
     },
     /**
@@ -434,11 +448,13 @@ export const WEBGPU = () => {
     // Bytes per texel, for the formats these helpers can produce. Derives the default bytesPerRow
     // in writeTexture/readTexture; pass bytesPerRow explicitly for anything exotic.
     _texelBytes: {
-      'r8unorm': 1, 'r8uint': 1, 'r8sint': 1,
-      'rg8unorm': 2, 'r16float': 2, 'r16uint': 2, 'r16sint': 2,
-      'rgba8unorm': 4, 'rgba8unorm-srgb': 4, 'bgra8unorm': 4, 'bgra8unorm-srgb': 4,
-      'rgba8uint': 4, 'rgba8sint': 4, 'rg16float': 4, 'r32float': 4, 'r32uint': 4, 'r32sint': 4,
-      'rgba16float': 8, 'rg32float': 8, 'rg32uint': 8, 'rg32sint': 8,
+      'r8unorm': 1, 'r8snorm': 1, 'r8uint': 1, 'r8sint': 1,
+      'rg8unorm': 2, 'rg8snorm': 2, 'rg8uint': 2, 'rg8sint': 2,
+      'r16float': 2, 'r16uint': 2, 'r16sint': 2,
+      'rgba8unorm': 4, 'rgba8unorm-srgb': 4, 'rgba8snorm': 4, 'bgra8unorm': 4, 'bgra8unorm-srgb': 4,
+      'rgba8uint': 4, 'rgba8sint': 4, 'rgb10a2unorm': 4, 'rg11b10ufloat': 4,
+      'rg16float': 4, 'rg16uint': 4, 'rg16sint': 4, 'r32float': 4, 'r32uint': 4, 'r32sint': 4,
+      'rgba16float': 8, 'rgba16uint': 8, 'rgba16sint': 8, 'rg32float': 8, 'rg32uint': 8, 'rg32sint': 8,
       'rgba32float': 16, 'rgba32uint': 16, 'rgba32sint': 16,
     },
     /**
@@ -482,9 +498,11 @@ export const WEBGPU = () => {
         if (!src.complete) await src.decode();
         source = await createImageBitmap(src);
       }
-      // Every accepted source type reports its size under one of these pairs.
-      const w = source.width ?? source.videoWidth ?? source.displayWidth;
-      const h = source.height ?? source.videoHeight ?? source.displayHeight;
+      // Every accepted source type reports its size under one of these pairs. `||`, not `??`:
+      // a <video> always *has* a `width` property and it is 0 until the layout attribute is set,
+      // so the nullish form picked the zero and never reached videoWidth.
+      const w = source.videoWidth || source.displayWidth || source.width;
+      const h = source.videoHeight || source.displayHeight || source.height;
       if (!w || !h) throw new Error('loadTexture: could not determine source dimensions.');
       // copyExternalImageToTexture requires RENDER_ATTACHMENT in addition to COPY_DST.
       const tex = opts.texture ?? S.createTexture2D(w, h, opts.format ?? 'rgba8unorm', opts.usage);
@@ -524,7 +542,8 @@ export const WEBGPU = () => {
       rb.unmap();
       S._releaseStaging(rb);
       const f = tex.format;
-      const C = opts.Ctor ?? (/32float$/.test(f) ? Float32Array : /32uint$/.test(f) ? Uint32Array : /32sint$/.test(f) ? Int32Array : Uint8Array);
+      const C = opts.Ctor ?? (/32float$/.test(f) ? Float32Array : /32uint$/.test(f) ? Uint32Array
+        : /32sint$/.test(f) ? Int32Array : /16uint$/.test(f) ? Uint16Array : /16sint$/.test(f) ? Int16Array : Uint8Array);
       return C === Uint8Array ? out : new C(out.buffer);
     },
     // ------------------------------
@@ -587,8 +606,12 @@ export const WEBGPU = () => {
         uniformWrite = values => {
           for (const [name, value] of Object.entries(values)) {
             const field = layout[name];
-            if (!field) continue;
-            const array = Array.isArray(value) ? value : [value];
+            // A name that is not in the schema used to be dropped in silence — the single most
+            // expensive typo in the toolkit, since nothing at all happened. Say so instead.
+            if (!field) throw new Error(`Unknown uniform '${name}'. Declared: ${Object.keys(layout).join(', ') || '(none)'}.`);
+            // TypedArrays count as vectors/matrices too: a Float32Array mat4 out of a maths
+            // library used to fall into the scalar branch and write a single NaN.
+            const array = Array.isArray(value) || ArrayBuffer.isView(value) ? value : [value];
             if (S.debug && array.length > field.size) {
               console.warn(`Uniform '${name}' provided ${array.length} values but type ${field.wgslType} fits ${field.size}. Extra values will be ignored.`);
             }
@@ -692,7 +715,7 @@ ${structFields.join('\n')}
   // uniforms: object with WGSL basic types (f32, vec2<f32>, etc.)
   // resources: object with full WGSL resource types (texture_storage_2d<...>, array<...>, etc.)
 
-  const makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format, isCompute = false, blend = null }) => {
+  const makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format, isCompute = false, blend = null, wg = [8, 8, 1] }) => {
     // Process dual schema
     const schemaResult = S.makeUniformsAndResources(uniforms, resources, { g: 0, startBinding: 0 });
 
@@ -743,7 +766,17 @@ ${structFields.join('\n')}
 
     // Bind group handling
     let bindGroup = null;
-    let lastResourcesObj = null;
+    let bound = null;              // the merged resource map the current bindGroup was built from
+    // What a declared type needs the resource to have been created with. Checking it here turns
+    // the commonest texture mistake (a plain createTexture2D behind a texture_storage_2d) from a
+    // wall of driver validation text into one line naming the resource and the missing flag.
+    const _usageNeed = info => {
+      if (info.isBuf) return [typeof GPUBufferUsage !== 'undefined' ? GPUBufferUsage.STORAGE : 0, 'GPUBufferUsage.STORAGE'];
+      if (info.isTex) return /^texture_storage_/.test(info.wgslType)
+        ? [typeof GPUTextureUsage !== 'undefined' ? GPUTextureUsage.STORAGE_BINDING : 0, 'GPUTextureUsage.STORAGE_BINDING (use createStorageTexture2D)']
+        : [typeof GPUTextureUsage !== 'undefined' ? GPUTextureUsage.TEXTURE_BINDING : 0, 'GPUTextureUsage.TEXTURE_BINDING'];
+      return [0, ''];
+    };
     const validateResources = (resourceValues) => {
       const expected = schemaResult.resourceFields;
       const missing = [];
@@ -758,15 +791,22 @@ ${structFields.join('\n')}
         const v = vals[name];
         const expectedType = info?.wgslType ?? resources[name];
         // Heuristic checks to catch obvious mismatches while avoiding false positives
+        let bad = null;
         if (info?.isBuf) {
-          const isGPUBuffer = (v && (typeof v.mapAsync === 'function' || typeof v.getMappedRange === 'function')) || (v && v.buffer && (typeof v.buffer.mapAsync === 'function'));
-          if (!isGPUBuffer) mismatched.push({ name, expected: expectedType, got: typeof v });
+          const isGPUBuffer = typeof v.mapAsync === 'function' || typeof v.getMappedRange === 'function' || typeof v.buffer?.mapAsync === 'function';
+          if (!isGPUBuffer) bad = typeof v;
         } else if (info?.isTex) {
-          const looksLikeTextureOrView = v && (typeof v.createView === 'function' || 'dimension' in v || 'mipLevelCount' in v);
-          if (!looksLikeTextureOrView) mismatched.push({ name, expected: expectedType, got: typeof v });
+          const looksLikeTextureOrView = typeof v.createView === 'function' || 'dimension' in v || 'mipLevelCount' in v;
+          if (!looksLikeTextureOrView) bad = typeof v;
         } else if (expectedType === 'sampler') {
           // Best-effort: sampler is opaque; skip strict check
         }
+        // Right kind of object, wrong usage flags: catch it here rather than in the driver.
+        if (!bad && info && v.usage != null) {
+          const [need, label] = _usageNeed(info);
+          if (need && !(v.usage & need)) bad = `a ${info.isBuf ? 'buffer' : 'texture'} created without ${label}`;
+        }
+        if (bad) mismatched.push({ name, expected: expectedType, got: bad });
       }
       if (missing.length || mismatched.length) {
         let msg = 'BindGroup(0) resource validation failed.';
@@ -787,12 +827,18 @@ ${structFields.join('\n')}
         throw new Error(msg);
       }
     };
+    // Resources merge into what is already bound and are compared by value, so a partial update
+    // ({ grid } after both were set) is legal, and passing the same handles again every frame is
+    // free instead of rebuilding a bind group per frame. `{b, w, r}` handles unwrap themselves.
     const rebindResources = (resourceValues) => {
-      if (bindGroup && resourceValues === lastResourcesObj) return; // skip unchanged ref
-      lastResourcesObj = resourceValues;
+      const next = { ...bound };
+      for (const [name, v] of Object.entries(resourceValues ?? {}))
+        next[name] = schemaResult.resourceLayout[name]?.isBuf && typeof v?.b?.mapAsync === 'function' ? v.b : v;
+      if (bindGroup && bound && schemaResult.resourceFields.every(n => next[n] === bound[n])) return;
+      bound = next;
       const baseEntries = schemaResult.uniformBuffer ? [{ binding: 0, resource: { buffer: schemaResult.uniformBuffer } }] : [];
-      if (schemaResult.resourceFields.length > 0) validateResources(resourceValues || {});
-      const resourceEntries = schemaResult.createResourceEntries(resourceValues || {});
+      if (schemaResult.resourceFields.length > 0) validateResources(next);
+      const resourceEntries = schemaResult.createResourceEntries(next);
       const entries = [...baseEntries, ...resourceEntries].filter(e => !strippedBindings.has(e.binding));
       S.device.pushErrorScope('validation');
       bindGroup = S.bindGroup(pipeline, 0, entries);
@@ -803,15 +849,25 @@ ${structFields.join('\n')}
       }).catch(() => { });   // scope pop rejects if the device is lost meanwhile
     };
 
-    // Auto-init bind group ONLY when there are no extra resources in schema.
-    // If resources exist, wait for user to provide them to avoid bind layout mismatches.
-    if (schemaResult.uniformBuffer && schemaResult.resourceFields.length === 0) {
+    // Auto-init the bind group when nothing is left for the caller to supply — no resources in
+    // the schema, or every one of them stripped by auto layout. Otherwise wait for setResources,
+    // so the group is never built against a layout that is still missing entries.
+    if (schemaResult.uniformBuffer &&
+        schemaResult.resourceFields.every(n => strippedBindings.has(schemaResult.resourceLayout[n].binding))) {
       rebindResources({});
     }
+
+    // Does @group(0) still exist after auto layout stripped the unused bindings? If it does and
+    // nothing has been bound to it, dispatching produces a bare "bind group 0 is not set" from
+    // the driver — say which call is missing instead.
+    const needsBindGroup = (schemaResult.uniformBuffer && !strippedBindings.has(schemaResult.uniformBinding))
+      || schemaResult.resourceFields.some(n => !strippedBindings.has(schemaResult.resourceLayout[n].binding));
 
     // Applies this pipeline's state to a compute pass. Also stashed on the frame by use(), so a
     // pass torn down and reopened around a staged write comes back with the same state.
     const bind = pass => {
+      if (!bindGroup && needsBindGroup)
+        throw new Error(`No resources bound. Call setResources({ ${schemaResult.resourceFields.join(', ')} }) before dispatching/drawing.`);
       pass.setPipeline(pipeline);
       if (bindGroup) pass.setBindGroup(0, bindGroup);
     };
@@ -845,6 +901,11 @@ ${structFields.join('\n')}
 
     return isCompute ? Object.assign(common, {
       dispatch: (x = 1, y = 1, z = 1, encoder = null) => runPass({ dispatch: [x, y, z] }, encoder),
+      // dispatch() counts workgroups; run() counts the items you actually have and divides by the
+      // workgroup size for you — the `Math.ceil(n / 64)` every call site was writing by hand.
+      // Guard the tail with `if (gid.x >= n) { return; }` as usual.
+      run: (w = 1, h = 1, d = 1, encoder = null) =>
+        runPass({ dispatch: [Math.ceil(w / wg[0]), Math.ceil(h / (wg[1] ?? 1)), Math.ceil(d / (wg[2] ?? 1))] }, encoder),
       dispatchIndirect: (buffer, byteOffset = 0, encoder = null) => {
         const enc = encoder ?? S.frame.encoder ?? S.device.createCommandEncoder();
         if (enc === S.frame.encoder && S.frame.cpass) S._endPass();
@@ -908,7 +969,7 @@ ${main}
 }
 `.trim();
 
-    return makePipeline({ code, uniforms, resources, isCompute: true });
+    return makePipeline({ code, uniforms, resources, isCompute: true, wg });
   };
 
   /**
@@ -951,15 +1012,15 @@ ${frag}
     });
   };
   /**
-   * makeCompute + a `run(w?, h?, d?)` helper that dispatches ceil(w/wg[0]) × ceil(h/wg[1])
-   * × ceil(d/wg[2]) workgroups. The body must use `gid` bounds checks for non-multiple sizes.
+   * makeCompute with a default `size`, so `run()` with no arguments covers the whole grid.
+   * `body` is the entry-point *statements* (it gets `gid`/`lid`/`wid`); put helper functions and
+   * structs in `decls`. The body must use `gid` bounds checks for non-multiple sizes.
    * @returns {Promise<ComputePipeline & {run: (w?: number, h?: number, d?: number) => void}>}
    */
-  S.compute2D = async ({ body, uniforms = {}, resources = {}, size = [1, 1], wg = [8, 8, 1] }) => {
-    const p = await S.makeCompute(body, '', uniforms, resources, { wg });
-    return Object.assign(p, {
-      run: (w = size[0], h = size[1], d = 1) => p.dispatch(Math.ceil(w / wg[0]), Math.ceil(h / wg[1]), Math.ceil(d / (wg[2] ?? 1)))
-    });
+  S.compute2D = async ({ body, decls = '', uniforms = {}, resources = {}, size = [1, 1], wg = [8, 8, 1] }) => {
+    const p = await S.makeCompute(decls, body, uniforms, resources, { wg });
+    const run = p.run;
+    return Object.assign(p, { run: (w = size[0], h = size[1], d = 1) => run(w, h, d) });
   };
   return S
 }
