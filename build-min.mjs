@@ -19,8 +19,8 @@
 //      and every debug `label:`. All four are diagnostics — the driver still validates.
 //   3. `mangleProps: /^_/` renames the internal properties. A minifier will not touch `obj.foo`
 //      on its own, since something outside might read it by name; the regex is the promise that
-//      nothing does, and no `_`-prefixed property appears in API.md. The two staging hooks are
-//      reserved because test/layout.test.mjs stubs them by name when run against this build.
+//      nothing does, and no `_`-prefixed property appears in API.md. A handful are reserved
+//      because the tests reach for them by name when run against this build.
 //   4. The F_* switches drop whole entry points. Only `build:tiny` touches them, and only the
 //      ones you say — see --with / --without below.
 //
@@ -33,7 +33,7 @@
 //   node build-min.mjs --tiny --with=show,blend          ...except these
 //   node build-min.mjs --tiny --without=pingpong         keep the defaults, drop one more
 //   node build-min.mjs --tiny --out=dist/twg.js          write somewhere else
-//   node build-min.mjs --tiny --iife                     a plain <script>: globalThis.TinyWebGPU
+//   node build-min.mjs --tiny --iife                     a plain <script>: globalThis.WEBGPU
 //   node build-min.mjs --tiny --no-banner                drop the 63-byte MIT header
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -142,8 +142,9 @@ const { code, warnings } = await transform(source, {
   drop: ['console'],
   mangleProps: /^_/,
   // Reserved because test/layout.test.mjs reaches for them by name when run against this build:
-  // the staging pair is stubbed out, and the texel-size derivation is asserted directly.
-  reserveProps: /^_(acquireStaging|releaseStaging|texelBytes)$/,
+  // the staging pair is stubbed out, and the texel-size derivation and blend presets are
+  // asserted directly.
+  reserveProps: /^_(acquireStaging|releaseStaging|texelBytes|resolveBlend)$/,
   legalComments: 'none',
   ...(args.includes('--no-banner')
     ? {}

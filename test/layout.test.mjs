@@ -198,6 +198,29 @@ const layoutOf = uniforms => {
   check('texel bytes: depth24plus stays unknown', b('depth24plus'), undefined);
 }
 
+// --- blend presets ----------------------------------------------------------
+{
+  // The three presets are built from a two-argument helper rather than written out, on the
+  // observation that they all add and all leave alpha's source at `one`. Spelled out here so
+  // that shortcut cannot drift: these are the exact states example 5 and the docs promise.
+  const add = (srcFactor, dstFactor) => ({ srcFactor, dstFactor, operation: 'add' });
+  check('blend: alpha', S._resolveBlend('alpha'),
+    { color: add('src-alpha', 'one-minus-src-alpha'), alpha: add('one', 'one-minus-src-alpha') });
+  check('blend: premultiplied', S._resolveBlend('premultiplied'),
+    { color: add('one', 'one-minus-src-alpha'), alpha: add('one', 'one-minus-src-alpha') });
+  check('blend: additive', S._resolveBlend('additive'),
+    { color: add('one', 'one'), alpha: add('one', 'one') });
+
+  check('blend: null is opaque', S._resolveBlend(null), null);
+  const raw = { color: { srcFactor: 'zero', dstFactor: 'one', operation: 'subtract' } };
+  check('blend: a raw GPUBlendState passes straight through', S._resolveBlend(raw), raw);
+
+  let threw = '';
+  try { S._resolveBlend('glow'); } catch (e) { threw = e.message; }
+  check('blend: an unknown preset names the ones that exist',
+    /Unknown blend preset 'glow'.*'alpha', 'premultiplied', 'additive'/.test(threw), true);
+}
+
 // --- ping-pong pairs --------------------------------------------------------
 {
   const seed = Float32Array.from([1, 2, 3, 4]);

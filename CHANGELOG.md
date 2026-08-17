@@ -91,7 +91,26 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
   the tiny build. `--tiny` implies it. The numbers are listed in the `ERRORS` table in
   `build-min.mjs`, and the build fails if a number is reused or goes undocumented.
 - **`npm run test:tiny`** builds a feature-reduced bundle and runs the suite against it, so the
-  switches are covered rather than assumed. `npm run test:all` runs source, minified and tiny.
+  switches are covered rather than assumed. `npm run test:all` runs source, minified and tiny —
+  224 assertions across the three.
+
+**Added — tests**
+
+- **`test/frame.test.mjs`** — the encoder/pass lifecycle, which the aliasing pass rewrote and
+  which nothing was covering. The device stub records the GPU command stream in order, so each
+  case asserts the *shape* of what was submitted rather than that a call returned: how many
+  encoders were opened, where the passes started and ended, that a staged write lands between the
+  dispatches it separates, and that a pass torn down around that write comes back with its
+  pipeline rebound. The sequences mirror the examples — `beginFrame` batching (3, 7), indirect
+  dispatch inside a frame (4), and `beginCompute` + `use()` + `dispatchOn` with `setUniforms`
+  between the dispatches (6), which is the sharp one. The whole file passes unchanged against the
+  pre-refactor library, which is what makes it a regression test and not a description of the new
+  code.
+- **`test/tiny.test.mjs`** — runs against a fully stripped `--tiny` bundle: the optional entry
+  points really are absent, the core still dispatches and draws, and `MSG=false` throws numbers.
+  A feature guard drawn one line too wide would take part of `makePipeline` with it.
+- **Blend presets are asserted explicitly** in `layout.test.mjs`, since they are now built from a
+  two-argument helper rather than written out.
 
 **Fixed**
 
