@@ -23,6 +23,7 @@ Omit `ctx` for compute-only use — render calls then need an explicit target vi
 | `features: string[]` | Requested best-effort. Any the adapter doesn't support are dropped with a console warning instead of throwing, so asking is always safe. Check `G.features` (a `Set`) for what was actually granted. |
 | `limits: {}` | Shallow-merged over the defaults, so you can raise or override individual limits. |
 | `alphaMode` | Canvas alpha mode, default `'opaque'`. Use `'premultiplied'` for a transparent canvas. |
+| `canvasUsage` | Usage flags for the swapchain texture, default `RENDER_ATTACHMENT`. Add `GPUTextureUsage.COPY_SRC` if you want to `readTexture`/`save` the canvas texture itself. |
 
 ```js
 const G = await WEBGPU().init(ctx, { features: ['timestamp-query'] });
@@ -47,7 +48,7 @@ loss; set this to rebuild/recover. Uncaptured WebGPU errors are also logged with
 
 ## Pipelines (the main API)
 
-### `await G.makeRender(fragWGSL, uniforms?, resources?, { format?, blend? })`
+### `await G.makeRender(fragWGSL, uniforms?, resources?, { format?, blend?, targets? })`
 Fullscreen pipeline. You provide a WGSL function `fn frag(uv: vec2<f32>) -> vec4<f32>`; the
 toolkit generates the vertex shader (single fullscreen triangle) and the `fs_main` wrapper.
 Only the uniforms you declare exist — nothing is auto-added.
@@ -68,17 +69,45 @@ const overlay = await G.makeRender(frag, {}, {}, { blend: 'alpha' });
 overlay.drawTo(view, 'load');        // 'load' keeps what's underneath
 ```
 
+`targets` turns on **multiple render targets**. It is `{ name: format }`, and the matching
+`struct FSOut { @location(i) name: vec4<f32>, … }` is generated for you in key order — so `frag`
+returns `FSOut` instead of `vec4<f32>`, and `drawTo` takes an object keyed the same way:
+
+```js
+const gbuf = await G.makeRender(`
+    fn frag(uv: vec2<f32>) -> FSOut {
+      var o: FSOut;
+      o.colour = vec4<f32>(uv, 0.0, 1.0);
+      o.normal = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+      return o;
+    }`,
+  {}, {}, { targets: { colour: 'rgba8unorm', normal: 'rgba16float' } });
+
+gbuf.drawTo({ colour: colourTex, normal: normalTex });
+```
+
+`format` is ignored when `targets` is given. A blend state, if set, applies to every target. All
+attachments must share width/height/sampleCount, and the device caps both the number
+(`maxColorAttachments`, usually 8) and the total bytes per sample
+(`maxColorAttachmentBytesPerSample`, often 32 — two `rgba32float` targets and you are at the
+ceiling).
+
 ### `await G.makeCompute(bodyWGSL, mainWGSL, uniforms?, resources?, { wg = [8,8,1] })`
 Compute pipeline. `bodyWGSL` = declarations (functions, structs); `mainWGSL` = statements placed
 inside the generated entry point, which receives `gid` (global), `lid` (local), `wid`
 (workgroup) invocation ids. `wg` is the `@workgroup_size`.
 
 ### Schemas
-- `uniforms`: `{ name: 'f32' | 'i32' | 'u32' | 'vec2/3/4<f32|u32|i32>' | 'mat4x4<f32>' }` →
+- `uniforms`: `{ name: 'f32' | 'i32' | 'u32' | 'vec2/3/4<f32|u32|i32>' | 'matCxR<f32>' }` →
   generated into `struct Uniforms {...}` bound as `UB` at `@group(0) @binding(0)`. Layout
   follows WGSL uniform rules (vec3: align 16, size 12 — a following scalar packs into its tail).
-- Schema resources the shader never references are skipped from the bind group with a console
-  warning (`layout:'auto'` strips their bindings — see “Sharp edges” in the README).
+  Every `matCxR` for C, R in 2..4 is supported. Pass matrices as tightly packed column-major
+  values; a 3-row matrix has its columns written onto the 16-byte stride WGSL requires, so you
+  hand over 9 numbers for a `mat3x3<f32>` and the padding is added for you.
+- **A schema entry the shader never references is not declared at all.** It is left out of the
+  generated WGSL and out of the bind group, with a console warning. Bindings are numbered over
+  what remains. Unreferenced *uniforms* keep their buffer and setters — only the binding goes —
+  so `p.setUniforms(...)` on a shader that ignores `UB` still works rather than throwing.
 - `resources`: `{ name: <full WGSL type> }` → bound in declaration order after the uniform
   buffer. Supported forms:
   - `'array<T>'` → `var<storage, read_write>` runtime array (T may be a struct you define in
@@ -107,13 +136,28 @@ Compute-only:
 Render-only:
 | Member | Meaning |
 |---|---|
-| `p.drawTo(view?, clear=[0,0,0,1], encoder?)` | Draw the fullscreen triangle. `view` defaults to the frame view or a fresh swapchain view. `clear` = color array or `'load'` to keep contents. |
+| `p.drawTo(view?, clear=[0,0,0,1], encoder?)` | Draw the fullscreen triangle. `view` is a `GPUTextureView` or a `GPUTexture`, defaulting to the frame view or a fresh swapchain view. With `targets`, pass `{ name: view\|texture, … }` instead. `clear` = color array or `'load'` to keep contents. |
 
 ### One-liners
 - `await G.drawQuad({ frag, uniforms, resources, clear, format, blend })` → pipeline + `run(u?, view?)`
 - `await G.compute2D({ body, decls, uniforms, resources, size, wg })` → `makeCompute` with a default
   `size`, so `run()` with no arguments covers the whole grid. `body` is the entry-point statements;
   `decls` is for helper functions and structs.
+- `await G.show(tex, view?, opts?)` → draws a texture onto a target. `view` defaults to the canvas
+  and accepts a `GPUTexture` or a view. Reads with `textureLoad`, **not** a sampler, so
+  unfilterable formats (`rgba32float`, the integer formats) work — at the cost of no filtering.
+  The source's first row lands on the target's first row, so images are the right way up and
+  `show(a, b)` round-trips through `readTexture(b)`. `opts`: `format` (target format, default the
+  canvas format), `scale`/`offset` (per-channel `value * scale + offset`, enough to look at an HDR
+  or signed buffer without writing a shader), `clear`, and `flipY: true` for a bottom-up source.
+  One pipeline is cached per (target format, sample type, flip). Returns the pipeline.
+- `await G.save(tex, filename?, opts?)` → downloads a texture as an image file and returns the
+  `Blob`. 8-bit RGBA/BGRA only — tone-map an HDR target into an `rgba8unorm` texture first (`show`
+  with a `scale` will do). BGRA channels are swapped for you. `opts`: `type` (default
+  `'image/png'`), `quality`, `download: false` to get the Blob without triggering a download, plus
+  the `x`/`y`/`width`/`height`/`mipLevel` region keys `readTexture` takes. There is no tiling —
+  render as large as `maxTextureDimension2D` allows and save once. The canvas texture is not
+  saveable unless you passed `canvasUsage` with `COPY_SRC` to `init`.
 
 ## Frame API (batching)
 
@@ -172,6 +216,9 @@ whichever pipeline `use()` named last.
 | `G.createStorageBuffer(bytesOrData)` | `{ b, w(data, off?), r(nbytes?, off?, Ctor?), clear() }` | STORAGE \| COPY_SRC \| COPY_DST. Pass a byte length, or a TypedArray/ArrayBuffer to size **and** fill in one call. `r` is an async debug readback (stalls!; staging pooled). `w`/`clear` are frame-ordered inside `beginFrame()`. |
 | `G.createBuffer(bytes, usage)` | `{ b, w }` | explicit usage flags; size rounded up to 4 bytes |
 | `G.createDispatchIndirectBuffer()` | `{ b, w }` | 12 bytes, INDIRECT \| STORAGE \| COPY_DST |
+| `G.createPingPong(bytesOrData)` | `{ read, write, swap() }` | Two storage buffers for read-one/write-the-other simulation steps. A TypedArray/ArrayBuffer seeds **both** halves, so a swap before the first step is harmless. `read`/`write` are ordinary `createStorageBuffer` handles and can be passed straight to `setResources`. |
+| `G.createPingPongTexture2D(w, h, format='rgba16float', usage?)` | `{ read, write, swap() }` | The texture flavour; both halves come from `createStorageTexture2D`. Pass `usage` to add `RENDER_ATTACHMENT` for render-target ping-pong. |
+| `G.pingPong(make)` | `{ read, write, swap() }` | The general form — calls `make()` twice. |
 | `G.createTexture2D(w, h, format='rgba8unorm', usage?)` | `GPUTexture` | render target / sampled. Default usage is RENDER_ATTACHMENT \| TEXTURE_BINDING \| COPY_SRC \| COPY_DST, so uploads work without opting in. |
 | `G.createStorageTexture2D(w, h, format='rgba32float', usage?)` | `GPUTexture` | `textureStore`/`textureLoad`. Default usage is TEXTURE_BINDING \| STORAGE_BINDING \| COPY_SRC \| COPY_DST. |
 | `G.createSampler({ magFilter, minFilter, wrapU, wrapV })` | `GPUSampler` | defaults nearest/clamp |
@@ -184,7 +231,7 @@ whichever pipeline `use()` named last.
 ## Lower-level escape hatches
 
 `G.makeShader(code)` (returns a cached promise of the compiled module; applies `G.pre`),
-`G.makeRenderPipeline(vs, fs, format, topology?)`, `G.makeComputePipeline(module)`,
+`G.makeRenderPipeline(vs, fs, formatOrFormats, topology?, blend?)` (an array of formats gives multiple targets), `G.makeComputePipeline(module)`,
 `G.bindGroup(pipeline, groupIndex, entries)`,
 `G.makeUniformsAndResources(...)` (the schema engine itself).
 

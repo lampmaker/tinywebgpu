@@ -4,6 +4,53 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Added**
+
+- **`G.show(tex, view?, opts?)`** — draw a texture onto a target. The shortest path from a compute
+  result to pixels, and it reads with `textureLoad` rather than a sampler on purpose: `rgba32float`
+  and the other unfilterable formats — exactly what a GPGPU pass writes — are rejected outright by
+  a sampler. `scale`/`offset` tone-map on the way through. Orientation is source-row-0 to
+  target-row-0, so images come out the right way up and `show(a, b)` round-trips through
+  `readTexture(b)`; `flipY: true` opts back into the raw uv.
+- **`G.save(tex, filename?, opts?)`** — download a texture as PNG/JPEG/WebP, or take the `Blob`
+  with `download: false`. BGRA channels are swapped for you. No tiling: render as large as
+  `maxTextureDimension2D` allows and save once.
+- **Ping-pong pairs** — `createPingPong(bytesOrData)`, `createPingPongTexture2D(w, h, format?)` and
+  the general `pingPong(make)`, each returning `{read, write, swap()}`. Seeding from a TypedArray
+  fills both halves, so a swap before the first step is harmless.
+- **Multiple render targets** — `makeRender(frag, u, r, { targets: { name: format, … } })` generates
+  the `struct FSOut` with its `@location` indices in key order, and `drawTo({ name: view, … })`
+  binds them by name. A single target keeps the plain `-> vec4<f32>` contract.
+- **Every `matCxR<f32>` uniform**, not just `mat4x4`. The type table became arithmetic on the type
+  string, so `mat2x2` … `mat4x3` all work; a 3-row matrix has its columns written onto the 16-byte
+  stride WGSL requires, so you pass 9 tightly packed numbers for a `mat3x3<f32>`.
+- **`init(ctx, { canvasUsage })`** — swapchain usage flags, so adding `COPY_SRC` makes the canvas
+  texture itself readable and saveable.
+
+**Changed**
+
+- **An unreferenced schema entry is no longer declared at all.** It used to be emitted, stripped by
+  `layout:'auto'`, then detected by regex so its bind-group entry could be filtered back out. Now
+  the schema is filtered before anything is generated, so the WGSL, the binding numbers and the
+  bind group agree by construction. The console warning stays. Unreferenced *uniforms* keep their
+  buffer and setters — only the binding goes — so `setUniforms` on a shader that ignores `UB` still
+  works instead of throwing.
+- **Bytes-per-texel is derived from the format name** instead of tabulated, which added
+  `r16unorm`, `r16snorm`, `rg16unorm`, `rg16snorm`, `rgba16unorm`, `rgba16snorm` and `rgb10a2uint`.
+  Every copyable colour format WebGPU has is now covered, so `writeTexture`/`readTexture` stop
+  demanding an explicit `bytesPerRow` for them.
+- **Uniform writes resolve their destination view and integer coercion once**, at layout time,
+  rather than running two regexes per field on every `setUniforms()` call.
+- **One pass-execution path.** `dispatch`, `run`, `dispatchIndirect` and `drawTo` all go through a
+  single `runPass`, so the encoder/pass lifecycle exists in one place instead of three.
+- **The minified build is smaller and strips more.** `mangleProps` renames the internal
+  `_`-prefixed properties, `DIAG` now also folds away the resource validator, the buffer-size
+  check and every debug `label`, and the spec-fixed usage flags are named constants the minifier
+  can inline. Net of the features above: 19.0 KB → 18.2 KB raw. A caveat worth recording — the
+  classic tricks that were considered and rejected (packing API names into strings, binding hot
+  methods to short locals) move raw bytes but not gzipped ones: rebinding every hot call site
+  measured −992 raw and **−65 gzipped**, because gzip already deduplicates across the file.
+
 **Fixed**
 
 - **`compute2D` never ran anything.** It passed its `body` to `makeCompute` as *declarations* and

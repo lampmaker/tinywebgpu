@@ -130,15 +130,84 @@ const glow = await G.makeRender(frag, {}, {}, { blend: 'additive' });
 glow.drawTo(view, 'load');           // 'load' keeps the existing contents
 ```
 
+## Seeing it, saving it, ping-ponging it
+
+`show()` is the shortest path from a texture to pixels — the call you want when a compute pass
+produced something and you just want to look at it:
+
+```js
+G.show(result);                                  // onto the canvas
+G.show(hdr, null, { scale: [0.25, 0.25, 0.25, 1] });   // tone-map an HDR buffer on the way
+G.show(depth, myTarget.createView());            // or into a texture you own
+```
+
+It reads with `textureLoad`, not a sampler, which is the whole point: `rgba32float` and the other
+unfilterable formats — exactly the ones a GPGPU pass writes — are *rejected* by a sampler. The
+source's first row lands on the target's first row, so images come out the right way up and
+`show(a, b)` round-trips through `readTexture(b)`.
+
+`save()` writes a texture to an image file:
+
+```js
+await G.save(frame, 'render.png');               // 8-bit RGBA/BGRA only
+await G.save(frame, 'render.jpg', { type: 'image/jpeg', quality: 0.92 });
+const blob = await G.save(frame, '', { download: false });   // just the Blob
+```
+
+Render big and save once — there is no tiling, because `maxTextureDimension2D` (8192–16384) is a
+long way past a canvas. To capture the canvas itself, `init(ctx, { canvasUsage })` with `COPY_SRC`
+included; a swapchain is `RENDER_ATTACHMENT` only by default.
+
+Ping-pong pairs cover the read-one-write-the-other pattern every simulation needs:
+
+```js
+const grid = G.createPingPong(W * H * 4);        // or seed both halves from a TypedArray
+step.resources = { src: grid.read, dst: grid.write };
+step.run(W, H);
+grid.swap();
+```
+
+`createPingPongTexture2D(w, h, format?)` is the texture flavour, and `pingPong(make)` wraps any
+factory you like.
+
+## Multiple render targets
+
+Name your targets and the `FSOut` struct is generated for you, `@location` indices and all — the
+part that is easy to get silently wrong by hand:
+
+```js
+const gbuf = await G.makeRender(`
+    fn frag(uv: vec2<f32>) -> FSOut {
+      var o: FSOut;
+      o.colour = vec4<f32>(uv, 0.0, 1.0);
+      o.normal = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+      return o;
+    }`,
+  {}, {}, { targets: { colour: 'rgba8unorm', normal: 'rgba16float' } });
+
+gbuf.drawTo({ colour: colourTex, normal: normalTex });   // keyed by name, not position
+```
+
+All attachments must share a size, and the device caps both the count (`maxColorAttachments`,
+usually 8) and the total bytes per sample (`maxColorAttachmentBytesPerSample`, often 32 — so two
+`rgba32float` targets is the ceiling). A single target keeps the plain `-> vec4<f32>` contract.
+
 ## Minified build
 
-`tinywebgpu.min.js` — **18.9 KB** (7.2 KB gzipped), versus 57.2 KB for the source. Rebuild it
+`tinywebgpu.min.js` — **18.2 KB** (7.4 KB gzipped), versus 65.8 KB for the source. Rebuild it
 with `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
 
-It is a **production artifact and it is silent**: every `console` warning is stripped, and so is
-the WGSL compile-error log with its source window and caret. Failures still *throw*, with their
-messages intact — including the bind-group validation error that catches a missing or
-mistyped resource — you just get no diagnostics on the way there.
+It is a **production artifact and it is silent**: every `console` warning is stripped, and so are
+the WGSL compile-error log with its source window and caret, the schema resource validator, and
+the debug `label`s on every GPU object. Failures still *throw*, with their messages intact — you
+just get no diagnostics on the way there, and a bad resource surfaces as the driver's own
+bind-group error rather than a line naming the field.
+
+Worth knowing if you are chasing bytes: nearly all of the classic minification tricks — packing
+API names into strings, binding hot methods to short locals — move *raw* bytes and barely touch
+the gzipped size, because gzip already deduplicates across the whole file. Rebinding every hot
+call site in this library was measured at −992 raw bytes and **−65 gzipped**. Optimise raw size
+only if you inline the library into an HTML file with a hard budget.
 
 So: develop against `tinywebgpu.js`, switch to the minified file when you ship. `main` and
 `exports` point at the readable source on purpose, so you never get the silent build by
@@ -161,11 +230,12 @@ G.pre = shorthand({ RAY: 'MyRay', ...TOKENS });
 | | |
 |---|---|
 | Setup | `init(ctx?)` (no ctx = compute-only) · `resizeCanvas()` · `debug` · `pre` · `onDeviceLost` |
-| Pipelines | `makeRender(frag, uniforms?, resources?, {format?})` · `makeCompute(body, main, uniforms?, resources?, {wg?})` |
+| Pipelines | `makeRender(frag, uniforms?, resources?, {format?, blend?, targets?})` · `makeCompute(body, main, uniforms?, resources?, {wg?})` |
 | Pipeline object | `p.uniforms = {…}` / `setUniform(s)` · `p.resources = {…}` / `setResources` · `run(w,h,d)` (items) · `dispatch(x,y,z)` (workgroups) · `dispatchIndirect(buf, off)` · `drawTo(view?, clear?)` |
-| One-liners | `drawQuad({frag, uniforms, …})` · `compute2D({body, size, wg, …})` |
+| One-liners | `drawQuad({frag, uniforms, …})` · `compute2D({body, size, wg, …})` · `show(tex, view?, opts?)` · `save(tex, filename?, opts?)` |
 | Frame API | `beginFrame()` / `endFrame()` · `beginCompute()` / `endCompute()` + `p.use()` / `p.dispatchOn()` for chained passes |
 | Buffers | `createUniformBuffer(bytes)` · `createStorageBuffer(bytes \| data)` → `{b, w, r, clear}` · `createBuffer(bytes, usage)` · `createDispatchIndirectBuffer()` |
+| Ping-pong | `createPingPong(bytes \| data)` · `createPingPongTexture2D(w, h, format?)` · `pingPong(make)` → `{read, write, swap()}` |
 | Textures | `createTexture2D(w, h, format?, usage?)` · `createStorageTexture2D(w, h, format?)` · `createSampler(opts)` · `writeTexture(tex, data)` · `loadTexture(src)` · `readTexture(tex, opts?)` |
 | Escape hatches | `makeShader` · `makeRenderPipeline` · `makeComputePipeline` · `bindGroup` · `makeUniformsAndResources` · `writeUniforms` |
 
@@ -176,8 +246,11 @@ autocomplete — no TypeScript build needed.
 
 - **Scope**: fullscreen + compute only. No vertex buffers, no depth, no mipmaps, one bind
   group (`@group(0)`), binding order = schema key order (your ABI).
-- **A schema resource the shader never references is skipped** (auto layout strips it; you get
-  a console warning). Keep schema and WGSL in sync.
+- **`show()` is a texel blit, not a sampler** — no filtering, so it stretches 1:1 over the target.
+  That is what lets it display `rgba32float` and friends, which a sampler rejects outright.
+- **A schema entry the shader never references is not declared at all** — it is left out of the
+  generated WGSL and the bind group, and you get a console warning. Bindings are numbered over
+  what remains, so keep schema and WGSL in sync if you care about the ABI.
 - **Resources merge and compare by value** — `setResources({grid})` updates just that one and
   leaves the rest bound, and re-passing identical resources does not rebuild anything.
 - **A staged write inside a chained compute pass closes and reopens it** (copies can't be encoded

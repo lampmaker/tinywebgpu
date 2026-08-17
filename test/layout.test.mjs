@@ -17,6 +17,7 @@ const check = (name, got, want) => {
 
 // --- stub device: capture uniform-buffer sizes and writes -------------------
 globalThis.GPUBufferUsage ??= { UNIFORM: 64, STORAGE: 128, COPY_SRC: 4, COPY_DST: 8, INDIRECT: 256, MAP_READ: 1 };
+globalThis.GPUTextureUsage ??= { COPY_SRC: 1, COPY_DST: 2, TEXTURE_BINDING: 4, STORAGE_BINDING: 8, RENDER_ATTACHMENT: 16 };
 const S = WEBGPU();
 let lastWrite = null;
 S.device = {
@@ -158,6 +159,100 @@ const layoutOf = uniforms => {
 
   const px = await S.readTexture({ format: 'rgba8unorm', width: W, height: H });
   check('readTexture strips row padding', [...px], Array.from({ length: tight * H }, (_, i) => i + 1));
+}
+
+// --- matCxR: columns of a 3-row matrix sit on a 16-byte stride --------------
+{
+  // mat3x3 is 3 columns of vec3, each occupying a vec4's worth of space. The caller passes 9
+  // tight floats and the packer scatters them; the whole type used to throw.
+  const { byteSize, write } = layoutOf({ m: 'mat3x3<f32>' });
+  check('mat3x3 struct size', byteSize, 48);
+  write({ m: [1, 2, 3, 4, 5, 6, 7, 8, 9] });
+  check('mat3x3 pads each column', [...new Float32Array(lastWrite)],
+    [1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0]);
+
+  // 2- and 4-row columns are tight, so they write straight through
+  const m22 = layoutOf({ m: 'mat2x2<f32>' });
+  check('mat2x2 struct size', m22.byteSize, 16);
+  m22.write({ m: [1, 2, 3, 4] });
+  check('mat2x2 writes tightly', [...new Float32Array(lastWrite)], [1, 2, 3, 4]);
+
+  check('mat3x2 struct size', layoutOf({ m: 'mat3x2<f32>' }).byteSize, 32);   // 24, rounded to 16
+  check('mat2x4 struct size', layoutOf({ m: 'mat2x4<f32>' }).byteSize, 32);
+}
+
+// --- bytes-per-texel is derived from the format name, not tabulated ---------
+{
+  const b = S._texelBytes;
+  check('texel bytes: rgba8unorm', b('rgba8unorm'), 4);
+  check('texel bytes: bgra8unorm-srgb', b('bgra8unorm-srgb'), 4);
+  check('texel bytes: r16float', b('r16float'), 2);
+  check('texel bytes: rg32float', b('rg32float'), 8);
+  check('texel bytes: rgba32float', b('rgba32float'), 16);
+  check('texel bytes: packed rgb10a2unorm', b('rgb10a2unorm'), 4);
+  check('texel bytes: packed rg11b10ufloat', b('rg11b10ufloat'), 4);
+  // formats the old fixed table rejected outright
+  check('texel bytes: rgba16snorm (was unknown)', b('rgba16snorm'), 8);
+  check('texel bytes: rgb10a2uint (was unknown)', b('rgb10a2uint'), 4);
+  // depth formats stay unknown on purpose — no single bytes-per-texel for copies
+  check('texel bytes: depth24plus stays unknown', b('depth24plus'), undefined);
+}
+
+// --- ping-pong pairs --------------------------------------------------------
+{
+  const seed = Float32Array.from([1, 2, 3, 4]);
+  const pp = S.createPingPong(seed);
+  check('pingPong seeds both halves', [pp.read.b.size, pp.write.b.size], [16, 16]);
+  const [r0, w0] = [pp.read, pp.write];
+  pp.swap();
+  check('pingPong swap exchanges read and write', [pp.read === w0, pp.write === r0], [true, true]);
+}
+
+// --- render pipelines: unused schema entries, and multiple render targets ----
+{
+  let lastCode = null, lastTargets = null;
+  Object.assign(S.device, {
+    createShaderModule: ({ code }) => { lastCode = code; return { getCompilationInfo: async () => ({ messages: [] }) }; },
+    createRenderPipeline: d => { lastTargets = d.fragment.targets; return { getBindGroupLayout: () => ({}) }; },
+  });
+  S.format = 'bgra8unorm';
+
+  // A resource the shader never mentions is left out of the generated WGSL entirely, so
+  // layout:'auto' has nothing to strip and the remaining bindings stay dense.
+  await S.makeRender('fn frag(uv: vec2<f32>) -> vec4<f32> { return textureLoad(kept, vec2<i32>(0), 0); }',
+    {}, { dropped: 'array<f32>', kept: 'texture_2d<f32>' });
+  check('unused resource is not declared', /dropped/.test(lastCode), false);
+  check('used resource keeps binding 0', /@binding\(0\) var kept/.test(lastCode), true);
+
+  // Uniforms the shader ignores keep their buffer and setters, but not their binding.
+  const q = await S.makeRender('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, 0., 1.); }',
+    { time: 'f32' }, {});
+  check('unreferenced UB is not bound', /var<uniform>/.test(lastCode), false);
+  q.setUniforms({ time: 1 });                       // must still work rather than throw
+  check('unreferenced UB still accepts writes', true, true);
+
+  // MRT: the FSOut struct and its @location order are generated from the targets schema.
+  await S.makeRender('fn frag(uv: vec2<f32>) -> FSOut { var o: FSOut; return o; }',
+    {}, {}, { targets: { colour: 'rgba8unorm', normal: 'rgba16float' } });
+  check('MRT generates FSOut',
+    /struct FSOut \{@location\(0\) colour: vec4<f32>, @location\(1\) normal: vec4<f32>\};/.test(lastCode), true);
+  check('MRT entry point returns FSOut', /fn fs_main\(vs: VSOut\) -> FSOut/.test(lastCode), true);
+  check('MRT declares one target per key', lastTargets, [{ format: 'rgba8unorm' }, { format: 'rgba16float' }]);
+
+  // show(): the generated uv has 0 at the *bottom* of the target, so a blit written the naive way
+  // (textureSample with a raw uv) comes out upside down and show(a,b)+readTexture(b) stops
+  // round-tripping. Verified against a real GPU when this was written; asserted here so a future
+  // refactor cannot quietly flip it back.
+  const renderPass = { setPipeline: () => { }, setBindGroup: () => { }, draw: () => { }, end: () => { } };
+  S.device.createCommandEncoder = () => ({ beginRenderPass: () => renderPass, finish: () => { } });
+  S.device.queue.submit = () => { };
+  const tex = { format: 'rgba8unorm', width: 2, height: 2, usage: GPUTextureUsage.TEXTURE_BINDING, createView: () => ({}) };
+  await S.show(tex, {});
+  check('show() flips uv.y so row 0 stays row 0', /1\.0 - uv\.y/.test(lastCode), true);
+  check('show() reads with textureLoad, not a sampler',
+    /textureLoad/.test(lastCode) && !/textureSample/.test(lastCode), true);
+  await S.show(tex, {}, { flipY: true });
+  check('show({flipY}) opts back into the raw uv', /1\.0 - uv\.y/.test(lastCode), false);
 }
 
 // --- wgsl_shorthand ---------------------------------------------------------
