@@ -192,9 +192,70 @@ All attachments must share a size, and the device caps both the count (`maxColor
 usually 8) and the total bytes per sample (`maxColorAttachmentBytesPerSample`, often 32 — so two
 `rgba32float` targets is the ceiling). A single target keeps the plain `-> vec4<f32>` contract.
 
+## Your own vertex stage
+
+`makeRender` generates a fullscreen triangle, which is the right answer for a shader-first
+toolkit right up until you want *geometry*. `makeDraw` is the sibling of `makeCompute` for that:
+you write both stages, and the schema, `drawTo`, the frame API and the pipeline cache all still
+apply.
+
+```js
+const N = 100_000;
+const parts = G.createStorageBuffer(N * 16);          // xy = position, zw = colour
+
+const points = await G.makeDraw({
+  code: `
+    struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) col: vec3<f32> };
+
+    @vertex fn vs_main(@builtin(vertex_index) v: u32,
+                       @builtin(instance_index) i: u32) -> VSOut {
+      let quad = array<vec2<f32>,4>(vec2(-1.,-1.), vec2(1.,-1.), vec2(-1.,1.), vec2(1.,1.))[v];
+      let p = parts[i];
+      var o: VSOut;
+      o.pos = vec4<f32>(p.xy + quad * UB.size, 0.0, 1.0);
+      o.col = vec3<f32>(p.zw, 1.0);
+      return o;
+    }
+    @fragment fn fs_main(vs: VSOut) -> @location(0) vec4<f32> { return vec4<f32>(vs.col, 1.0); }`,
+  uniforms:  { size: 'f32' },
+  resources: { parts: 'array<vec4<f32>>' },
+  readOnly:  ['parts'],                    // ← see below; this one matters
+  count: 4, instances: N, topology: 'triangle-strip', blend: 'additive',
+});
+
+points.setResources({ parts });
+points.setUniforms({ size: 0.004 });
+points.drawTo();
+
+points.instances = alive;                  // per-frame count, same pipeline
+```
+
+**There are no vertex buffers, on purpose.** Pull geometry out of a storage buffer indexed by
+`@builtin(vertex_index)` / `@builtin(instance_index)`. That is one less layout language to
+describe, it costs nothing on a modern GPU, and it means a compute pass can write the geometry a
+draw then reads with no plumbing in between.
+
+**`readOnly` is not optional when the vertex stage reads a resource.** The schema binds buffers
+`var<storage, read_write>` by default, and WebGPU forbids a read-write storage binding from being
+visible to the vertex stage:
+
+> If an entry's `visibility` includes `GPUShaderStage.VERTEX`: if its resource layout object is a
+> `buffer`, its `type` is not `"storage"`.
+
+Naming it in `readOnly` binds it `var<storage, read>`, which is allowed. Leave it out and the
+pipeline is rejected at creation with a bind-group layout error that does not obviously point
+here. Resources only the *fragment* stage touches need nothing.
+
+`count` is vertices per instance (default 3), `instances` defaults to 1, and `topology` is any
+`GPUPrimitiveTopology` — `'triangle-list'`, `'triangle-strip'`, `'line-list'`, `'line-strip'`,
+`'point-list'`. Both counts are plain properties on the result, so changing them per frame does
+not rebuild anything. `targets` and `blend` work exactly as they do on `makeRender`.
+
+`makeRender` is now literally `makeDraw` with the fullscreen vertex stage filled in.
+
 ## Minified build
 
-`tinywebgpu.min.js` — **15.7 KB** (7.0 KB gzipped), versus 69 KB for the source. Rebuild it with
+`tinywebgpu.min.js` — **16.1 KB** (7.1 KB gzipped), versus 72 KB for the source. Rebuild it with
 `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
 
 It is a **production artifact and it is silent**: every `console` warning is stripped, and so are
@@ -210,11 +271,11 @@ accident.
 ## Tiny build (inline / on-chain embedding)
 
 When the library has to be *inlined* — a single self-contained HTML file, an on-chain generative
-artwork with a hard byte budget — 15.7 KB of it is still mostly features you are not using. A
+artwork with a hard byte budget — 16.1 KB of it is still mostly features you are not using. A
 procedural piece renders from a shader and never touches image loading, readback, or PNG export.
 
-`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 10.2 KB** (4.8 KB gzipped) by dropping
-every optional entry point, and adding `--iife --no-banner` gets it to **9.9 KB** as a classic
+`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 10.7 KB** (4.9 KB gzipped) by dropping
+every optional entry point, and adding `--iife --no-banner` gets it to **10.4 KB** as a classic
 `<script>` that assigns `globalThis.WEBGPU`.
 
 ```
@@ -224,7 +285,7 @@ node build-min.mjs --without=save,read,texio        start from the full build in
 node build-min.mjs --tiny --iife --no-banner --out=dist/twg.js
 ```
 
-What each switch is worth, measured against the 15.7 KB build:
+What each switch is worth, measured against the 16.1 KB build:
 
 | `--without=` | Removes | Saves |
 |---|---|---|
@@ -240,8 +301,8 @@ What each switch is worth, measured against the 15.7 KB build:
 ¹ on top of `save`; `--without=read,save` is 2.0 KB together. The build warns and keeps a
 dependency rather than producing something that throws at runtime.
 
-What is never optional: `init`, the dual-schema engine, `makeRender`/`makeCompute` and their
-one-liners, buffers, textures, samplers, the frame API and frame-ordered writes.
+What is never optional: `init`, the dual-schema engine, `makeRender`/`makeDraw`/`makeCompute`
+and their one-liners, buffers, textures, samplers, the frame API and frame-ordered writes.
 
 **Errors in a tiny build.** `--without=msg` (which `--tiny` implies) replaces every message with
 a number — `Error: 15` instead of `No resources bound. Call setResources({ … })`. The numbers are
@@ -258,7 +319,7 @@ stay in the file to be read.
 `S.frame.encoder` into a closure variable the minifier can rename to one character — move *raw*
 bytes and barely touch the gzipped size, because gzip already deduplicates across the whole file.
 The aliasing pass in 0.5.0 took the stock build from 18.2 KB to 15.7 KB raw but only 7.4 KB to
-7.0 KB gzipped. Chase raw size when you inline; if you are served over HTTP with compression,
+7.0 KB gzipped (`makeDraw` has since added 0.5 KB back). Chase raw size when you inline; if you are served over HTTP with compression,
 only dropping features moves the needle.
 
 ## Optional WGSL shorthands
@@ -278,7 +339,7 @@ G.pre = shorthand({ RAY: 'MyRay', ...TOKENS });
 | | |
 |---|---|
 | Setup | `init(ctx?)` (no ctx = compute-only) · `resizeCanvas()` · `debug` · `pre` · `onDeviceLost` |
-| Pipelines | `makeRender(frag, uniforms?, resources?, {format?, blend?, targets?})` · `makeCompute(body, main, uniforms?, resources?, {wg?})` |
+| Pipelines | `makeRender(frag, uniforms?, resources?, {format?, blend?, targets?})` · `makeDraw({code, uniforms?, resources?, readOnly?, count?, instances?, topology?, …})` · `makeCompute(body, main, uniforms?, resources?, {wg?})` |
 | Pipeline object | `p.uniforms = {…}` / `setUniform(s)` · `p.resources = {…}` / `setResources` · `run(w,h,d)` (items) · `dispatch(x,y,z)` (workgroups) · `dispatchIndirect(buf, off)` · `drawTo(view?, clear?)` |
 | One-liners | `drawQuad({frag, uniforms, …})` · `compute2D({body, size, wg, …})` · `show(tex, view?, opts?)` · `save(tex, filename?, opts?)` |
 | Frame API | `beginFrame()` / `endFrame()` · `beginCompute()` / `endCompute()` + `p.use()` / `p.dispatchOn()` for chained passes |

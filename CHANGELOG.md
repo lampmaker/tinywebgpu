@@ -26,6 +26,25 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
   stride WGSL requires, so you pass 9 tightly packed numbers for a `mat3x3<f32>`.
 - **`init(ctx, { canvasUsage })`** — swapchain usage flags, so adding `COPY_SRC` makes the canvas
   texture itself readable and saveable.
+- **`G.makeDraw({ code, … })` — your own vertex stage.** The sibling of `makeCompute` for geometry
+  that is not a fullscreen quad: `code` is complete WGSL, both `@vertex fn vs_main` and
+  `@fragment fn fs_main`, and the only thing prepended is the schema, exactly as for compute. You
+  keep the dual schema, `drawTo`, the frame API and the pipeline cache. `count` (vertices per
+  instance), `instances` and `topology` are options and, for the first two, writable properties on
+  the result — a per-frame particle count does not rebuild the pipeline. `topology` is part of the
+  cache key, since two pipelines with byte-identical WGSL and different topologies are different
+  pipelines. `makeRender` is now literally this call with the fullscreen vertex stage filled in,
+  which is why adding the entry point cost −113 bytes: the duplicated `FSOut` generation went.
+- **`readOnly: string[]` on `makeDraw`** binds the named resources `var<storage, read>` instead of
+  `read_write`. This is not a nicety: WebGPU forbids a read-write storage binding from being
+  visible to the vertex stage, so *every* vertex-pulled buffer needs it, and without it pipeline
+  creation fails with a bind-group layout error that does not point back at the schema. Resources
+  only the fragment stage touches are unaffected.
+- **No vertex buffers, deliberately.** Geometry is pulled from a storage buffer indexed by
+  `@builtin(vertex_index)` / `@builtin(instance_index)`. That keeps a second layout language out
+  of the library and lets a compute pass write the geometry a draw then reads with no plumbing
+  between them. Cost of the whole feature: +484 bytes on both the minified and tiny builds
+  (+377 threading topology/count/instances through, +107 for `readOnly`).
 
 **Changed**
 
@@ -61,7 +80,8 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
   void 0` to a `...(DIAG && { label: … })` spread, which leaves nothing behind at all rather than
   `label: void 0`. Two validation error scopes, the `onuncapturederror` handler and the
   dropped-feature filter are now DIAG-gated too, since their entire purpose was to log.
-  18.2 KB → 15.7 KB raw, 7.4 KB → 7.0 KB gzipped. No API change.
+  18.2 KB → 15.7 KB raw, 7.4 KB → 7.0 KB gzipped. No API change. (`makeDraw` above has since
+  added 0.5 KB back, for 16.1 KB.)
 - **`beginFrame()` no longer returns the internal frame object**, and `G.frame` is gone with it —
   the frame state is closure variables now. Neither was documented or used; `beginFrame()` returns
   nothing.
@@ -73,7 +93,7 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 **Added — build**
 
-- **`npm run build:tiny` → `tinywebgpu.tiny.js`, 10.2 KB** (4.8 KB gzipped), for inlining into a
+- **`npm run build:tiny` → `tinywebgpu.tiny.js`, 10.7 KB** (4.9 KB gzipped), for inlining into a
   single file. `tinywebgpu.js` now carries a row of `const NAME = true;` switches; `build-min.mjs`
   rewrites the ones you name to `false` and dead-code elimination removes what they guard, so the
   code is gone from the bundle rather than merely unreachable. `--tiny` drops all of them,
@@ -86,13 +106,13 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 - **`--iife` and `--no-banner`.** `--iife` emits a classic script assigning `globalThis.WEBGPU`,
   for embedding contexts that cannot give you `<script type="module">`; the export is rewritten by
   hand rather than through esbuild's `globalName`, which would spend ~450 bytes on CommonJS
-  interop to hand over one function. Together with `--tiny` that is 9.9 KB.
+  interop to hand over one function. Together with `--tiny` that is 10.4 KB.
 - **`--without=msg` folds every error message down to a number** (`Error: 15`), which is 1.1 KB of
   the tiny build. `--tiny` implies it. The numbers are listed in the `ERRORS` table in
   `build-min.mjs`, and the build fails if a number is reused or goes undocumented.
 - **`npm run test:tiny`** builds a feature-reduced bundle and runs the suite against it, so the
   switches are covered rather than assumed. `npm run test:all` runs source, minified and tiny —
-  224 assertions across the three.
+  260 assertions across the three.
 
 **Added — tests**
 

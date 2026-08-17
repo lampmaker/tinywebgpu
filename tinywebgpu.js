@@ -43,7 +43,12 @@ Terminology cheatsheet (quick):
  * }} ComputePipeline
  * @typedef {PipelineCommon & {
  *   drawTo: (view?: GPUTextureView, clear?: number[]|'load', encoder?: GPUCommandEncoder) => void,
+ *   count: number,
+ *   instances: number,
  * }} RenderPipeline
+ *   `count` (vertices per instance) and `instances` are what drawTo passes to draw(). They are
+ *   3 and 1 for a makeRender fullscreen triangle, whatever makeDraw was given otherwise, and
+ *   writable — a per-frame particle count does not need a new pipeline.
  */
 
 // ─── Build-time switches ──────────────────────────────────────────────────────────────────────
@@ -645,6 +650,10 @@ export const WEBGPU = () => {
     // ======== Ultra-Simplified Dual Schema Handler ========
     makeUniformsAndResources: (uniforms = {}, resources = {}, opts = {}) => {
       const g = opts.g ?? 0, n = opts.n ?? 'Uniforms', v = opts.v ?? 'UB';
+      // Resources named here are bound `read`, not `read_write`. WebGPU forbids a read_write
+      // storage binding from being visible to the vertex stage, so anything a vertex shader
+      // reads has to say so — see makeDraw.
+      const readOnly = opts.readOnly ?? [];
       // Uniforms whose var the shader never mentions still get a buffer and setters — only the
       // @binding is left out, so `p.uniforms = {…}` keeps working against a shader that ignores UB.
       const emit = opts.emitUniform ?? true;
@@ -773,7 +782,7 @@ ${structFields.join('\n')}
         }
 
         resourceLayout[name] = { binding: currentBinding, wgslType, isBuf: isBufferLike, isTex, isSampler };
-        const addrSpace = isBufferLike ? '<storage, read_write>' : '';
+        const addrSpace = isBufferLike ? (readOnly.includes(name) ? '<storage, read>' : '<storage, read_write>') : '';
         const varLine = `@group(${g}) @binding(${currentBinding}) var${addrSpace} ${name}: ${typeForBinding};`;
         return decls ? `${decls}\n${varLine}` : varLine;
       });
@@ -817,7 +826,11 @@ ${structFields.join('\n')}
   // uniforms: object with WGSL basic types (f32, vec2<f32>, etc.)
   // resources: object with full WGSL resource types (texture_storage_2d<...>, array<...>, etc.)
 
-  const makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format, isCompute = false, blend = null, wg = [8, 8, 1], targetNames = null }) => {
+  const makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format,
+    isCompute = false, blend = null, wg = [8, 8, 1], targetNames = null,
+    // Geometry, for the render half. The fullscreen triangle these used to be hardcoded to is
+    // just the default: three vertices, one instance, a triangle list.
+    topology = 'triangle-list', count = 3, instances = 1, readOnly = [] }) => {
     // Declare only what the shader actually mentions. layout:'auto' drops bindings the shader
     // never references, and a bind-group entry for a dropped binding is a validation error — so
     // instead of emitting everything and reconciling afterwards, the schema is filtered up front
@@ -832,7 +845,7 @@ ${structFields.join('\n')}
         `[TinyWebGPU] Schema declares ${unused.map(n => `'${n}'`).join(', ')} but the shader never references ${unused.length > 1 ? 'them' : 'it'}; ` +
         `${unused.length > 1 ? 'they are' : 'it is'} left out of the generated WGSL and the bind group.`);
     }
-    const schemaResult = S.makeUniformsAndResources(uniforms, usedResources, { g: 0, startBinding: 0, emitUniform: usesUB });
+    const schemaResult = S.makeUniformsAndResources(uniforms, usedResources, { g: 0, startBinding: 0, emitUniform: usesUB, readOnly });
     // Destructured once: these are read on every setResources() and every dispatch, and a local
     // is both faster and — since the minifier renames it — a great deal shorter than the path.
     const { _resourceFields: rFields, _resourceLayout: rLayout, _uniformBinding: uBinding,
@@ -847,14 +860,14 @@ ${structFields.join('\n')}
     // Blend is part of the render key: identical WGSL with a different blend state is a
     // different pipeline, and omitting it here would hand back the wrong one.
     const blendKey = isCompute || !blend ? '' : (typeof blend === 'string' ? blend : JSON.stringify(blend)) + '|';
-    const cacheKey = (isCompute ? `C|` : `R|${[format].flat().join(',')}|${blendKey}`) + hash(finalCode) + ':' + finalCode.length;
+    const cacheKey = (isCompute ? `C|` : `R|${[format].flat().join(',')}|${blendKey}${topology}|`) + hash(finalCode) + ':' + finalCode.length;
     let pipeline = pipelineCache.get(cacheKey);
     if (!pipeline) {
       const module = await S.makeShader(finalCode, false);   // S.pre already applied above
       // The error scope is purely for reporting: WebGPU rejects a bad pipeline either way, and
       // without DIAG the driver's own message is the one that surfaces.
       if (DIAG) D.pushErrorScope('validation');
-      pipeline = isCompute ? S.makeComputePipeline(module) : S.makeRenderPipeline(module, module, format, 'triangle-list', blend);
+      pipeline = isCompute ? S.makeComputePipeline(module) : S.makeRenderPipeline(module, module, format, topology, blend);
       if (DIAG) D.popErrorScope().then(err => {
         if (!err) return;
         // Evict, or the next build of the same source would reuse the broken pipeline and,
@@ -995,7 +1008,11 @@ ${structFields.join('\n')}
       set resources(values) { rebindResources(values); },
       setResources: (values) => rebindResources(values),
       get uniformFields() { return schemaResult._uniformFields; },
-      get resourceFields() { return rFields; }
+      get resourceFields() { return rFields; },
+      // Vertices per instance, and instance count. Plain properties rather than drawTo arguments
+      // because a particle count that changes every frame should not need a new pipeline —
+      // `p.instances = alive` and draw again.
+      count, instances
     };
 
     return isCompute ? OA(common, {
@@ -1033,7 +1050,7 @@ ${structFields.join('\n')}
             return asView(v);
           })
           : [view ? asView(view) : S._view()];
-        return runPass(p => p.draw(3, 1, 0, 0), {
+        return runPass(p => p.draw(common.count, common.instances, 0, 0), {
           colorAttachments: views.map(v => ({ view: v, loadOp, storeOp: 'store', clearValue }))
         }, encoder);
       }
@@ -1080,24 +1097,61 @@ ${main}
    * @returns {Promise<RenderPipeline>}
    */
   S.makeRender = (frag, uniforms = {}, resources = {}, { format = S.format, blend = null, targets = null } = {}) => {
-    // One target: `frag` returns vec4<f32>, unchanged. Several: `targets` is {name: format}, and
-    // the matching `struct FSOut { … }` is generated here — so `frag` returns FSOut and the
-    // @location indices, the part that is easy to get wrong by hand, follow the key order.
-    const names = targets ? OK(targets) : null;
-    const outStruct = names
-      ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: vec4<f32>`).join(', ')}};\n`
-      : '';
+    // The fullscreen triangle, and the wrapper that hands `frag` its uv. Everything else —
+    // the schema, the FSOut struct for `targets`, the pipeline — is makeDraw's job.
     const code = `struct VSOut {@builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>};
 @vertex fn vs_main(@builtin(vertex_index) i: u32) -> VSOut {
 var ndc = array<vec2<f32>,3>(vec2<f32>(-1.,-3.),vec2<f32>(-1.,1.),vec2<f32>(3.,1.))[i];
 var o: VSOut; o.pos = vec4<f32>(ndc, 0.0, 1.0); o.uv = ndc * 0.5 + vec2<f32>(0.5); return o;
 }
-${outStruct}${frag}
-@fragment fn fs_main(vs: VSOut) -> ${names ? 'FSOut' : '@location(0) vec4<f32>'} { return frag(vs.uv); }
+${frag}
+@fragment fn fs_main(vs: VSOut) -> ${targets ? 'FSOut' : '@location(0) vec4<f32>'} { return frag(vs.uv); }
 `.trim();
 
+    return S.makeDraw({ code, uniforms, resources, format, blend, targets });
+  };
+
+  /**
+   * A render pipeline where you write the vertex stage yourself — the sibling of `makeCompute`
+   * for geometry that is not a fullscreen quad. `code` is complete WGSL, both
+   * `@vertex fn vs_main` and `@fragment fn fs_main`; the only thing prepended is the schema
+   * (the `UB` struct and the `@group`/`@binding` declarations), exactly as for compute. You keep
+   * the dual schema, `drawTo`, the frame API and the pipeline cache.
+   *
+   * There are no vertex buffers, on purpose: pull geometry out of a storage buffer indexed by
+   * `@builtin(vertex_index)` / `@builtin(instance_index)`. Any resource the *vertex* stage reads
+   * must be named in `readOnly` — WebGPU forbids a `read_write` storage binding from being
+   * visible to the vertex stage, and `read_write` is what the schema emits by default.
+   *
+   * @example
+   *   const p = await G.makeDraw({
+   *     code: vsAndFsWGSL,
+   *     uniforms: { size: 'f32' }, resources: { parts: 'array<vec4<f32>>' },
+   *     readOnly: ['parts'],                       // vertex-visible ⇒ read, not read_write
+   *     count: 4, instances: N, topology: 'triangle-strip',
+   *   });
+   *   p.drawTo();
+   *
+   * @param {{code: string, uniforms?: UniformSchema, resources?: ResourceSchema,
+   *   readOnly?: string[], count?: number, instances?: number, topology?: string,
+   *   format?: string, blend?: string|GPUBlendState, targets?: Object}} opts
+   *   `count` is vertices per instance (default 3). `count` and `instances` are also plain
+   *   properties on the result, so a per-frame count costs nothing.
+   * @returns {Promise<RenderPipeline>}
+   */
+  S.makeDraw = ({ code, uniforms = {}, resources = {}, readOnly = [], count = 3, instances = 1,
+    topology = 'triangle-list', format = S.format, blend = null, targets = null }) => {
+    // `targets` is {name: format}; the matching `struct FSOut { … }` is generated here, so
+    // fs_main returns FSOut and the @location indices — the part that is easy to get wrong by
+    // hand — follow the key order. WGSL module-scope declarations are order-independent, so it
+    // is fine for the struct to land above the shader that returns it.
+    const names = targets ? OK(targets) : null;
+    const outStruct = names
+      ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: vec4<f32>`).join(', ')}};\n`
+      : '';
     return makePipeline({
-      code, uniforms, resources, isCompute: false, blend, targetNames: names,
+      code: `${outStruct}${code}`, uniforms, resources, readOnly,
+      isCompute: false, blend, targetNames: names, count, instances, topology,
       format: names ? OV(targets) : format,
     });
   };
