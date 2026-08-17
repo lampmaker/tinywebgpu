@@ -46,10 +46,52 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 - **The minified build is smaller and strips more.** `mangleProps` renames the internal
   `_`-prefixed properties, `DIAG` now also folds away the resource validator, the buffer-size
   check and every debug `label`, and the spec-fixed usage flags are named constants the minifier
-  can inline. Net of the features above: 19.0 KB → 18.2 KB raw. A caveat worth recording — the
-  classic tricks that were considered and rejected (packing API names into strings, binding hot
-  methods to short locals) move raw bytes but not gzipped ones: rebinding every hot call site
-  measured −992 raw and **−65 gzipped**, because gzip already deduplicates across the file.
+  can inline. Net of the features above: 19.0 KB → 18.2 KB raw.
+- **…and smaller again, by 2.2 KB raw, for inline use.** This reverses the call recorded above.
+  Binding hot paths to short locals really does buy almost nothing gzipped — the measurement
+  stands, and it is repeated in the README — but the case it was rejected for was HTTP delivery.
+  Inlining the library into a single HTML file, an on-chain artwork especially, is a *raw* byte
+  budget, and there gzip never runs. So the frame state (`S.frame.encoder` and friends), the
+  device, the shader and pipeline caches and the staging ring moved into closure variables the
+  minifier renames to one character each; `createCommandEncoder` and `queue.submit` are spelled
+  once, behind `mkEnc` and `submit`; `Object.entries`/`keys`/`assign`/`values` are aliased; the
+  three blend presets are built from a two-argument helper instead of written out; the schema
+  result's internal fields are `_`-prefixed so `mangleProps` reaches them, and `makePipeline`
+  destructures the ones it reads on every dispatch. Debug `label`s went from `label: DIAG ? … :
+  void 0` to a `...(DIAG && { label: … })` spread, which leaves nothing behind at all rather than
+  `label: void 0`. Two validation error scopes, the `onuncapturederror` handler and the
+  dropped-feature filter are now DIAG-gated too, since their entire purpose was to log.
+  18.2 KB → 15.7 KB raw, 7.4 KB → 7.0 KB gzipped. No API change.
+- **`beginFrame()` no longer returns the internal frame object**, and `G.frame` is gone with it —
+  the frame state is closure variables now. Neither was documented or used; `beginFrame()` returns
+  nothing.
+- **`makeUniformsAndResources()` keeps `wgsl`, `uniformBuffer` and `uniformWrite`** on its result
+  and renames the rest to `_entries`, `_uniformFields`, `_resourceFields`, `_resourceLayout` and
+  `_uniformBinding`, so the minified build can shorten them. The unused `uniformVar` is dropped.
+  This is the schema-engine escape hatch; the three names anything realistically reads are the
+  three that stayed. `p.uniformFields` / `p.resourceFields` on a pipeline are unchanged.
+
+**Added — build**
+
+- **`npm run build:tiny` → `tinywebgpu.tiny.js`, 10.2 KB** (4.8 KB gzipped), for inlining into a
+  single file. `tinywebgpu.js` now carries a row of `const NAME = true;` switches; `build-min.mjs`
+  rewrites the ones you name to `false` and dead-code elimination removes what they guard, so the
+  code is gone from the bundle rather than merely unreachable. `--tiny` drops all of them,
+  `--with=` keeps named ones, `--without=` removes named ones from an otherwise full build, and a
+  feature that another one depends on is kept with a warning instead of producing a build that
+  throws. The optional groups are `texio`, `read`, `save`, `show`, `pingpong`, `resize`, `blend`
+  and `msg`; everything else — init, the dual-schema engine, the pipelines, buffers, textures,
+  samplers, the frame API and frame-ordered writes — is always in. Per-switch savings are
+  tabulated in the README.
+- **`--iife` and `--no-banner`.** `--iife` emits a classic script assigning `globalThis.WEBGPU`,
+  for embedding contexts that cannot give you `<script type="module">`; the export is rewritten by
+  hand rather than through esbuild's `globalName`, which would spend ~450 bytes on CommonJS
+  interop to hand over one function. Together with `--tiny` that is 9.9 KB.
+- **`--without=msg` folds every error message down to a number** (`Error: 15`), which is 1.1 KB of
+  the tiny build. `--tiny` implies it. The numbers are listed in the `ERRORS` table in
+  `build-min.mjs`, and the build fails if a number is reused or goes undocumented.
+- **`npm run test:tiny`** builds a feature-reduced bundle and runs the suite against it, so the
+  switches are covered rather than assumed. `npm run test:all` runs source, minified and tiny.
 
 **Fixed**
 

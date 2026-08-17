@@ -194,24 +194,72 @@ usually 8) and the total bytes per sample (`maxColorAttachmentBytesPerSample`, o
 
 ## Minified build
 
-`tinywebgpu.min.js` — **18.2 KB** (7.4 KB gzipped), versus 65.8 KB for the source. Rebuild it
-with `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
+`tinywebgpu.min.js` — **15.7 KB** (7.0 KB gzipped), versus 69 KB for the source. Rebuild it with
+`npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
 
 It is a **production artifact and it is silent**: every `console` warning is stripped, and so are
-the WGSL compile-error log with its source window and caret, the schema resource validator, and
-the debug `label`s on every GPU object. Failures still *throw*, with their messages intact — you
-just get no diagnostics on the way there, and a bad resource surfaces as the driver's own
-bind-group error rather than a line naming the field.
-
-Worth knowing if you are chasing bytes: nearly all of the classic minification tricks — packing
-API names into strings, binding hot methods to short locals — move *raw* bytes and barely touch
-the gzipped size, because gzip already deduplicates across the whole file. Rebinding every hot
-call site in this library was measured at −992 raw bytes and **−65 gzipped**. Optimise raw size
-only if you inline the library into an HTML file with a hard budget.
+the WGSL compile-error log with its source window and caret, the schema resource validator, the
+validation error scopes, and the debug `label`s on every GPU object. Failures still *throw*, with
+their messages intact — you just get no diagnostics on the way there, and a bad resource surfaces
+as the driver's own bind-group error rather than a line naming the field.
 
 So: develop against `tinywebgpu.js`, switch to the minified file when you ship. `main` and
 `exports` point at the readable source on purpose, so you never get the silent build by
 accident.
+
+## Tiny build (inline / on-chain embedding)
+
+When the library has to be *inlined* — a single self-contained HTML file, an on-chain generative
+artwork with a hard byte budget — 15.7 KB of it is still mostly features you are not using. A
+procedural piece renders from a shader and never touches image loading, readback, or PNG export.
+
+`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 10.2 KB** (4.8 KB gzipped) by dropping
+every optional entry point, and adding `--iife --no-banner` gets it to **9.9 KB** as a classic
+`<script>` that assigns `globalThis.WEBGPU`.
+
+```
+npm run build:tiny                                  everything optional removed
+node build-min.mjs --tiny --with=show,blend         ...except these
+node build-min.mjs --without=save,read,texio        start from the full build instead
+node build-min.mjs --tiny --iife --no-banner --out=dist/twg.js
+```
+
+What each switch is worth, measured against the 15.7 KB build:
+
+| `--without=` | Removes | Saves |
+|---|---|---|
+| `texio` | `writeTexture`, `loadTexture` | 1.1 KB |
+| `msg` | error *text* — throws carry a number instead | 1.1 KB |
+| `save` | `save()` (PNG download) | 0.8 KB |
+| `show` | `show()`, the one-call texture blit | 0.7 KB |
+| `read` | `readTexture`, buffer `.r()`, the staging pool — **`save` needs it** | 1.2 KB¹ |
+| `resize` | `resizeCanvas()` | 0.4 KB |
+| `pingpong` | `pingPong`, `createPingPong`, `createPingPongTexture2D` | 0.3 KB |
+| `blend` | the named presets; a raw `GPUBlendState` still works | 0.1 KB |
+
+¹ on top of `save`; `--without=read,save` is 2.0 KB together. The build warns and keeps a
+dependency rather than producing something that throws at runtime.
+
+What is never optional: `init`, the dual-schema engine, `makeRender`/`makeCompute` and their
+one-liners, buffers, textures, samplers, the frame API and frame-ordered writes.
+
+**Errors in a tiny build.** `--without=msg` (which `--tiny` implies) replaces every message with
+a number — `Error: 15` instead of `No resources bound. Call setResources({ … })`. The numbers are
+listed in the `ERRORS` table at the top of `build-min.mjs`. Debug against `tinywebgpu.js` and
+build tiny last; if you want the sentences back, `--tiny --with=msg`.
+
+**How it works, and why it is a build switch and not an option.** The library is one file with a
+row of `const NAME = true;` declarations at the top. `build-min.mjs` rewrites the ones you named
+to `false`, and esbuild's dead-code elimination removes everything they guard — the code is gone
+from the bundle, not merely unreachable. A runtime option could not do that: it would have to
+stay in the file to be read.
+
+**On raw versus gzipped.** Most classic minification tricks — aliasing `Object.entries`, moving
+`S.frame.encoder` into a closure variable the minifier can rename to one character — move *raw*
+bytes and barely touch the gzipped size, because gzip already deduplicates across the whole file.
+The aliasing pass in 0.5.0 took the stock build from 18.2 KB to 15.7 KB raw but only 7.4 KB to
+7.0 KB gzipped. Chase raw size when you inline; if you are served over HTTP with compression,
+only dropping features moves the needle.
 
 ## Optional WGSL shorthands
 

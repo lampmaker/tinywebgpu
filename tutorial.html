@@ -1121,9 +1121,14 @@ G.endFrame();</code></pre>
             <code>python3 -m http.server</code> is enough. Opening the file from disk will
             not work.</li>
           <li><b>Ship the minified build if you care.</b> <code>tinywebgpu.min.js</code> is about
-            18&nbsp;KB, 7&nbsp;KB gzipped. It is console-free: errors still throw with their
+            16&nbsp;KB, 7&nbsp;KB gzipped. It is console-free: errors still throw with their
             messages, but the warnings and the pretty compile-error log are stripped. Develop
             against the readable file, switch at the end.</li>
+          <li><b>Inlining it into one file?</b> <code>npm run build:tiny</code> drops the entry
+            points a self-contained piece never calls — image loading, readback, PNG export,
+            <code>show</code> — and gets you to about 10&nbsp;KB. Add
+            <code>--with=show</code> and friends to keep the ones you do use. See
+            <i>Tiny build</i> in the README.</li>
         </ul>
         <p>On GitHub Pages, keep the empty <code>.nojekyll</code> file at the root — without it,
           Jekyll ignores directories beginning with an underscore and can quietly drop files.</p>

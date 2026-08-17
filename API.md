@@ -233,7 +233,7 @@ whichever pipeline `use()` named last.
 `G.makeShader(code)` (returns a cached promise of the compiled module; applies `G.pre`),
 `G.makeRenderPipeline(vs, fs, formatOrFormats, topology?, blend?)` (an array of formats gives multiple targets), `G.makeComputePipeline(module)`,
 `G.bindGroup(pipeline, groupIndex, entries)`,
-`G.makeUniformsAndResources(...)` (the schema engine itself).
+`G.makeUniformsAndResources(...)` (the schema engine itself; its result carries `wgsl`, `uniformBuffer` and `uniformWrite`, plus `_`-prefixed internals the minified build renames).
 
 ## WGSL preprocessing
 
@@ -255,3 +255,20 @@ alternation regex (longest token wins), and returns a deterministic `src => src`
 Careful with `SHORT_TOKENS`: one-letter aliases collide with natural identifier names, so
 `let F = fresnel(...)` becomes `let f32 = ...` and won't compile. They are opt-in for exactly
 that reason.
+
+## Builds
+
+| File | Size | What it is |
+|---|---|---|
+| `tinywebgpu.js` | 69 KB | the source, with comments and every diagnostic. `main`/`exports` point here. |
+| `tinywebgpu.min.js` | 15.7 KB (7.0 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
+| `tinywebgpu.tiny.js` | 10.2 KB (4.8 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
+
+`build:tiny` drops `writeTexture`, `loadTexture`, `readTexture`, buffer `.r()`, `save`, `show`,
+the ping-pong helpers, `resizeCanvas` and the named blend presets. Keep any of them with
+`node build-min.mjs --tiny --with=show,read`, or start from the full build and remove a few with
+`--without=save,texio`. `--iife` emits a classic `<script>` assigning `globalThis.WEBGPU`.
+Full table of what each switch costs: README → *Tiny build*.
+
+Everything else is always present: `init`, `makeRender`, `makeCompute`, `drawQuad`, `compute2D`,
+the schema engine, buffers, textures, samplers, the frame API and frame-ordered writes.
