@@ -52,6 +52,15 @@ Terminology cheatsheet (quick):
 // intact: build-min.mjs matches it literally.
 const DIAG = true;
 
+// WebGPU usage flags, named here rather than read off the GPUBufferUsage/GPUTextureUsage globals.
+// The values are normative in the spec, so this changes nothing at runtime — but it lets the
+// minifier fold each one to a literal, and it drops the `typeof … !== 'undefined'` guards the
+// globals needed in order to be touched outside a browser.
+const BUF_MAP_READ = 1, BUF_COPY_SRC = 4, BUF_COPY_DST = 8,
+  BUF_UNIFORM = 64, BUF_STORAGE = 128, BUF_INDIRECT = 256;
+const TEX_COPY_SRC = 1, TEX_COPY_DST = 2, TEX_BINDING = 4,
+  TEX_STORAGE_BINDING = 8, TEX_RENDER_ATTACHMENT = 16;
+
 /**
  * Creates an independent toolkit instance. Call `await G.init(ctx?)` before anything else.
  * Also settable on the instance: `G.debug`, `G.pre`, `G.onDeviceLost` (see their comments).
@@ -80,7 +89,7 @@ export const WEBGPU = () => {
           S.frame.encoder = null;
         }
       }
-      S.frame.encoder = S.device.createCommandEncoder({ label: 'frame' });
+      S.frame.encoder = S.device.createCommandEncoder({ label: DIAG ? 'frame' : void 0 });
       // Left null unless the caller named a target: the swapchain texture is acquired lazily by
       // _view(), so a compute-only frame never touches (and never presents) the canvas.
       S.frame.view = opts.view ?? null;
@@ -105,7 +114,7 @@ export const WEBGPU = () => {
       if (!S.frame.encoder) {
         // No frame is open, so this encoder is ours: endCompute() has to submit it, otherwise
         // every dispatch recorded into it — and every later one — would silently never run.
-        S.frame.encoder = S.device.createCommandEncoder({ label: 'compute' });
+        S.frame.encoder = S.device.createCommandEncoder({ label: DIAG ? 'compute' : void 0 });
         S.frame.owned = true;
       }
       S.frame.bound = null;                // fresh chain: nothing to restore yet
@@ -139,7 +148,7 @@ export const WEBGPU = () => {
       if (!c) {
         const cap = Math.max(r.chunkSize, need);
         c = r.chunks[r.i] = {
-          buf: S.device.createBuffer({ size: cap, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST, label: 'staging ring' }),
+          buf: S.device.createBuffer({ size: cap, usage: BUF_COPY_SRC | BUF_COPY_DST, label: DIAG ? 'staging ring' : void 0 }),
           cpu: new Uint8Array(cap), cursor: 0
         };
       }
@@ -166,7 +175,7 @@ export const WEBGPU = () => {
     // Pooled staging buffers for readbacks (keyed by size, max 4 kept per size)
     _stagingPool: new Map(),
     _acquireStaging: size => S._stagingPool.get(size)?.pop()
-      ?? S.device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, label: 'readback staging' }),
+      ?? S.device.createBuffer({ size, usage: BUF_COPY_DST | BUF_MAP_READ, label: DIAG ? 'readback staging' : void 0 }),
     _releaseStaging: buf => {
       const list = S._stagingPool.get(buf.size) ?? [];
       if (list.length < 4) { list.push(buf); S._stagingPool.set(buf.size, list); }
@@ -219,7 +228,9 @@ export const WEBGPU = () => {
       });
       d.onuncapturederror = e => console.error('[TinyWebGPU] Uncaptured WebGPU error:', e.error?.message ?? e);
       const f = navigator.gpu.getPreferredCanvasFormat();
-      if (ctx) ctx.configure({ device: d, format: f, alphaMode: opts.alphaMode ?? 'opaque' });
+      // usage defaults to RENDER_ATTACHMENT, as the spec does; add COPY_SRC to it if you want to
+      // G.save() the canvas texture itself rather than your own render target.
+      if (ctx) ctx.configure({ device: d, format: f, alphaMode: opts.alphaMode ?? 'opaque', usage: opts.canvasUsage ?? TEX_RENDER_ATTACHMENT });
       Object.assign(S, { device: d, context: ctx, format: f, features: d.features })
       return S;
     },
@@ -245,7 +256,7 @@ export const WEBGPU = () => {
       return promise;
     },
     _compileShader: async (code, label) => {
-      const module = S.device.createShaderModule({ code, label: `shader ${label ?? ''}` });
+      const module = S.device.createShaderModule({ code, label: DIAG ? `shader ${label ?? ''}` : void 0 });
       const info = await module.getCompilationInfo();
       const msgs = info.messages.filter(m => m.message && m.type !== 'info');
       if (msgs.length) {
@@ -298,12 +309,14 @@ export const WEBGPU = () => {
       if (!b) throw new Error(`Unknown blend preset '${blend}'. Use ${Object.keys(S._blendPresets).map(k => `'${k}'`).join(', ')} or a GPUBlendState object.`);
       return b;
     },
+    // `format` is one format string, or an array of them for multiple render targets (in
+    // @location order). A blend state, if given, applies to every target.
     makeRenderPipeline: (vsModule, fsModule, format, topology = 'triangle-list', blend = null) => {
       const b = S._resolveBlend(blend);
       return S.device.createRenderPipeline({
         layout: 'auto',                                       // 'auto' means use the default layout for this pipeline, which
         vertex: { module: vsModule, entryPoint: 'vs_main' },     // entryPoint is the function name in the WGSL module
-        fragment: { module: fsModule, entryPoint: 'fs_main', targets: [b ? { format, blend: b } : { format }] },  // targets is an array of output formats (usually one)
+        fragment: { module: fsModule, entryPoint: 'fs_main', targets: [format].flat().map(f => b ? { format: f, blend: b } : { format: f }) },
         primitive: { topology }                                 // primitive topology (triangle-list, triangle-strip, line-list, etc.)
       });
     },
@@ -311,7 +324,7 @@ export const WEBGPU = () => {
 
     //=============================================================================================================================
     // creates a uniform buffer (small, read-only in shaders)
-    createUniformBuffer: byteLength => S.device.createBuffer({ size: byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: `uniforms ${byteLength}B` }),
+    createUniformBuffer: byteLength => S.device.createBuffer({ size: byteLength, usage: BUF_UNIFORM | BUF_COPY_DST, label: DIAG ? `uniforms ${byteLength}B` : void 0 }),
     //=============================================================================================================================
     // writes data to a uniform buffer (DataView or TypedArray)
     writeUniforms: (buffer, dataViewOrTypedArray, byteOffset = 0) => S.device.queue.writeBuffer(buffer, byteOffset, dataViewOrTypedArray.buffer ?? dataViewOrTypedArray, dataViewOrTypedArray.byteOffset ?? 0, dataViewOrTypedArray.byteLength),
@@ -324,7 +337,8 @@ export const WEBGPU = () => {
      */
     // Warns (doesn't throw) when a requested size exceeds the device limits — allocation is
     // still attempted, since limits vary wildly across GPUs. Shared by both buffer creators.
-    _checkBufferSize: (n, isStorage) => {
+    // Diagnostics only: folded away entirely in the minified build.
+    _checkBufferSize: !DIAG ? () => { } : (n, isStorage) => {
       try {
         if (!S.device) return;
         if (n > S.device.limits.maxBufferSize) {
@@ -353,14 +367,14 @@ export const WEBGPU = () => {
       const n = ((init ? init.byteLength : sizeOrData) + 3) & ~3;  // buffer sizes stay 4-byte aligned
       S._checkBufferSize(n, true);
       const b = S.device.createBuffer({
-        size: n, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-        label: `storage ${n}B`
+        size: n, usage: BUF_STORAGE | BUF_COPY_SRC | BUF_COPY_DST,
+        label: DIAG ? `storage ${n}B` : void 0
       });
       const w = S._writer(b);
       const r = async (nbytes = n, o = 0, C = Uint8Array) => {
         if (S.frame.encoder) console.warn('[TinyWebGPU] readback during an open frame reads pre-frame data — call endFrame() first.');
         const rb = S._acquireStaging(nbytes);
-        const enc = S.device.createCommandEncoder({ label: 'readback' });
+        const enc = S.device.createCommandEncoder({ label: DIAG ? 'readback' : void 0 });
         enc.copyBufferToBuffer(b, o, rb, 0, nbytes);
         S.device.queue.submit([enc.finish()]);
         await rb.mapAsync(GPUMapMode.READ);
@@ -370,7 +384,7 @@ export const WEBGPU = () => {
       };
       const clear = () => {
         if (S.frame.encoder) return S._outsidePass(() => S.frame.encoder.clearBuffer(b, 0, n));
-        const enc = S.device.createCommandEncoder({ label: 'clear' });
+        const enc = S.device.createCommandEncoder({ label: DIAG ? 'clear' : void 0 });
         enc.clearBuffer(b, 0, n);
         S.device.queue.submit([enc.finish()]);
       };
@@ -381,28 +395,50 @@ export const WEBGPU = () => {
     // Generic buffer creator with explicit usage flags; minimal helpers
     createBuffer: (size, usage) => {
       const n = (size + 3) & ~3;                 // same 4-byte rounding createStorageBuffer does
-      S._checkBufferSize(n, !!(usage & GPUBufferUsage.STORAGE));
-      const b = S.device.createBuffer({ size: n, usage, label: `buffer ${n}B` });
+      S._checkBufferSize(n, !!(usage & BUF_STORAGE));
+      const b = S.device.createBuffer({ size: n, usage, label: DIAG ? `buffer ${n}B` : void 0 });
       return { b, w: S._writer(b) };
     },
 
     // Convenience: 3*u32 dispatch indirect args buffer [x,y,z]
     createDispatchIndirectBuffer: () => {
-      const usage = GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+      const usage = BUF_INDIRECT | BUF_STORAGE | BUF_COPY_DST;
       return S.createBuffer(12, usage);
     },
+
+    //=============================================================================================================================
+    /**
+     * A read/write pair with a swap — the double-buffer a simulation needs when each step reads
+     * one copy and writes the other. `make` is any factory; the two wrappers below cover buffers
+     * and textures. Both halves are made the same way, so a swap before the first step is harmless.
+     * @example
+     *   const g = G.createPingPong(W * H * 4);
+     *   step.resources = { src: g.read, dst: g.write };   // handles unwrap themselves
+     *   step.run(W, H); g.swap();
+     * @param {() => *} make
+     * @returns {{read: *, write: *, swap: () => void}}
+     */
+    pingPong: make => {
+      const pp = { read: make(), write: make(), swap: () => { const t = pp.read; pp.read = pp.write; pp.write = t; } };
+      return pp;
+    },
+    // Two storage buffers. A TypedArray/ArrayBuffer seeds *both*, so the pair starts consistent.
+    createPingPong: sizeOrData => S.pingPong(() => S.createStorageBuffer(sizeOrData)),
+    // Two storage textures. Pass `usage` for the render-target flavour (add RENDER_ATTACHMENT).
+    createPingPongTexture2D: (width, height, format = 'rgba16float', usage) =>
+      S.pingPong(() => S.createStorageTexture2D(width, height, format, usage)),
 
     //=============================================================================================================================
     // Creates a normal 2D texture — good for images, render targets, post-process buffers.
     // Read-only in shaders (except as render pass output). Compact format by default.   
     // COPY_DST is in the default set so writeTexture/loadTexture work without opting in.
-    createTexture2D: (width, height, format = 'rgba8unorm', usage) => S.device.createTexture({ size: { width, height }, format, mipLevelCount: 1, sampleCount: 1, usage: usage ?? (GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST), label: `texture2D ${width}x${height} ${format}` }),
+    createTexture2D: (width, height, format = 'rgba8unorm', usage) => S.device.createTexture({ size: { width, height }, format, mipLevelCount: 1, sampleCount: 1, usage: usage ?? (TEX_RENDER_ATTACHMENT | TEX_BINDING | TEX_COPY_SRC | TEX_COPY_DST), label: DIAG ? `texture2D ${width}x${height} ${format}` : void 0 }),
     //=============================================================================================================================
     // Creates a storage texture — good for compute shaders, ray tracing accumulation,
     // GPGPU processing, or any case you need to read+write pixels directly in a shader.
     // Writable from WGSL via textureStore() / readable via textureLoad().
     // COPY_DST is in the default set, like createTexture2D, so writeTexture works without opting in.
-    createStorageTexture2D: (width, height, format = 'rgba32float', usage) => S.device.createTexture({ size: { width, height }, format, mipLevelCount: 1, sampleCount: 1, usage: usage ?? (GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST), label: `storageTexture2D ${width}x${height} ${format}` }),
+    createStorageTexture2D: (width, height, format = 'rgba32float', usage) => S.device.createTexture({ size: { width, height }, format, mipLevelCount: 1, sampleCount: 1, usage: usage ?? (TEX_BINDING | TEX_STORAGE_BINDING | TEX_COPY_SRC | TEX_COPY_DST), label: DIAG ? `storageTexture2D ${width}x${height} ${format}` : void 0 }),
     //=============================================================================================================================
     // creates a sampler (how to read textures: nearest/linear, clamp/repeat).,   it tells the GPU how to read pixels from a texture when it’s sampled in a shader.
     // options are:
@@ -444,18 +480,15 @@ export const WEBGPU = () => {
       if (changed) { canvas.width = width; canvas.height = height; }
       return { width, height, changed };
     },
-    //=============================================================================================================================
-    // Bytes per texel, for the formats these helpers can produce. Derives the default bytesPerRow
-    // in writeTexture/readTexture; pass bytesPerRow explicitly for anything exotic.
-    _texelBytes: {
-      'r8unorm': 1, 'r8snorm': 1, 'r8uint': 1, 'r8sint': 1,
-      'rg8unorm': 2, 'rg8snorm': 2, 'rg8uint': 2, 'rg8sint': 2,
-      'r16float': 2, 'r16uint': 2, 'r16sint': 2,
-      'rgba8unorm': 4, 'rgba8unorm-srgb': 4, 'rgba8snorm': 4, 'bgra8unorm': 4, 'bgra8unorm-srgb': 4,
-      'rgba8uint': 4, 'rgba8sint': 4, 'rgb10a2unorm': 4, 'rg11b10ufloat': 4,
-      'rg16float': 4, 'rg16uint': 4, 'rg16sint': 4, 'r32float': 4, 'r32uint': 4, 'r32sint': 4,
-      'rgba16float': 8, 'rgba16uint': 8, 'rgba16sint': 8, 'rg32float': 8, 'rg32uint': 8, 'rg32sint': 8,
-      'rgba32float': 16, 'rgba32uint': 16, 'rgba32sint': 16,
+    // Bytes per texel, derived from the format name rather than tabulated: <channels><bits><type>.
+    // This covers every copyable colour format WebGPU has — including the 16-bit unorm/snorm and
+    // rgb10a2uint variants a fixed table kept missing — so writeTexture/readTexture stop demanding
+    // an explicit bytesPerRow for them. The three packed formats don't follow the pattern and are
+    // named. Depth/stencil formats are absent on purpose: they have no single bytes-per-texel for
+    // copies, and callers must pass bytesPerRow.
+    _texelBytes: f => {
+      const m = /^(r|rg|rgba|bgra)(8|16|32)/.exec(f);
+      return m ? m[1].length * (m[2] / 8) : { 'rgb10a2unorm': 4, 'rgb10a2uint': 4, 'rg11b10ufloat': 4 }[f];
     },
     /**
      * Uploads raw pixel data into a texture (LUTs, generated noise, CPU-side images).
@@ -468,7 +501,7 @@ export const WEBGPU = () => {
      */
     writeTexture: (tex, data, opts = {}) => {
       const w = opts.width ?? tex.width, h = opts.height ?? tex.height;
-      const bpt = S._texelBytes[tex.format];
+      const bpt = S._texelBytes(tex.format);
       if (opts.bytesPerRow == null && !bpt)
         throw new Error(`writeTexture: unknown bytes-per-texel for format '${tex.format}'; pass bytesPerRow explicitly.`);
       const bytesPerRow = opts.bytesPerRow ?? w * bpt;
@@ -526,11 +559,11 @@ export const WEBGPU = () => {
     readTexture: async (tex, opts = {}) => {
       if (S.frame.encoder) console.warn('[TinyWebGPU] readTexture during an open frame reads pre-frame data — call endFrame() first.');
       const w = opts.width ?? tex.width, h = opts.height ?? tex.height;
-      const bpt = S._texelBytes[tex.format];
+      const bpt = S._texelBytes(tex.format);
       if (!bpt) throw new Error(`readTexture: unknown bytes-per-texel for format '${tex.format}'.`);
       const tight = w * bpt, padded = (tight + 255) & ~255;   // copyTextureToBuffer wants 256-byte rows
       const rb = S._acquireStaging(padded * h);
-      const enc = S.device.createCommandEncoder({ label: 'readTexture' });
+      const enc = S.device.createCommandEncoder({ label: DIAG ? 'readTexture' : void 0 });
       enc.copyTextureToBuffer(
         { texture: tex, mipLevel: opts.mipLevel ?? 0, origin: { x: opts.x ?? 0, y: opts.y ?? 0 } },
         { buffer: rb, bytesPerRow: padded, rowsPerImage: h }, { width: w, height: h });
@@ -555,21 +588,26 @@ export const WEBGPU = () => {
     // ======== Ultra-Simplified Dual Schema Handler ========
     makeUniformsAndResources: (uniforms = {}, resources = {}, opts = {}) => {
       const g = opts.g ?? 0, n = opts.n ?? 'Uniforms', v = opts.v ?? 'UB';
+      // Uniforms whose var the shader never mentions still get a buffer and setters — only the
+      // @binding is left out, so `p.uniforms = {…}` keeps working against a shader that ignores UB.
+      const emit = opts.emitUniform ?? true;
       let binding = opts.startBinding ?? 0;
 
-      // [size, align] in 4-byte units per WGSL type. vec3 has align 16 but size 12:
-      // a following scalar packs into its tail, matching WGSL uniform layout rules.
-      const _ti = {
-        'f32': [1, 1], 'i32': [1, 1], 'u32': [1, 1],
-        'vec2<f32>': [2, 2], 'vec3<f32>': [3, 4], 'vec4<f32>': [4, 4],
-        'vec2<u32>': [2, 2], 'vec3<u32>': [3, 4], 'vec4<u32>': [4, 4],
-        'vec2<i32>': [2, 2], 'vec3<i32>': [3, 4], 'vec4<i32>': [4, 4],
-        'mat4x4<f32>': [16, 4]
-      };
+      // [size, align, components, packRows] in 4-byte units, derived from the type string rather
+      // than tabulated. WGSL layout rules: scalars are 1/1; vecN is N wide and aligns to N, except
+      // vec3 which aligns to 4 while still occupying 3 (so a following scalar packs into its tail);
+      // matCxR is C columns of vecR, and a 3-row column occupies 4 units like any vec3.
+      // `components` is how many numbers the caller supplies — smaller than `size` for exactly the
+      // 3-row matrices, whose columns are written on a 4-unit stride. `packRows` flags that case.
       const _info = t => {
-        const i = _ti[t];
-        if (!i) throw new Error(`Unknown uniform type size for: ${t}`);
-        return i;
+        let m;
+        if (/^[fiu]32$/.test(t)) return [1, 1, 1, 0];
+        if ((m = /^vec([234])<[fiu]32>$/.exec(t))) { const c = +m[1]; return [c, c === 3 ? 4 : c, c, 0]; }
+        if ((m = /^mat([234])x([234])<f32>$/.exec(t))) {
+          const cols = +m[1], rows = +m[2], stride = rows === 3 ? 4 : rows;
+          return [cols * stride, stride, cols * rows, rows === 3 ? 3 : 0];
+        }
+        throw new Error(`Unknown uniform type size for: ${t}`);
       };
       const alignTo = (n, a) => Math.ceil(n / a) * a;
 
@@ -582,9 +620,9 @@ export const WEBGPU = () => {
         const layout = {};
 
         const structFields = uniformEntries.map(([name, wgslType]) => {
-          const [size, al] = _info(wgslType);
+          const [size, al, comps, packRows] = _info(wgslType);
           offset = alignTo(offset, al);
-          layout[name] = { offset, size, wgslType };
+          layout[name] = { offset, size, comps, packRows, wgslType };
           offset += size;
           return `  ${name}: ${wgslType},`;
         });
@@ -599,32 +637,36 @@ export const WEBGPU = () => {
         const I32 = new Int32Array(buffer);
         const U32 = new Uint32Array(buffer);
 
-        const _intType = t => ({
-          isU: t === 'u32' || /vec\d*<u32>/.test(t),
-          isI: t === 'i32' || /vec\d*<i32>/.test(t)
-        });
+        // Resolve the destination view and the integer coercion once, here — this used to be two
+        // regexes per field on every setUniforms() call, i.e. in the middle of the animation loop.
+        for (const f of Object.values(layout)) {
+          f.isU = /u32/.test(f.wgslType);
+          f.isI = /i32/.test(f.wgslType);
+          f.view = f.isU ? U32 : f.isI ? I32 : F32;
+        }
+
         uniformWrite = values => {
           for (const [name, value] of Object.entries(values)) {
-            const field = layout[name];
+            const f = layout[name];
             // A name that is not in the schema used to be dropped in silence — the single most
             // expensive typo in the toolkit, since nothing at all happened. Say so instead.
-            if (!field) throw new Error(`Unknown uniform '${name}'. Declared: ${Object.keys(layout).join(', ') || '(none)'}.`);
+            if (!f) throw new Error(`Unknown uniform '${name}'. Declared: ${Object.keys(layout).join(', ') || '(none)'}.`);
             // TypedArrays count as vectors/matrices too: a Float32Array mat4 out of a maths
             // library used to fall into the scalar branch and write a single NaN.
             const array = Array.isArray(value) || ArrayBuffer.isView(value) ? value : [value];
-            if (S.debug && array.length > field.size) {
-              console.warn(`Uniform '${name}' provided ${array.length} values but type ${field.wgslType} fits ${field.size}. Extra values will be ignored.`);
+            if (S.debug && array.length > f.comps) {
+              console.warn(`Uniform '${name}' provided ${array.length} values but type ${f.wgslType} fits ${f.comps}. Extra values will be ignored.`);
             }
-            const it = _intType(field.wgslType);
-            const view = it.isU ? U32 : it.isI ? I32 : F32;
-            for (let i = 0; i < field.size && i < array.length; i++) {
-              let v = array[i] ?? 0;
-              if (S.debug && (it.isI || it.isU) && !Number.isInteger(v)) {
-                console.warn(`Uniform '${name}' expects integer for ${field.wgslType} at index ${i}, got ${v}. It will be truncated.`);
+            for (let i = 0; i < f.comps && i < array.length; i++) {
+              let x = array[i] ?? 0;
+              if (S.debug && (f.isI || f.isU) && !Number.isInteger(x)) {
+                console.warn(`Uniform '${name}' expects integer for ${f.wgslType} at index ${i}, got ${x}. It will be truncated.`);
               }
-              if (it.isU) v = v >>> 0; // ensure unsigned
-              else if (it.isI) v = v | 0; // ensure signed 32-bit
-              view[field.offset + i] = v;
+              if (f.isU) x = x >>> 0;      // ensure unsigned
+              else if (f.isI) x = x | 0;   // ensure signed 32-bit
+              // Straight through, except for a 3-row matrix: the caller hands over tightly packed
+              // columns and the buffer wants them on a 4-unit stride.
+              f.view[f.offset + (f.packRows ? ((i / 3 | 0) * 4 + i % 3) : i)] = x;
             }
           }
           // Inside an open frame, stage so each dispatch sees the values set before it;
@@ -633,14 +675,12 @@ export const WEBGPU = () => {
           else S.writeUniforms(uniformBuffer, buffer);
         };
 
- 
-
-        uniformWGSL = `struct ${n} {
+        if (emit) {
+          uniformWGSL = `struct ${n} {
 ${structFields.join('\n')}
 }\n@group(${g}) @binding(${binding}) var<uniform> ${v}: ${n};`;
-
-        
-        binding++;
+          binding++;
+        }
       }
 
       // Build resources - direct WGSL types
@@ -703,52 +743,48 @@ ${structFields.join('\n')}
   resourceFields: Object.keys(resources),
   resourceLayout,
   uniformVar: uniformEntries.length > 0 ? v : null,
-  uniformBinding: uniformEntries.length > 0 ? (opts.startBinding ?? 0) : null
+  uniformBinding: uniformEntries.length > 0 && emit ? (opts.startBinding ?? 0) : null
       };
     }
   };
 
 
 
+  // The generated uniform variable's name; makePipeline tests the shader for it.
+  const UNIFORM_VAR = 'UB';
+
   //=============================================================================================================================
   // Simplified Dual-Schema Pipeline Factory
   // uniforms: object with WGSL basic types (f32, vec2<f32>, etc.)
   // resources: object with full WGSL resource types (texture_storage_2d<...>, array<...>, etc.)
 
-  const makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format, isCompute = false, blend = null, wg = [8, 8, 1] }) => {
-    // Process dual schema
-    const schemaResult = S.makeUniformsAndResources(uniforms, resources, { g: 0, startBinding: 0 });
+  const makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format, isCompute = false, blend = null, wg = [8, 8, 1], targetNames = null }) => {
+    // Declare only what the shader actually mentions. layout:'auto' drops bindings the shader
+    // never references, and a bind-group entry for a dropped binding is a validation error — so
+    // instead of emitting everything and reconciling afterwards, the schema is filtered up front
+    // and the generated WGSL, the binding numbers and the bind group agree by construction.
+    const refd = name => new RegExp(`\\b${name}\\b`).test(code);
+    const usedResources = Object.fromEntries(Object.entries(resources).filter(([n]) => refd(n)));
+    const usesUB = refd(UNIFORM_VAR);
+    if (DIAG) {
+      const unused = Object.keys(resources).filter(n => !(n in usedResources));
+      if (!usesUB && Object.keys(uniforms).length) unused.unshift(`${UNIFORM_VAR} (uniforms)`);
+      if (unused.length) console.warn(
+        `[TinyWebGPU] Schema declares ${unused.map(n => `'${n}'`).join(', ')} but the shader never references ${unused.length > 1 ? 'them' : 'it'}; ` +
+        `${unused.length > 1 ? 'they are' : 'it is'} left out of the generated WGSL and the bind group.`);
+    }
+    const schemaResult = S.makeUniformsAndResources(uniforms, usedResources, { g: 0, startBinding: 0, emitUniform: usesUB });
 
     // Prepend schema-generated WGSL to shader code, then run the G.pre hook once, here — the
     // pipeline cache keys on the result, so switching G.pre can't hand back a stale pipeline.
     const preCode = schemaResult.wgsl ? `${schemaResult.wgsl}\n${code}` : code;
     const finalCode = S.pre ? S.pre(preCode) : preCode;
 
-    // Pipelines use layout:'auto', which strips bindings the shader never references.
-    // A bind-group entry for a stripped binding is a validation error, so detect schema
-    // resources the user code never mentions and drop their entries (with a warning).
-    const strippedBindings = new Set();
-    {
-      const refd = name => new RegExp(`\\b${name}\\b`).test(code);
-      const unused = schemaResult.resourceFields.filter(name => !refd(name));
-      if (schemaResult.uniformVar && !refd(schemaResult.uniformVar)) {
-        strippedBindings.add(schemaResult.uniformBinding);
-        unused.unshift(`${schemaResult.uniformVar} (uniforms)`);
-      }
-      for (const name of unused) {
-        const info = schemaResult.resourceLayout[name];
-        if (info) strippedBindings.add(info.binding);
-      }
-      if (unused.length) console.warn(
-        `[TinyWebGPU] Schema declares ${unused.map(n => `'${n}'`).join(', ')} but the shader never references ${unused.length > 1 ? 'them' : 'it'}; ` +
-        `auto layout removes unused bindings, so ${unused.length > 1 ? 'their' : 'its'} bind group entries are skipped.`);
-    }
-
     // Pipeline cache (hash + length: see makeShader collision note).
     // Blend is part of the render key: identical WGSL with a different blend state is a
     // different pipeline, and omitting it here would hand back the wrong one.
     const blendKey = isCompute || !blend ? '' : (typeof blend === 'string' ? blend : JSON.stringify(blend)) + '|';
-    const cacheKey = (isCompute ? `C|` : `R|${format}|${blendKey}`) + S._hash(finalCode) + ':' + finalCode.length;
+    const cacheKey = (isCompute ? `C|` : `R|${[format].flat().join(',')}|${blendKey}`) + S._hash(finalCode) + ':' + finalCode.length;
     let pipeline = S.pipelineCache.get(cacheKey);
     if (!pipeline) {
       const module = await S.makeShader(finalCode, false);   // S.pre already applied above
@@ -771,22 +807,22 @@ ${structFields.join('\n')}
     // the commonest texture mistake (a plain createTexture2D behind a texture_storage_2d) from a
     // wall of driver validation text into one line naming the resource and the missing flag.
     const _usageNeed = info => {
-      if (info.isBuf) return [typeof GPUBufferUsage !== 'undefined' ? GPUBufferUsage.STORAGE : 0, 'GPUBufferUsage.STORAGE'];
+      if (info.isBuf) return [BUF_STORAGE, 'GPUBufferUsage.STORAGE'];
       if (info.isTex) return /^texture_storage_/.test(info.wgslType)
-        ? [typeof GPUTextureUsage !== 'undefined' ? GPUTextureUsage.STORAGE_BINDING : 0, 'GPUTextureUsage.STORAGE_BINDING (use createStorageTexture2D)']
-        : [typeof GPUTextureUsage !== 'undefined' ? GPUTextureUsage.TEXTURE_BINDING : 0, 'GPUTextureUsage.TEXTURE_BINDING'];
+        ? [TEX_STORAGE_BINDING, 'GPUTextureUsage.STORAGE_BINDING (use createStorageTexture2D)']
+        : [TEX_BINDING, 'GPUTextureUsage.TEXTURE_BINDING'];
       return [0, ''];
     };
-    const validateResources = (resourceValues) => {
+    // Diagnostics only. WebGPU validates the bind group itself; this exists to name the resource
+    // and the missing usage flag instead of handing you a wall of driver text, so the minified
+    // build folds it away and lets the driver's own error through.
+    const validateResources = !DIAG ? () => { } : (resourceValues) => {
       const expected = schemaResult.resourceFields;
       const missing = [];
       const mismatched = [];
       const vals = resourceValues || {};
       for (const name of expected) {
         const info = schemaResult.resourceLayout?.[name];
-        // Auto layout already dropped this binding (warned about above) and its entry is filtered
-        // out — demanding a value for it would be asking for something we then throw away.
-        if (strippedBindings.has(info?.binding)) continue;
         if (!(name in vals) || vals[name] == null) { missing.push(name); continue; }
         const v = vals[name];
         const expectedType = info?.wgslType ?? resources[name];
@@ -836,10 +872,10 @@ ${structFields.join('\n')}
         next[name] = schemaResult.resourceLayout[name]?.isBuf && typeof v?.b?.mapAsync === 'function' ? v.b : v;
       if (bindGroup && bound && schemaResult.resourceFields.every(n => next[n] === bound[n])) return;
       bound = next;
-      const baseEntries = schemaResult.uniformBuffer ? [{ binding: 0, resource: { buffer: schemaResult.uniformBuffer } }] : [];
+      const baseEntries = schemaResult.uniformBinding != null ? [{ binding: 0, resource: { buffer: schemaResult.uniformBuffer } }] : [];
       if (schemaResult.resourceFields.length > 0) validateResources(next);
       const resourceEntries = schemaResult.createResourceEntries(next);
-      const entries = [...baseEntries, ...resourceEntries].filter(e => !strippedBindings.has(e.binding));
+      const entries = [...baseEntries, ...resourceEntries];
       S.device.pushErrorScope('validation');
       bindGroup = S.bindGroup(pipeline, 0, entries);
       S.device.popErrorScope().then(err => {
@@ -849,19 +885,13 @@ ${structFields.join('\n')}
       }).catch(() => { });   // scope pop rejects if the device is lost meanwhile
     };
 
-    // Auto-init the bind group when nothing is left for the caller to supply — no resources in
-    // the schema, or every one of them stripped by auto layout. Otherwise wait for setResources,
-    // so the group is never built against a layout that is still missing entries.
-    if (schemaResult.uniformBuffer &&
-        schemaResult.resourceFields.every(n => strippedBindings.has(schemaResult.resourceLayout[n].binding))) {
-      rebindResources({});
-    }
+    // Nothing left for the caller to supply: build @group(0) now. Otherwise wait for
+    // setResources, so the group is never built against a layout still missing entries.
+    if (schemaResult.uniformBinding != null && !schemaResult.resourceFields.length) rebindResources({});
 
-    // Does @group(0) still exist after auto layout stripped the unused bindings? If it does and
-    // nothing has been bound to it, dispatching produces a bare "bind group 0 is not set" from
-    // the driver — say which call is missing instead.
-    const needsBindGroup = (schemaResult.uniformBuffer && !strippedBindings.has(schemaResult.uniformBinding))
-      || schemaResult.resourceFields.some(n => !strippedBindings.has(schemaResult.resourceLayout[n].binding));
+    // Whether @group(0) exists at all. If it does and nothing is bound to it, dispatching produces
+    // a bare "bind group 0 is not set" from the driver — say which call is missing instead.
+    const needsBindGroup = schemaResult.uniformBinding != null || schemaResult.resourceFields.length > 0;
 
     // Applies this pipeline's state to a compute pass. Also stashed on the frame by use(), so a
     // pass torn down and reopened around a staged write comes back with the same state.
@@ -872,20 +902,23 @@ ${structFields.join('\n')}
       if (bindGroup) pass.setBindGroup(0, bindGroup);
     };
 
-    // Helper to execute compute/render pass
-    const runPass = (args, encoder = null) => {
+    // Opens a pass, binds this pipeline, lets `record` put work in it, and submits if it owns the
+    // encoder. Every entry point below goes through here — direct dispatch, indirect and draw —
+    // so the encoder/pass lifecycle exists in exactly one place. `desc` null = a compute pass.
+    const runPass = (record, desc = null, encoder = null) => {
       const enc = encoder ?? S.frame.encoder ?? S.device.createCommandEncoder();
       // A chained compute pass (beginCompute) may still be open on the frame encoder;
       // close it before opening another pass — two open passes is a validation error.
       // _endPass, not endCompute: `enc` is that same encoder and must stay open to record into.
       if (enc === S.frame.encoder && S.frame.cpass) S._endPass();
-      const pass = isCompute ? enc.beginComputePass() : enc.beginRenderPass(args.renderPassDesc);
+      const pass = desc ? enc.beginRenderPass(desc) : enc.beginComputePass();
       bind(pass);
-      if (isCompute) pass.dispatchWorkgroups(...args.dispatch);
-      else pass.draw(3, 1, 0, 0);
+      record(pass);
       pass.end();
       if (!encoder && !S.frame.encoder) S.device.queue.submit([enc.finish()]);
     };
+
+    const onPass = pass => { const p = pass ?? S.frame.cpass; if (!p) throw new Error('No active compute pass'); return p; };
 
     // Common interface
     const common = {
@@ -900,21 +933,14 @@ ${structFields.join('\n')}
     };
 
     return isCompute ? Object.assign(common, {
-      dispatch: (x = 1, y = 1, z = 1, encoder = null) => runPass({ dispatch: [x, y, z] }, encoder),
+      dispatch: (x = 1, y = 1, z = 1, encoder = null) => runPass(p => p.dispatchWorkgroups(x, y, z), null, encoder),
       // dispatch() counts workgroups; run() counts the items you actually have and divides by the
       // workgroup size for you — the `Math.ceil(n / 64)` every call site was writing by hand.
       // Guard the tail with `if (gid.x >= n) { return; }` as usual.
-      run: (w = 1, h = 1, d = 1, encoder = null) =>
-        runPass({ dispatch: [Math.ceil(w / wg[0]), Math.ceil(h / (wg[1] ?? 1)), Math.ceil(d / (wg[2] ?? 1))] }, encoder),
-      dispatchIndirect: (buffer, byteOffset = 0, encoder = null) => {
-        const enc = encoder ?? S.frame.encoder ?? S.device.createCommandEncoder();
-        if (enc === S.frame.encoder && S.frame.cpass) S._endPass();
-        const pass = enc.beginComputePass();
-        bind(pass);
-        pass.dispatchWorkgroupsIndirect(buffer, byteOffset);
-        pass.end();
-        if (!encoder && !S.frame.encoder) S.device.queue.submit([enc.finish()]);
-      },
+      run: (w = 1, h = 1, d = 1, encoder = null) => runPass(
+        p => p.dispatchWorkgroups(Math.ceil(w / wg[0]), Math.ceil(h / (wg[1] ?? 1)), Math.ceil(d / (wg[2] ?? 1))), null, encoder),
+      dispatchIndirect: (buffer, byteOffset = 0, encoder = null) =>
+        runPass(p => p.dispatchWorkgroupsIndirect(buffer, byteOffset), null, encoder),
       // New: reuse an existing compute pass for chaining
       use: (pass = S.frame.cpass) => {
         if (!pass) throw new Error('No active compute pass. Call WG.beginCompute() first or pass a compute pass.');
@@ -923,22 +949,26 @@ ${structFields.join('\n')}
         // reopened one starts with no pipeline bound.
         if (pass === S.frame.cpass) S.frame.bound = bind;
       },
-      dispatchOn: (pass, x = 1, y = 1, z = 1) => {
-        const p = pass ?? S.frame.cpass; if (!p) throw new Error('No active compute pass');
-        p.dispatchWorkgroups(x, y, z);
-      },
-      dispatchIndirectOn: (pass, buffer, byteOffset = 0) => {
-        const p = pass ?? S.frame.cpass; if (!p) throw new Error('No active compute pass');
-        p.dispatchWorkgroupsIndirect(buffer, byteOffset);
-      }
+      dispatchOn: (pass, x = 1, y = 1, z = 1) => onPass(pass).dispatchWorkgroups(x, y, z),
+      dispatchIndirectOn: (pass, buffer, byteOffset = 0) => onPass(pass).dispatchWorkgroupsIndirect(buffer, byteOffset)
     }) : Object.assign(common, {
-      drawTo: (view = S._view(), clear = [0, 0, 0, 1], encoder = null) => {
+      // Single target: a view or texture, defaulting to the canvas. Multiple targets: an object
+      // keyed by the `targets` schema — `drawTo({ colour: a, normal: b })` — so the @location
+      // order lives in one place and callers never restate it.
+      drawTo: (view, clear = [0, 0, 0, 1], encoder = null) => {
+        const c = Array.isArray(clear) ? clear : [0, 0, 0, 1];
         const loadOp = clear === 'load' ? 'load' : 'clear';
-        const cv = Array.isArray(clear) ? { r: clear[0], g: clear[1], b: clear[2], a: clear[3] } : { r: 0, g: 0, b: 0, a: 1 };
-        return runPass({
-          renderPassDesc: {
-            colorAttachments: [{ view, loadOp, storeOp: 'store', clearValue: cv }]
-          }
+        const clearValue = { r: c[0], g: c[1], b: c[2], a: c[3] };
+        const asView = v => v.createView ? S._viewOf(v) : v;
+        const views = targetNames
+          ? targetNames.map(n => {
+            const v = view?.[n];
+            if (!v) throw new Error(`drawTo: no target for '${n}'. Pass { ${targetNames.join(', ')} }.`);
+            return asView(v);
+          })
+          : [view ? asView(view) : S._view()];
+        return runPass(p => p.draw(3, 1, 0, 0), {
+          colorAttachments: views.map(v => ({ view: v, loadOp, storeOp: 'store', clearValue }))
         }, encoder);
       }
     });
@@ -983,18 +1013,27 @@ ${main}
    *   GPUBlendState. Omitted = opaque overwrite, as before.
    * @returns {Promise<RenderPipeline>}
    */
-  S.makeRender = (frag, uniforms = {}, resources = {}, { format = S.format, blend = null } = {}) => {
-    // Generate vertex + fragment shader code
+  S.makeRender = (frag, uniforms = {}, resources = {}, { format = S.format, blend = null, targets = null } = {}) => {
+    // One target: `frag` returns vec4<f32>, unchanged. Several: `targets` is {name: format}, and
+    // the matching `struct FSOut { … }` is generated here — so `frag` returns FSOut and the
+    // @location indices, the part that is easy to get wrong by hand, follow the key order.
+    const names = targets ? Object.keys(targets) : null;
+    const outStruct = names
+      ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: vec4<f32>`).join(', ')}};\n`
+      : '';
     const code = `struct VSOut {@builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>};
 @vertex fn vs_main(@builtin(vertex_index) i: u32) -> VSOut {
 var ndc = array<vec2<f32>,3>(vec2<f32>(-1.,-3.),vec2<f32>(-1.,1.),vec2<f32>(3.,1.))[i];
 var o: VSOut; o.pos = vec4<f32>(ndc, 0.0, 1.0); o.uv = ndc * 0.5 + vec2<f32>(0.5); return o;
 }
-${frag}
-@fragment fn fs_main(vs: VSOut) -> @location(0) vec4<f32> { return frag(vs.uv); }
+${outStruct}${frag}
+@fragment fn fs_main(vs: VSOut) -> ${names ? 'FSOut' : '@location(0) vec4<f32>'} { return frag(vs.uv); }
 `.trim();
 
-    return makePipeline({ code, uniforms, resources, format, isCompute: false, blend });
+    return makePipeline({
+      code, uniforms, resources, isCompute: false, blend, targetNames: names,
+      format: names ? Object.values(targets) : format,
+    });
   };
 
   //======================== One-liner helpers ========================
@@ -1021,6 +1060,89 @@ ${frag}
     const p = await S.makeCompute(decls, body, uniforms, resources, { wg });
     const run = p.run;
     return Object.assign(p, { run: (w = size[0], h = size[1], d = 1) => run(w, h, d) });
+  };
+
+  //======================== Looking at things ========================
+  // One cached blit pipeline per (target format, sample type). Keyed on the promise, like
+  // shaderCache, so two concurrent first calls share a compile.
+  S._blits = new Map();
+  /**
+   * Draws a texture onto a target — the "let me just look at it" call, and the shortest path from
+   * a compute result to pixels.
+   *
+   * Uses `textureLoad`, not `textureSample`: unfilterable formats (rgba32float and friends — the
+   * ones you most want to inspect) are rejected outright by a sampler. That also means no
+   * filtering, so it is a 1:1 texel blit stretched over the target.
+   *
+   * Orientation: the source's first row lands on the target's first row, so an image comes out
+   * the right way up and `show(a, b)` then `readTexture(b)` round-trips. That means an internal
+   * `1.0 - uv.y`, because the generated uv has 0 at the *bottom* of the target — writing this blit
+   * by hand with `textureSample(t, s, uv)` is exactly the mistake that flips your image. Pass
+   * `flipY: true` for a bottom-up source, or to reproduce the naive behaviour.
+   * @param {GPUTexture} tex
+   * @param {GPUTextureView|GPUTexture} [view] defaults to the canvas
+   * @param {{format?: string, scale?: number[], offset?: number[], clear?: number[]|'load', flipY?: boolean}} [opts]
+   *   `scale`/`offset` are per-channel and applied as `value * scale + offset`, which is enough to
+   *   look at an HDR or signed buffer without writing a shader for it.
+   * @returns {Promise<Object>} the blit pipeline, in case you want to keep drawing with it
+   */
+  S.show = async (tex, view, opts = {}) => {
+    const format = opts.format ?? S.format;
+    const sample = /uint$/.test(tex.format) ? 'u32' : /sint$/.test(tex.format) ? 'i32' : 'f32';
+    const flip = opts.flipY ? 'uv.y' : '1.0 - uv.y';
+    const key = `${format}|${sample}|${opts.flipY ? 1 : 0}`;
+    let pending = S._blits.get(key);
+    if (!pending) {
+      pending = S.makeRender(`fn frag(uv: vec2<f32>) -> vec4<f32> {
+  let d = vec2<f32>(textureDimensions(src));
+  let c = vec2<i32>(clamp(vec2<f32>(uv.x, ${flip}) * d, vec2<f32>(0.0), d - 1.0));
+  return vec4<f32>(textureLoad(src, c, 0)) * UB.scale + UB.offset;
+}`, { scale: 'vec4<f32>', offset: 'vec4<f32>' }, { src: `texture_2d<${sample}>` }, { format });
+      pending.catch(() => S._blits.delete(key));
+      S._blits.set(key, pending);
+    }
+    const p = await pending;
+    p.setResources({ src: tex });
+    p.setUniforms({ scale: opts.scale ?? [1, 1, 1, 1], offset: opts.offset ?? [0, 0, 0, 0] });
+    p.drawTo(view, opts.clear ?? [0, 0, 0, 1]);
+    return p;
+  };
+
+  /**
+   * Downloads a texture as an image file.
+   *
+   * 8-bit RGBA/BGRA only — an image file has nowhere to put an HDR value, so tone-map first by
+   * rendering into an `rgba8unorm` target (`G.show(hdr, target.createView(), { scale })` will do)
+   * and saving that. Unlike the WebGL-era version this doesn't tile: WebGPU's
+   * `maxTextureDimension2D` (8192–16384) is the only ceiling, so render big and save once.
+   *
+   * The canvas texture is not saveable by default — a swapchain is RENDER_ATTACHMENT only. Either
+   * draw into your own texture, or `init(ctx, { canvasUsage })` with COPY_SRC included.
+   * @param {GPUTexture} tex needs COPY_SRC (both texture creators include it)
+   * @param {string} [filename]
+   * @param {{type?: string, quality?: number, download?: boolean, x?: number, y?: number, width?: number, height?: number, mipLevel?: number}} [opts]
+   * @returns {Promise<Blob>}
+   */
+  S.save = async (tex, filename = 'capture.png', opts = {}) => {
+    if (!/^(rgba|bgra)8unorm(-srgb)?$/.test(tex.format))
+      throw new Error(`save: needs an 8-bit RGBA texture, got '${tex.format}'. Render it into an rgba8unorm target first.`);
+    const width = opts.width ?? tex.width, height = opts.height ?? tex.height;
+    const px = await S.readTexture(tex, { x: opts.x, y: opts.y, width, height, mipLevel: opts.mipLevel, Ctor: Uint8Array });
+    // ImageData is RGBA; the canvas format is BGRA on most platforms, so swap the ends.
+    if (tex.format.startsWith('bgra'))
+      for (let i = 0; i < px.length; i += 4) { const b = px[i]; px[i] = px[i + 2]; px[i + 2] = b; }
+    const cv = new OffscreenCanvas(width, height);
+    cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(px.buffer, px.byteOffset, px.byteLength), width, height), 0, 0);
+    const blob = await cv.convertToBlob({ type: opts.type ?? 'image/png', quality: opts.quality ?? 1 });
+    if (opts.download !== false) {
+      const a = document.createElement('a');
+      a.download = filename;
+      a.href = URL.createObjectURL(blob);
+      a.click();
+      // Not revoked immediately: the click starts a download that still has to read the URL.
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    }
+    return blob;
   };
   return S
 }
