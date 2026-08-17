@@ -81,7 +81,7 @@ textures, and the sharp edges worth knowing before you hit them.
 
 ## Examples
 
-Seven single-file examples live in `examples/` — **[run them live](https://lampmaker.github.io/tinywebgpu/)**
+Eight single-file examples live in `examples/` — **[run them live](https://lampmaker.github.io/tinywebgpu/)**
 (or serve the folder yourself and open them in a WebGPU browser):
 
 1. `1_hello.html` — animated fullscreen shader in ~10 lines
@@ -94,8 +94,11 @@ Seven single-file examples live in `examples/` — **[run them live](https://lam
    objective — the four here are the standard hard cases
 7. `7_particles.html` — a few hundred thousand particles with no vertex buffers: each one splats
    into a density grid with an `atomicAdd`, and a fullscreen pass colours it
+8. `8_heightmap.html` — a flat-shaded 3D terrain drawn with `makeDraw`: a compute pass writes the
+   heights, the vertex stage reads them back out of the same storage buffer, and each facet
+   derives its own normal
 
-Every page is laid out for a phone as much as a desktop, and examples 5, 6 and 7 check their own
+Every page is laid out for a phone as much as a desktop, and examples 5, 6, 7 and 8 check their own
 arithmetic on load rather than asking you to judge it by eye — example 6 holds its WGSL objectives
 against an independent CPU implementation and then proves the search reaches a known optimum.
 
@@ -252,6 +255,16 @@ here. Resources only the *fragment* stage touches need nothing.
 not rebuild anything. `targets` and `blend` work exactly as they do on `makeRender`.
 
 `makeRender` is now literally `makeDraw` with the fullscreen vertex stage filled in.
+
+**There is no depth attachment yet.** Render passes carry colour targets only, so overlapping 3D
+geometry is not depth-sorted for you. For a height field that costs nothing — draw the cells
+back-to-front and the painter's algorithm is exact, which is what
+[example 8](examples/8_heightmap.html) does. For general 3D you would need to add a depth
+texture yourself through the escape hatches, or sort.
+
+[Example 8](examples/8_heightmap.html) is the whole pattern on one page: a compute pass writes a
+terrain into a storage buffer, the vertex stage reads it straight back out with `readOnly`, and
+each facet derives its own normal so the shading is flat.
 
 ## Minified build
 

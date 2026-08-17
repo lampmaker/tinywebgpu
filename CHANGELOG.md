@@ -40,6 +40,14 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
   visible to the vertex stage, so *every* vertex-pulled buffer needs it, and without it pipeline
   creation fails with a bind-group layout error that does not point back at the schema. Resources
   only the fragment stage touches are unaffected.
+- **Example 8, `8_heightmap.html`** — a flat-shaded 3D terrain, and the first example to draw
+  something that is not a fullscreen quad. A compute pass writes heights into a storage buffer;
+  `makeDraw` reads the same buffer back in the vertex stage with `readOnly`, one instance per grid
+  cell and six vertices each. Every vertex rebuilds its whole facet so all three agree on the face
+  normal, which is what makes the shading flat. It checks its own arithmetic on load, holding the
+  GPU's heights against a JS transcription of the same function. Known limitation it works around:
+  the library has no depth attachment, so cells are drawn back-to-front — exact for a height field
+  as long as the camera stays outside its footprint, which the orbit guarantees.
 - **No vertex buffers, deliberately.** Geometry is pulled from a storage buffer indexed by
   `@builtin(vertex_index)` / `@builtin(instance_index)`. That keeps a second layout language out
   of the library and lets a compute pass write the geometry a draw then reads with no plumbing

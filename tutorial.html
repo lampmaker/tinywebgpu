@@ -1151,8 +1151,9 @@ G.endFrame();</code></pre>
             <code>@builtin(instance_index)</code>, which means a compute pass can write the points
             a draw then reads. One catch worth knowing before you hit it — a buffer the
             <i>vertex</i> stage reads must be named in <code>readOnly</code>, because WebGPU
-            refuses to make a read-write storage binding visible to that stage. See
-            <a href="https://github.com/lampmaker/tinywebgpu/blob/main/API.md">API.md</a>.</li>
+            refuses to make a read-write storage binding visible to that stage.
+            <a href="examples/8_heightmap.html">Example 8</a> is the whole pattern in one page:
+            a compute pass writes a terrain, the vertex stage reads it straight back out.</li>
           <li><a href="https://github.com/lampmaker/tinywebgpu/blob/main/API.md">API.md</a> — the
             complete surface, including the escape hatches for when the schema is not enough.</li>
         </ul>
