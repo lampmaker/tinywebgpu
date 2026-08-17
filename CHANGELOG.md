@@ -26,6 +26,33 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
   stride WGSL requires, so you pass 9 tightly packed numbers for a `mat3x3<f32>`.
 - **`init(ctx, { canvasUsage })`** — swapchain usage flags, so adding `COPY_SRC` makes the canvas
   texture itself readable and saveable.
+- **`G.makeDraw({ code, … })` — your own vertex stage.** The sibling of `makeCompute` for geometry
+  that is not a fullscreen quad: `code` is complete WGSL, both `@vertex fn vs_main` and
+  `@fragment fn fs_main`, and the only thing prepended is the schema, exactly as for compute. You
+  keep the dual schema, `drawTo`, the frame API and the pipeline cache. `count` (vertices per
+  instance), `instances` and `topology` are options and, for the first two, writable properties on
+  the result — a per-frame particle count does not rebuild the pipeline. `topology` is part of the
+  cache key, since two pipelines with byte-identical WGSL and different topologies are different
+  pipelines. `makeRender` is now literally this call with the fullscreen vertex stage filled in,
+  which is why adding the entry point cost −113 bytes: the duplicated `FSOut` generation went.
+- **`readOnly: string[]` on `makeDraw`** binds the named resources `var<storage, read>` instead of
+  `read_write`. This is not a nicety: WebGPU forbids a read-write storage binding from being
+  visible to the vertex stage, so *every* vertex-pulled buffer needs it, and without it pipeline
+  creation fails with a bind-group layout error that does not point back at the schema. Resources
+  only the fragment stage touches are unaffected.
+- **Example 8, `8_heightmap.html`** — a flat-shaded 3D terrain, and the first example to draw
+  something that is not a fullscreen quad. A compute pass writes heights into a storage buffer;
+  `makeDraw` reads the same buffer back in the vertex stage with `readOnly`, one instance per grid
+  cell and six vertices each. Every vertex rebuilds its whole facet so all three agree on the face
+  normal, which is what makes the shading flat. It checks its own arithmetic on load, holding the
+  GPU's heights against a JS transcription of the same function. Known limitation it works around:
+  the library has no depth attachment, so cells are drawn back-to-front — exact for a height field
+  as long as the camera stays outside its footprint, which the orbit guarantees.
+- **No vertex buffers, deliberately.** Geometry is pulled from a storage buffer indexed by
+  `@builtin(vertex_index)` / `@builtin(instance_index)`. That keeps a second layout language out
+  of the library and lets a compute pass write the geometry a draw then reads with no plumbing
+  between them. Cost of the whole feature: +484 bytes on both the minified and tiny builds
+  (+377 threading topology/count/instances through, +107 for `readOnly`).
 
 **Changed**
 
@@ -46,10 +73,72 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 - **The minified build is smaller and strips more.** `mangleProps` renames the internal
   `_`-prefixed properties, `DIAG` now also folds away the resource validator, the buffer-size
   check and every debug `label`, and the spec-fixed usage flags are named constants the minifier
-  can inline. Net of the features above: 19.0 KB → 18.2 KB raw. A caveat worth recording — the
-  classic tricks that were considered and rejected (packing API names into strings, binding hot
-  methods to short locals) move raw bytes but not gzipped ones: rebinding every hot call site
-  measured −992 raw and **−65 gzipped**, because gzip already deduplicates across the file.
+  can inline. Net of the features above: 19.0 KB → 18.2 KB raw.
+- **…and smaller again, by 2.2 KB raw, for inline use.** This reverses the call recorded above.
+  Binding hot paths to short locals really does buy almost nothing gzipped — the measurement
+  stands, and it is repeated in the README — but the case it was rejected for was HTTP delivery.
+  Inlining the library into a single HTML file, an on-chain artwork especially, is a *raw* byte
+  budget, and there gzip never runs. So the frame state (`S.frame.encoder` and friends), the
+  device, the shader and pipeline caches and the staging ring moved into closure variables the
+  minifier renames to one character each; `createCommandEncoder` and `queue.submit` are spelled
+  once, behind `mkEnc` and `submit`; `Object.entries`/`keys`/`assign`/`values` are aliased; the
+  three blend presets are built from a two-argument helper instead of written out; the schema
+  result's internal fields are `_`-prefixed so `mangleProps` reaches them, and `makePipeline`
+  destructures the ones it reads on every dispatch. Debug `label`s went from `label: DIAG ? … :
+  void 0` to a `...(DIAG && { label: … })` spread, which leaves nothing behind at all rather than
+  `label: void 0`. Two validation error scopes, the `onuncapturederror` handler and the
+  dropped-feature filter are now DIAG-gated too, since their entire purpose was to log.
+  18.2 KB → 15.7 KB raw, 7.4 KB → 7.0 KB gzipped. No API change. (`makeDraw` above has since
+  added 0.5 KB back, for 16.1 KB.)
+- **`beginFrame()` no longer returns the internal frame object**, and `G.frame` is gone with it —
+  the frame state is closure variables now. Neither was documented or used; `beginFrame()` returns
+  nothing.
+- **`makeUniformsAndResources()` keeps `wgsl`, `uniformBuffer` and `uniformWrite`** on its result
+  and renames the rest to `_entries`, `_uniformFields`, `_resourceFields`, `_resourceLayout` and
+  `_uniformBinding`, so the minified build can shorten them. The unused `uniformVar` is dropped.
+  This is the schema-engine escape hatch; the three names anything realistically reads are the
+  three that stayed. `p.uniformFields` / `p.resourceFields` on a pipeline are unchanged.
+
+**Added — build**
+
+- **`npm run build:tiny` → `tinywebgpu.tiny.js`, 10.7 KB** (4.9 KB gzipped), for inlining into a
+  single file. `tinywebgpu.js` now carries a row of `const NAME = true;` switches; `build-min.mjs`
+  rewrites the ones you name to `false` and dead-code elimination removes what they guard, so the
+  code is gone from the bundle rather than merely unreachable. `--tiny` drops all of them,
+  `--with=` keeps named ones, `--without=` removes named ones from an otherwise full build, and a
+  feature that another one depends on is kept with a warning instead of producing a build that
+  throws. The optional groups are `texio`, `read`, `save`, `show`, `pingpong`, `resize`, `blend`
+  and `msg`; everything else — init, the dual-schema engine, the pipelines, buffers, textures,
+  samplers, the frame API and frame-ordered writes — is always in. Per-switch savings are
+  tabulated in the README.
+- **`--iife` and `--no-banner`.** `--iife` emits a classic script assigning `globalThis.WEBGPU`,
+  for embedding contexts that cannot give you `<script type="module">`; the export is rewritten by
+  hand rather than through esbuild's `globalName`, which would spend ~450 bytes on CommonJS
+  interop to hand over one function. Together with `--tiny` that is 10.4 KB.
+- **`--without=msg` folds every error message down to a number** (`Error: 15`), which is 1.1 KB of
+  the tiny build. `--tiny` implies it. The numbers are listed in the `ERRORS` table in
+  `build-min.mjs`, and the build fails if a number is reused or goes undocumented.
+- **`npm run test:tiny`** builds a feature-reduced bundle and runs the suite against it, so the
+  switches are covered rather than assumed. `npm run test:all` runs source, minified and tiny —
+  260 assertions across the three.
+
+**Added — tests**
+
+- **`test/frame.test.mjs`** — the encoder/pass lifecycle, which the aliasing pass rewrote and
+  which nothing was covering. The device stub records the GPU command stream in order, so each
+  case asserts the *shape* of what was submitted rather than that a call returned: how many
+  encoders were opened, where the passes started and ended, that a staged write lands between the
+  dispatches it separates, and that a pass torn down around that write comes back with its
+  pipeline rebound. The sequences mirror the examples — `beginFrame` batching (3, 7), indirect
+  dispatch inside a frame (4), and `beginCompute` + `use()` + `dispatchOn` with `setUniforms`
+  between the dispatches (6), which is the sharp one. The whole file passes unchanged against the
+  pre-refactor library, which is what makes it a regression test and not a description of the new
+  code.
+- **`test/tiny.test.mjs`** — runs against a fully stripped `--tiny` bundle: the optional entry
+  points really are absent, the core still dispatches and draws, and `MSG=false` throws numbers.
+  A feature guard drawn one line too wide would take part of `makePipeline` with it.
+- **Blend presets are asserted explicitly** in `layout.test.mjs`, since they are now built from a
+  two-argument helper rather than written out.
 
 **Fixed**
 

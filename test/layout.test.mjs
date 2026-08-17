@@ -198,6 +198,29 @@ const layoutOf = uniforms => {
   check('texel bytes: depth24plus stays unknown', b('depth24plus'), undefined);
 }
 
+// --- blend presets ----------------------------------------------------------
+{
+  // The three presets are built from a two-argument helper rather than written out, on the
+  // observation that they all add and all leave alpha's source at `one`. Spelled out here so
+  // that shortcut cannot drift: these are the exact states example 5 and the docs promise.
+  const add = (srcFactor, dstFactor) => ({ srcFactor, dstFactor, operation: 'add' });
+  check('blend: alpha', S._resolveBlend('alpha'),
+    { color: add('src-alpha', 'one-minus-src-alpha'), alpha: add('one', 'one-minus-src-alpha') });
+  check('blend: premultiplied', S._resolveBlend('premultiplied'),
+    { color: add('one', 'one-minus-src-alpha'), alpha: add('one', 'one-minus-src-alpha') });
+  check('blend: additive', S._resolveBlend('additive'),
+    { color: add('one', 'one'), alpha: add('one', 'one') });
+
+  check('blend: null is opaque', S._resolveBlend(null), null);
+  const raw = { color: { srcFactor: 'zero', dstFactor: 'one', operation: 'subtract' } };
+  check('blend: a raw GPUBlendState passes straight through', S._resolveBlend(raw), raw);
+
+  let threw = '';
+  try { S._resolveBlend('glow'); } catch (e) { threw = e.message; }
+  check('blend: an unknown preset names the ones that exist',
+    /Unknown blend preset 'glow'.*'alpha', 'premultiplied', 'additive'/.test(threw), true);
+}
+
 // --- ping-pong pairs --------------------------------------------------------
 {
   const seed = Float32Array.from([1, 2, 3, 4]);
@@ -253,6 +276,83 @@ const layoutOf = uniforms => {
     /textureLoad/.test(lastCode) && !/textureSample/.test(lastCode), true);
   await S.show(tex, {}, { flipY: true });
   check('show({flipY}) opts back into the raw uv', /1\.0 - uv\.y/.test(lastCode), false);
+}
+
+// --- makeDraw: your own vertex stage ----------------------------------------
+{
+  let lastCode = null, lastDesc = null, drew = null;
+  const renderPass = { setPipeline: () => { }, setBindGroup: () => { }, draw: (...a) => { drew = a; }, end: () => { } };
+  Object.assign(S.device, {
+    createShaderModule: ({ code }) => { lastCode = code; return { getCompilationInfo: async () => ({ messages: [] }) }; },
+    createRenderPipeline: d => { lastDesc = d; return { getBindGroupLayout: () => ({}) }; },
+    createCommandEncoder: () => ({ beginRenderPass: () => renderPass, finish: () => { } }),
+  });
+  S.device.queue.submit = () => { };
+
+  const vsfs = `struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) col: vec3<f32> };
+@vertex fn vs_main(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> VSOut {
+  var o: VSOut; o.pos = vec4<f32>(parts[i].xy, 0., 1.) * UB.size; o.col = vec3<f32>(1.); return o;
+}
+@fragment fn fs_main(vs: VSOut) -> @location(0) vec4<f32> { return vec4<f32>(vs.col, 1.); }`;
+
+  const p = await S.makeDraw({
+    code: vsfs,
+    uniforms: { size: 'f32' }, resources: { parts: 'array<vec4<f32>>' },
+    readOnly: ['parts'], count: 4, instances: 500, topology: 'triangle-strip',
+  });
+
+  // Captured now: every later makeDraw in this block overwrites lastCode/lastDesc.
+  const pCode = lastCode, pDesc = lastDesc;
+
+  // The fullscreen prelude is makeRender's, not makePipeline's — makeDraw must not add one.
+  check('makeDraw does not prepend a vertex shader',
+    (pCode.match(/@vertex/g) || []).length, 1);
+  check('makeDraw still generates the uniform struct', /var<uniform> UB: Uniforms/.test(pCode), true);
+
+  // WebGPU rejects a read_write storage binding that is visible to the vertex stage, so a
+  // resource the vertex shader reads has to be bound `read`. This is the whole reason readOnly
+  // exists; without it the pipeline is invalid on a real device and fine on this stub.
+  check('readOnly binds storage as read, not read_write',
+    /@binding\(1\) var<storage, read> parts:/.test(pCode), true);
+  check('resources not named in readOnly stay read_write', await (async () => {
+    await S.makeDraw({ code: vsfs, uniforms: { size: 'f32' }, resources: { parts: 'array<vec4<f32>>' } });
+    return /var<storage, read_write> parts:/.test(lastCode);
+  })(), true);
+
+  check('makeDraw passes topology through', pDesc.primitive.topology, 'triangle-strip');
+
+  const pts = S.createStorageBuffer(64);
+  pts.b.usage = GPUBufferUsage.STORAGE;
+  pts.b.mapAsync = () => { };
+  p.setResources({ parts: pts });
+  p.setUniforms({ size: 1 });
+  p.drawTo({});
+  check('drawTo draws count vertices × instances', drew, [4, 500, 0, 0]);
+
+  // A per-frame instance count must not need a new pipeline.
+  p.instances = 12;
+  p.drawTo({});
+  check('instances is settable per frame', drew, [4, 12, 0, 0]);
+
+  // Two pipelines whose WGSL is byte-identical but whose topology differs are different
+  // pipelines. The cache keys on the source, so without topology in the key the second call
+  // hands back the first one — silently drawing triangles where lines were asked for.
+  const args = { code: vsfs, uniforms: { size: 'f32' }, resources: { parts: 'array<vec4<f32>>' }, readOnly: ['parts'] };
+  const tri = await S.makeDraw({ ...args, topology: 'triangle-list' });
+  const triAgain = await S.makeDraw({ ...args, topology: 'triangle-list' });
+  const line = await S.makeDraw({ ...args, topology: 'line-strip' });
+  check('identical pipelines are still cached', tri.pipeline === triAgain.pipeline, true);
+  check('topology is part of the pipeline cache key', tri.pipeline === line.pipeline, false);
+  check('and it reaches the descriptor', lastDesc.primitive.topology, 'line-strip');
+
+  // makeRender is makeDraw with the fullscreen stage filled in — it must still behave.
+  await S.makeRender('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, 0., 1.); }');
+  check('makeRender still generates its fullscreen vertex stage',
+    /@vertex fn vs_main\(@builtin\(vertex_index\)/.test(lastCode), true);
+  drew = null;
+  const q = await S.makeRender('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.); }');
+  q.drawTo({});
+  check('makeRender still draws the 3-vertex triangle', drew, [3, 1, 0, 0]);
 }
 
 // --- wgsl_shorthand ---------------------------------------------------------

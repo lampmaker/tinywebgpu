@@ -236,9 +236,11 @@ const G = await WEBGPU().init();                             // compute only</co
     <section class="step" id="first-pixels">
       <h2><span class="num">02</span>Your first pixels</h2>
       <div class="body">
-        <p>TinyWebGPU draws exactly one thing: a triangle big enough to cover the screen. You never
-          see it. You write a function called <code>frag</code> that turns a coordinate into a
-          colour, and the library generates the vertex shader and the plumbing around it.</p>
+        <p><code>makeRender</code> draws exactly one thing: a triangle big enough to cover the
+          screen. You never see it. You write a function called <code>frag</code> that turns a
+          coordinate into a colour, and the library generates the vertex shader and the plumbing
+          around it. (When you want real geometry instead, <code>makeDraw</code> lets you write
+          the vertex stage yourself — see the last step.)</p>
         <p><code>uv</code> runs from <code>(0,0)</code> at the bottom-left to <code>(1,1)</code> at
           the top-right. Everything else is up to you.</p>
         <div class="demo">
@@ -1121,9 +1123,14 @@ G.endFrame();</code></pre>
             <code>python3 -m http.server</code> is enough. Opening the file from disk will
             not work.</li>
           <li><b>Ship the minified build if you care.</b> <code>tinywebgpu.min.js</code> is about
-            18&nbsp;KB, 7&nbsp;KB gzipped. It is console-free: errors still throw with their
+            16&nbsp;KB, 7&nbsp;KB gzipped. It is console-free: errors still throw with their
             messages, but the warnings and the pretty compile-error log are stripped. Develop
             against the readable file, switch at the end.</li>
+          <li><b>Inlining it into one file?</b> <code>npm run build:tiny</code> drops the entry
+            points a self-contained piece never calls — image loading, readback, PNG export,
+            <code>show</code> — and gets you to about 11&nbsp;KB. Add
+            <code>--with=show</code> and friends to keep the ones you do use. See
+            <i>Tiny build</i> in the README.</li>
         </ul>
         <p>On GitHub Pages, keep the empty <code>.nojekyll</code> file at the root — without it,
           Jekyll ignores directories beginning with an underscore and can quietly drop files.</p>
@@ -1135,6 +1142,18 @@ G.endFrame();</code></pre>
           <li><a href="examples/7_particles.html">Example 7</a> — the particle system with bouncing
             walls, a grid that follows the window, and up to 800k particles.</li>
           <li><a href="examples/4_indirect.html">Example 4</a> — indirect dispatch on its own.</li>
+          <li><b>Your own vertex stage.</b> Everything above draws a fullscreen quad.
+            <code>G.makeDraw({ code, count, instances, topology })</code> is the same deal as
+            <code>makeCompute</code> — you write both <code>@vertex fn vs_main</code> and
+            <code>@fragment fn fs_main</code>, the schema still generates <code>UB</code> and the
+            bindings, and you keep <code>drawTo</code> and the frame API. There are no vertex
+            buffers: pull geometry out of a storage buffer with
+            <code>@builtin(instance_index)</code>, which means a compute pass can write the points
+            a draw then reads. One catch worth knowing before you hit it — a buffer the
+            <i>vertex</i> stage reads must be named in <code>readOnly</code>, because WebGPU
+            refuses to make a read-write storage binding visible to that stage.
+            <a href="examples/8_heightmap.html">Example 8</a> is the whole pattern in one page:
+            a compute pass writes a terrain, the vertex stage reads it straight back out.</li>
           <li><a href="https://github.com/lampmaker/tinywebgpu/blob/main/API.md">API.md</a> — the
             complete surface, including the escape hatches for when the schema is not enough.</li>
         </ul>

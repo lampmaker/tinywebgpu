@@ -92,6 +92,45 @@ attachments must share width/height/sampleCount, and the device caps both the nu
 (`maxColorAttachmentBytesPerSample`, often 32 — two `rgba32float` targets and you are at the
 ceiling).
 
+### `await G.makeDraw({ code, uniforms?, resources?, readOnly?, count?, instances?, topology?, format?, blend?, targets? })`
+Render pipeline with **your own vertex stage**. `code` is complete WGSL — both
+`@vertex fn vs_main` and `@fragment fn fs_main` — and the only thing prepended is the schema
+(the `UB` struct and the `@group`/`@binding` declarations), exactly as for compute. You keep the
+dual schema, `drawTo`, the frame API and the pipeline cache. `makeRender` is this call with the
+fullscreen vertex stage filled in.
+
+| Option | Default | Notes |
+|---|---|---|
+| `readOnly: string[]` | `[]` | Resources bound `var<storage, read>` instead of `read_write`. **Required for anything the vertex stage reads** — see below. |
+| `count` | `3` | Vertices per instance, passed to `draw()`. |
+| `instances` | `1` | Instance count. |
+| `topology` | `'triangle-list'` | Any `GPUPrimitiveTopology`: `'triangle-strip'`, `'line-list'`, `'line-strip'`, `'point-list'`. Part of the pipeline cache key. |
+| `format`, `blend`, `targets` | — | Exactly as `makeRender`. |
+
+`count` and `instances` are also plain properties on the result, so a per-frame count
+(`p.instances = alive`) does not rebuild the pipeline.
+
+**No vertex buffers, by design.** Pull geometry from a storage buffer indexed by
+`@builtin(vertex_index)` / `@builtin(instance_index)`, so a compute pass can write the geometry a
+draw then reads with nothing in between.
+
+**`readOnly` is mandatory for vertex-visible buffers.** WebGPU forbids a read-write storage
+binding from being visible to the vertex stage ("if an entry's `visibility` includes
+`GPUShaderStage.VERTEX` … its `type` is not `"storage"`"), and `read_write` is what the schema
+emits by default. Omit it and pipeline creation fails with a bind-group layout error that does
+not point back here. Resources only the fragment stage touches need nothing.
+
+```js
+const p = await G.makeDraw({
+  code: vsAndFsWGSL,
+  uniforms: { size: 'f32' }, resources: { parts: 'array<vec4<f32>>' },
+  readOnly: ['parts'],
+  count: 4, instances: N, topology: 'triangle-strip', blend: 'additive',
+});
+p.setResources({ parts });
+p.drawTo();
+```
+
 ### `await G.makeCompute(bodyWGSL, mainWGSL, uniforms?, resources?, { wg = [8,8,1] })`
 Compute pipeline. `bodyWGSL` = declarations (functions, structs); `mainWGSL` = statements placed
 inside the generated entry point, which receives `gid` (global), `lid` (local), `wid`
@@ -136,7 +175,8 @@ Compute-only:
 Render-only:
 | Member | Meaning |
 |---|---|
-| `p.drawTo(view?, clear=[0,0,0,1], encoder?)` | Draw the fullscreen triangle. `view` is a `GPUTextureView` or a `GPUTexture`, defaulting to the frame view or a fresh swapchain view. With `targets`, pass `{ name: view\|texture, … }` instead. `clear` = color array or `'load'` to keep contents. |
+| `p.drawTo(view?, clear=[0,0,0,1], encoder?)` | Draw `p.count` vertices × `p.instances` instances — the fullscreen triangle unless `makeDraw` said otherwise. `view` is a `GPUTextureView` or a `GPUTexture`, defaulting to the frame view or a fresh swapchain view. With `targets`, pass `{ name: view\|texture, … }` instead. `clear` = color array or `'load'` to keep contents. |
+| `p.count` / `p.instances` | Vertices per instance and instance count, writable. `3` / `1` for `makeRender`. Change either per frame without rebuilding the pipeline. |
 
 ### One-liners
 - `await G.drawQuad({ frag, uniforms, resources, clear, format, blend })` → pipeline + `run(u?, view?)`
@@ -233,7 +273,7 @@ whichever pipeline `use()` named last.
 `G.makeShader(code)` (returns a cached promise of the compiled module; applies `G.pre`),
 `G.makeRenderPipeline(vs, fs, formatOrFormats, topology?, blend?)` (an array of formats gives multiple targets), `G.makeComputePipeline(module)`,
 `G.bindGroup(pipeline, groupIndex, entries)`,
-`G.makeUniformsAndResources(...)` (the schema engine itself).
+`G.makeUniformsAndResources(...)` (the schema engine itself; its result carries `wgsl`, `uniformBuffer` and `uniformWrite`, plus `_`-prefixed internals the minified build renames).
 
 ## WGSL preprocessing
 
@@ -255,3 +295,21 @@ alternation regex (longest token wins), and returns a deterministic `src => src`
 Careful with `SHORT_TOKENS`: one-letter aliases collide with natural identifier names, so
 `let F = fresnel(...)` becomes `let f32 = ...` and won't compile. They are opt-in for exactly
 that reason.
+
+## Builds
+
+| File | Size | What it is |
+|---|---|---|
+| `tinywebgpu.js` | 72 KB | the source, with comments and every diagnostic. `main`/`exports` point here. |
+| `tinywebgpu.min.js` | 16.1 KB (7.1 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
+| `tinywebgpu.tiny.js` | 10.7 KB (4.9 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
+
+`build:tiny` drops `writeTexture`, `loadTexture`, `readTexture`, buffer `.r()`, `save`, `show`,
+the ping-pong helpers, `resizeCanvas` and the named blend presets. Keep any of them with
+`node build-min.mjs --tiny --with=show,read`, or start from the full build and remove a few with
+`--without=save,texio`. `--iife` emits a classic `<script>` assigning `globalThis.WEBGPU`.
+Full table of what each switch costs: README → *Tiny build*.
+
+Everything else is always present: `init`, `makeRender`, `makeDraw`, `makeCompute`, `drawQuad`,
+`compute2D`, the schema engine, buffers, textures, samplers, the frame API and frame-ordered
+writes.

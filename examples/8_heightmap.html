@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<!-- TinyWebGPU example 8: a flat-shaded 3D height map, drawn with your own vertex stage.
+     A compute pass writes the heights; makeDraw reads them straight back out of the same
+     storage buffer in the vertex shader — no vertex buffers, no CPU in between. Two triangles
+     per grid cell, one instance per cell, and the face normal is derived in the vertex shader
+     so every facet gets a single flat colour.
+     Serve this folder (python3 -m http.server) and open /examples/8_heightmap.html -->
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TinyWebGPU — flat-shaded height map</title>
+  <style>
+    body {
+      margin: 0; min-height: 100vh; padding: 1rem; display: grid; place-items: center;
+      gap: .8rem; align-content: center;
+      background: #0b0d12; color: #ddd;
+      font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-text-size-adjust: 100%;
+    }
+    canvas { display: block; width: 100%; max-width: 720px; height: auto; aspect-ratio: 16 / 10; }
+    pre {
+      margin: 0; max-width: 720px; white-space: pre-wrap; overflow-wrap: anywhere;
+      font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #9aa4b2;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="c"></canvas>
+  <pre id="out">running…</pre>
+  <script type="module">
+    import { WEBGPU } from '../tinywebgpu.js';
+
+    const N = 128;                       // cells per side
+    const VN = N + 1;                    // grid vertices per side
+    const SIZE = 2.0;                    // world extent, centred on the origin
+
+    const canvas = document.getElementById('c');
+    const G = await WEBGPU().init(canvas.getContext('webgpu'));
+
+    // One f32 per grid vertex. The compute pass writes it read_write; the vertex stage reads it
+    // read-only. Same GPUBuffer, two pipelines, two address spaces — see `readOnly` below.
+    const heights = G.createStorageBuffer(VN * VN * 4);
+
+    // ── the terrain function, once in WGSL ───────────────────────────────────────────────────
+    // Kept as a string so the self-check at the bottom can hold the GPU's answer against a JS
+    // transcription of the same arithmetic instead of asking you to judge it by eye.
+    const TERRAIN = `
+      fn terrain(p: vec2<f32>, t: f32) -> f32 {
+        var h = 0.30 * sin(p.x * 3.0 + t * 0.6) * cos(p.y * 3.0 - t * 0.4);
+        h += 0.15 * sin(p.x * 7.0 - t * 0.3) * sin(p.y * 6.0 + t * 0.5);
+        h += 0.07 * sin((p.x + p.y) * 13.0 + t);
+        let r = length(p);
+        return h * exp(-r * r * 0.9);              // island falloff
+      }`;
+
+    const shape = await G.makeCompute(TERRAIN, `
+        let i = gid.x;
+        if (i >= ${VN * VN}u) { return; }
+        let p = (vec2<f32>(f32(i % ${VN}u), f32(i / ${VN}u)) / ${N}.0 - 0.5) * ${SIZE};
+        heights[i] = terrain(p, UB.time);
+      `,
+      { time: 'f32' }, { heights: 'array<f32>' }, { wg: [64, 1, 1] });
+    shape.setResources({ heights });
+
+    // ── the draw: one instance per cell, six vertices each ───────────────────────────────────
+    const land = await G.makeDraw({
+      code: `
+        struct VSOut {
+          @builtin(position) pos: vec4<f32>,
+          // flat: all three vertices of a facet compute the same value, and saying so keeps the
+          // rasteriser from interpolating between three identical numbers.
+          @location(0) @interpolate(flat) tint: vec3<f32>,
+        };
+
+        fn corner(vx: u32, vy: u32) -> vec3<f32> {
+          let g = vec2<f32>(f32(vx), f32(vy)) / ${N}.0 - 0.5;
+          return vec3<f32>(g.x * ${SIZE}, heights[vy * ${VN}u + vx], g.y * ${SIZE});
+        }
+
+        @vertex fn vs_main(@builtin(vertex_index) v: u32,
+                           @builtin(instance_index) i: u32) -> VSOut {
+          // Cell order is back-to-front: the library has no depth attachment yet, so the painter's
+          // algorithm is doing the hiding. For a height field with the camera outside its
+          // footprint, walking the grid away-from-camera on both axes is an exact ordering, and
+          // UB.flip says which way that is for the current orbit angle.
+          var cx = i % ${N}u;
+          var cy = i / ${N}u;
+          if (UB.flip.x > 0.5) { cx = ${N - 1}u - cx; }
+          if (UB.flip.y > 0.5) { cy = ${N - 1}u - cy; }
+
+          // Two triangles: (0,0)(1,0)(0,1) and (1,0)(1,1)(0,1).
+          var OX = array<u32, 6>(0u, 1u, 0u,  1u, 1u, 0u);
+          var OY = array<u32, 6>(0u, 0u, 1u,  0u, 1u, 1u);
+
+          // Every vertex builds its whole facet, so all three agree on the normal — that is what
+          // makes this flat shading rather than smooth.
+          let t = (v / 3u) * 3u;
+          let p0 = corner(cx + OX[t],      cy + OY[t]);
+          let p1 = corner(cx + OX[t + 1u], cy + OY[t + 1u]);
+          let p2 = corner(cx + OX[t + 2u], cy + OY[t + 2u]);
+          let nrm = normalize(cross(p2 - p0, p1 - p0));
+
+          var TRI = array<vec3<f32>, 3>(p0, p1, p2);
+          let p = TRI[v - t];
+
+          let lam = 0.15 + 0.85 * max(dot(nrm, normalize(vec3<f32>(0.45, 0.8, 0.35))), 0.0);
+          let band = clamp(p.y * 2.4 + 0.45, 0.0, 1.0);
+          let rock = mix(vec3<f32>(0.16, 0.30, 0.22), vec3<f32>(0.55, 0.47, 0.36), band);
+          let snow = mix(rock, vec3<f32>(0.92, 0.94, 0.98), smoothstep(0.72, 0.95, band));
+
+          var o: VSOut;
+          o.pos = UB.mvp * vec4<f32>(p, 1.0);
+          o.tint = snow * lam;
+          return o;
+        }
+
+        @fragment fn fs_main(vs: VSOut) -> @location(0) vec4<f32> {
+          return vec4<f32>(vs.tint, 1.0);
+        }`,
+      uniforms:  { mvp: 'mat4x4<f32>', flip: 'vec2<f32>' },
+      resources: { heights: 'array<f32>' },
+      // The one thing worth remembering about makeDraw: WebGPU will not let the vertex stage see
+      // a read_write storage binding, and read_write is what the schema emits by default. Drop
+      // this line and pipeline creation fails with a bind-group layout error.
+      readOnly:  ['heights'],
+      count: 6, instances: N * N,
+    });
+    land.setResources({ heights });
+
+    // ── camera: column-major 4×4s, WebGPU clip space (z in 0..1) ─────────────────────────────
+    const mul = (a, b) => {
+      const o = new Float32Array(16);
+      for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+        let s = 0;
+        for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k];
+        o[c * 4 + r] = s;
+      }
+      return o;
+    };
+    const perspective = (fovy, aspect, near, far) => {
+      const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+      const m = new Float32Array(16);
+      m[0] = f / aspect; m[5] = f; m[10] = far * nf; m[11] = -1; m[14] = near * far * nf;
+      return m;
+    };
+    const lookAt = (eye, at, up) => {
+      const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+      const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+      const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+      const norm = v => { const l = Math.hypot(...v); return [v[0] / l, v[1] / l, v[2] / l]; };
+      const z = norm(sub(eye, at)), x = norm(cross(up, z)), y = cross(z, x);
+      return new Float32Array([
+        x[0], y[0], z[0], 0,
+        x[1], y[1], z[1], 0,
+        x[2], y[2], z[2], 0,
+        -dot(x, eye), -dot(y, eye), -dot(z, eye), 1,
+      ]);
+    };
+
+    // ── self-check: the GPU's heights against the same arithmetic in JS ──────────────────────
+    const terrainJS = (x, y, t) => {
+      let h = 0.30 * Math.sin(x * 3 + t * 0.6) * Math.cos(y * 3 - t * 0.4);
+      h += 0.15 * Math.sin(x * 7 - t * 0.3) * Math.sin(y * 6 + t * 0.5);
+      h += 0.07 * Math.sin((x + y) * 13 + t);
+      const r2 = x * x + y * y;
+      return h * Math.exp(-r2 * 0.9);
+    };
+
+    shape.setUniforms({ time: 0 });
+    shape.run(VN * VN);
+    const got = await heights.r(VN * VN * 4, 0, Float32Array);
+    let worst = 0;
+    for (let i = 0; i < VN * VN; i += 37) {                    // a scattered sample, not all 16k
+      const x = ((i % VN) / N - 0.5) * SIZE, y = ((i / VN | 0) / N - 0.5) * SIZE;
+      worst = Math.max(worst, Math.abs(got[i] - terrainJS(x, y, 0)));
+    }
+    const ok = worst < 1e-5;
+    const tris = N * N * 2;
+    document.getElementById('out').textContent =
+      `${N}×${N} cells · ${tris.toLocaleString()} triangles · ${(N * N).toLocaleString()} instances × 6 vertices\n`
+      + `heights: one compute pass into a storage buffer, read back in the vertex stage (readOnly)\n`
+      + `worst |GPU − CPU| height error: ${worst.toExponential(2)}  ${ok ? 'PASS' : 'FAIL'}`;
+    window.__result = { ok, msg: `worst height error ${worst.toExponential(2)}` };
+
+    // ── loop ─────────────────────────────────────────────────────────────────────────────────
+    const start = performance.now();
+    const frame = () => {
+      const { width, height } = G.resizeCanvas(canvas);
+      const t = (performance.now() - start) / 1000;
+
+      const a = t * 0.25, R = 3.1;
+      const eye = [Math.cos(a) * R, 1.55, Math.sin(a) * R];
+      const mvp = mul(perspective(0.9, width / height, 0.1, 100), lookAt(eye, [0, 0, 0], [0, 1, 0]));
+
+      G.beginFrame();                                  // reshape + draw, one submit
+      shape.setUniforms({ time: t });
+      shape.run(VN * VN);
+      // Cells nearest the camera must be drawn last, so walk away from it on both axes.
+      land.setUniforms({ mvp, flip: [eye[0] < 0 ? 1 : 0, eye[2] < 0 ? 1 : 0] });
+      land.drawTo(undefined, [0.043, 0.051, 0.071, 1]);
+      G.endFrame();
+
+      requestAnimationFrame(frame);
+    };
+    frame();
+  </script>
+</body>
+
+</html>

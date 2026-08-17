@@ -81,7 +81,7 @@ textures, and the sharp edges worth knowing before you hit them.
 
 ## Examples
 
-Seven single-file examples live in `examples/` — **[run them live](https://lampmaker.github.io/tinywebgpu/)**
+Eight single-file examples live in `examples/` — **[run them live](https://lampmaker.github.io/tinywebgpu/)**
 (or serve the folder yourself and open them in a WebGPU browser):
 
 1. `1_hello.html` — animated fullscreen shader in ~10 lines
@@ -94,8 +94,11 @@ Seven single-file examples live in `examples/` — **[run them live](https://lam
    objective — the four here are the standard hard cases
 7. `7_particles.html` — a few hundred thousand particles with no vertex buffers: each one splats
    into a density grid with an `atomicAdd`, and a fullscreen pass colours it
+8. `8_heightmap.html` — a flat-shaded 3D terrain drawn with `makeDraw`: a compute pass writes the
+   heights, the vertex stage reads them back out of the same storage buffer, and each facet
+   derives its own normal
 
-Every page is laid out for a phone as much as a desktop, and examples 5, 6 and 7 check their own
+Every page is laid out for a phone as much as a desktop, and examples 5, 6, 7 and 8 check their own
 arithmetic on load rather than asking you to judge it by eye — example 6 holds its WGSL objectives
 against an independent CPU implementation and then proves the search reaches a known optimum.
 
@@ -192,26 +195,145 @@ All attachments must share a size, and the device caps both the count (`maxColor
 usually 8) and the total bytes per sample (`maxColorAttachmentBytesPerSample`, often 32 — so two
 `rgba32float` targets is the ceiling). A single target keeps the plain `-> vec4<f32>` contract.
 
+## Your own vertex stage
+
+`makeRender` generates a fullscreen triangle, which is the right answer for a shader-first
+toolkit right up until you want *geometry*. `makeDraw` is the sibling of `makeCompute` for that:
+you write both stages, and the schema, `drawTo`, the frame API and the pipeline cache all still
+apply.
+
+```js
+const N = 100_000;
+const parts = G.createStorageBuffer(N * 16);          // xy = position, zw = colour
+
+const points = await G.makeDraw({
+  code: `
+    struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) col: vec3<f32> };
+
+    @vertex fn vs_main(@builtin(vertex_index) v: u32,
+                       @builtin(instance_index) i: u32) -> VSOut {
+      let quad = array<vec2<f32>,4>(vec2(-1.,-1.), vec2(1.,-1.), vec2(-1.,1.), vec2(1.,1.))[v];
+      let p = parts[i];
+      var o: VSOut;
+      o.pos = vec4<f32>(p.xy + quad * UB.size, 0.0, 1.0);
+      o.col = vec3<f32>(p.zw, 1.0);
+      return o;
+    }
+    @fragment fn fs_main(vs: VSOut) -> @location(0) vec4<f32> { return vec4<f32>(vs.col, 1.0); }`,
+  uniforms:  { size: 'f32' },
+  resources: { parts: 'array<vec4<f32>>' },
+  readOnly:  ['parts'],                    // ← see below; this one matters
+  count: 4, instances: N, topology: 'triangle-strip', blend: 'additive',
+});
+
+points.setResources({ parts });
+points.setUniforms({ size: 0.004 });
+points.drawTo();
+
+points.instances = alive;                  // per-frame count, same pipeline
+```
+
+**There are no vertex buffers, on purpose.** Pull geometry out of a storage buffer indexed by
+`@builtin(vertex_index)` / `@builtin(instance_index)`. That is one less layout language to
+describe, it costs nothing on a modern GPU, and it means a compute pass can write the geometry a
+draw then reads with no plumbing in between.
+
+**`readOnly` is not optional when the vertex stage reads a resource.** The schema binds buffers
+`var<storage, read_write>` by default, and WebGPU forbids a read-write storage binding from being
+visible to the vertex stage:
+
+> If an entry's `visibility` includes `GPUShaderStage.VERTEX`: if its resource layout object is a
+> `buffer`, its `type` is not `"storage"`.
+
+Naming it in `readOnly` binds it `var<storage, read>`, which is allowed. Leave it out and the
+pipeline is rejected at creation with a bind-group layout error that does not obviously point
+here. Resources only the *fragment* stage touches need nothing.
+
+`count` is vertices per instance (default 3), `instances` defaults to 1, and `topology` is any
+`GPUPrimitiveTopology` — `'triangle-list'`, `'triangle-strip'`, `'line-list'`, `'line-strip'`,
+`'point-list'`. Both counts are plain properties on the result, so changing them per frame does
+not rebuild anything. `targets` and `blend` work exactly as they do on `makeRender`.
+
+`makeRender` is now literally `makeDraw` with the fullscreen vertex stage filled in.
+
+**There is no depth attachment yet.** Render passes carry colour targets only, so overlapping 3D
+geometry is not depth-sorted for you. For a height field that costs nothing — draw the cells
+back-to-front and the painter's algorithm is exact, which is what
+[example 8](examples/8_heightmap.html) does. For general 3D you would need to add a depth
+texture yourself through the escape hatches, or sort.
+
+[Example 8](examples/8_heightmap.html) is the whole pattern on one page: a compute pass writes a
+terrain into a storage buffer, the vertex stage reads it straight back out with `readOnly`, and
+each facet derives its own normal so the shading is flat.
+
 ## Minified build
 
-`tinywebgpu.min.js` — **18.2 KB** (7.4 KB gzipped), versus 65.8 KB for the source. Rebuild it
-with `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
+`tinywebgpu.min.js` — **16.1 KB** (7.1 KB gzipped), versus 72 KB for the source. Rebuild it with
+`npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
 
 It is a **production artifact and it is silent**: every `console` warning is stripped, and so are
-the WGSL compile-error log with its source window and caret, the schema resource validator, and
-the debug `label`s on every GPU object. Failures still *throw*, with their messages intact — you
-just get no diagnostics on the way there, and a bad resource surfaces as the driver's own
-bind-group error rather than a line naming the field.
-
-Worth knowing if you are chasing bytes: nearly all of the classic minification tricks — packing
-API names into strings, binding hot methods to short locals — move *raw* bytes and barely touch
-the gzipped size, because gzip already deduplicates across the whole file. Rebinding every hot
-call site in this library was measured at −992 raw bytes and **−65 gzipped**. Optimise raw size
-only if you inline the library into an HTML file with a hard budget.
+the WGSL compile-error log with its source window and caret, the schema resource validator, the
+validation error scopes, and the debug `label`s on every GPU object. Failures still *throw*, with
+their messages intact — you just get no diagnostics on the way there, and a bad resource surfaces
+as the driver's own bind-group error rather than a line naming the field.
 
 So: develop against `tinywebgpu.js`, switch to the minified file when you ship. `main` and
 `exports` point at the readable source on purpose, so you never get the silent build by
 accident.
+
+## Tiny build (inline / on-chain embedding)
+
+When the library has to be *inlined* — a single self-contained HTML file, an on-chain generative
+artwork with a hard byte budget — 16.1 KB of it is still mostly features you are not using. A
+procedural piece renders from a shader and never touches image loading, readback, or PNG export.
+
+`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 10.7 KB** (4.9 KB gzipped) by dropping
+every optional entry point, and adding `--iife --no-banner` gets it to **10.4 KB** as a classic
+`<script>` that assigns `globalThis.WEBGPU`.
+
+```
+npm run build:tiny                                  everything optional removed
+node build-min.mjs --tiny --with=show,blend         ...except these
+node build-min.mjs --without=save,read,texio        start from the full build instead
+node build-min.mjs --tiny --iife --no-banner --out=dist/twg.js
+```
+
+What each switch is worth, measured against the 16.1 KB build:
+
+| `--without=` | Removes | Saves |
+|---|---|---|
+| `texio` | `writeTexture`, `loadTexture` | 1.1 KB |
+| `msg` | error *text* — throws carry a number instead | 1.1 KB |
+| `save` | `save()` (PNG download) | 0.8 KB |
+| `show` | `show()`, the one-call texture blit | 0.7 KB |
+| `read` | `readTexture`, buffer `.r()`, the staging pool — **`save` needs it** | 1.2 KB¹ |
+| `resize` | `resizeCanvas()` | 0.4 KB |
+| `pingpong` | `pingPong`, `createPingPong`, `createPingPongTexture2D` | 0.3 KB |
+| `blend` | the named presets; a raw `GPUBlendState` still works | 0.1 KB |
+
+¹ on top of `save`; `--without=read,save` is 2.0 KB together. The build warns and keeps a
+dependency rather than producing something that throws at runtime.
+
+What is never optional: `init`, the dual-schema engine, `makeRender`/`makeDraw`/`makeCompute`
+and their one-liners, buffers, textures, samplers, the frame API and frame-ordered writes.
+
+**Errors in a tiny build.** `--without=msg` (which `--tiny` implies) replaces every message with
+a number — `Error: 15` instead of `No resources bound. Call setResources({ … })`. The numbers are
+listed in the `ERRORS` table at the top of `build-min.mjs`. Debug against `tinywebgpu.js` and
+build tiny last; if you want the sentences back, `--tiny --with=msg`.
+
+**How it works, and why it is a build switch and not an option.** The library is one file with a
+row of `const NAME = true;` declarations at the top. `build-min.mjs` rewrites the ones you named
+to `false`, and esbuild's dead-code elimination removes everything they guard — the code is gone
+from the bundle, not merely unreachable. A runtime option could not do that: it would have to
+stay in the file to be read.
+
+**On raw versus gzipped.** Most classic minification tricks — aliasing `Object.entries`, moving
+`S.frame.encoder` into a closure variable the minifier can rename to one character — move *raw*
+bytes and barely touch the gzipped size, because gzip already deduplicates across the whole file.
+The aliasing pass in 0.5.0 took the stock build from 18.2 KB to 15.7 KB raw but only 7.4 KB to
+7.0 KB gzipped (`makeDraw` has since added 0.5 KB back). Chase raw size when you inline; if you are served over HTTP with compression,
+only dropping features moves the needle.
 
 ## Optional WGSL shorthands
 
@@ -230,7 +352,7 @@ G.pre = shorthand({ RAY: 'MyRay', ...TOKENS });
 | | |
 |---|---|
 | Setup | `init(ctx?)` (no ctx = compute-only) · `resizeCanvas()` · `debug` · `pre` · `onDeviceLost` |
-| Pipelines | `makeRender(frag, uniforms?, resources?, {format?, blend?, targets?})` · `makeCompute(body, main, uniforms?, resources?, {wg?})` |
+| Pipelines | `makeRender(frag, uniforms?, resources?, {format?, blend?, targets?})` · `makeDraw({code, uniforms?, resources?, readOnly?, count?, instances?, topology?, …})` · `makeCompute(body, main, uniforms?, resources?, {wg?})` |
 | Pipeline object | `p.uniforms = {…}` / `setUniform(s)` · `p.resources = {…}` / `setResources` · `run(w,h,d)` (items) · `dispatch(x,y,z)` (workgroups) · `dispatchIndirect(buf, off)` · `drawTo(view?, clear?)` |
 | One-liners | `drawQuad({frag, uniforms, …})` · `compute2D({body, size, wg, …})` · `show(tex, view?, opts?)` · `save(tex, filename?, opts?)` |
 | Frame API | `beginFrame()` / `endFrame()` · `beginCompute()` / `endCompute()` + `p.use()` / `p.dispatchOn()` for chained passes |
