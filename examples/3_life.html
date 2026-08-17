@@ -49,7 +49,7 @@
       `,
       {}, { src: 'array<u32>', dst: 'array<u32>' }, { wg: [8, 8, 1] });
 
-    const show = await G.makeRender(`
+    const show = await G.makeFrag(`
         fn frag(uv: vec2<f32>) -> vec4<f32> {
           let x = u32(uv.x * ${W}.0);
           let y = u32((1.0 - uv.y) * ${H}.0);

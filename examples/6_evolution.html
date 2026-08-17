@@ -345,7 +345,7 @@
     // ---- show: the landscape slice, the population, the markers --------------------------------
     // The slice is recomputed per pixel every frame, because it genuinely changes: it is the
     // plane through the current best individual, and that individual keeps moving.
-    const show = await G.makeRender(OBJECTIVE + `
+    const show = await G.makeFrag(OBJECTIVE + `
         fn ramp(t: f32) -> vec3<f32> {
           let a = vec3<f32>(0.82, 0.97, 1.00);         // low fitness — where you want to end up
           let b = vec3<f32>(0.16, 0.42, 0.74);
@@ -427,7 +427,6 @@
       seed.dispatch(Math.ceil(P / WG));
 
       G.beginCompute();                                        // every generation, one submit
-      step.use();
       for (let g = 0; g < GENS; g++) {
         const p = g & 1;
         step.setUniforms({
@@ -435,7 +434,7 @@
           fitSrc: p * P, fitDst: (1 - p) * P, gen: g + 1, fid: fn.id,
           lo: fn.lo, hi: fn.hi, f0: 0.5, fJit: 0.3, cr: fn.cr,
         });
-        step.dispatchOn(null, Math.ceil(P / WG));
+        step.dispatch(Math.ceil(P / WG));
       }
       G.endCompute();
 

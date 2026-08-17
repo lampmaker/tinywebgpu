@@ -76,7 +76,7 @@ const ERRORS = {
   13: 'unknown uniform name',
   14: 'bind group resource validation failed (DIAG builds only)',
   15: 'no resources bound — call setResources() first',
-  16: 'no active compute pass',
+  16: '(retired — dispatch() joins an open chained pass instead of throwing)',
   17: 'no active compute pass — call beginCompute() first',
   18: 'drawTo: no view for a named target',
   19: 'save: needs an 8-bit RGBA texture',

@@ -63,7 +63,7 @@
     const counters = G.createStorageBuffer(4);
     const survivors = G.createStorageBuffer(N * 4);
     const total = G.createStorageBuffer(4);
-    const indirect = G.createDispatchIndirectBuffer();     // 3×u32, INDIRECT | STORAGE
+    const indirect = G.createIndirectBuffer();     // 3×u32, INDIRECT | STORAGE
 
     filter.setResources({ counters: counters.b, survivors: survivors.b });
     prep.setResources({ counters: counters.b, args: indirect.b });

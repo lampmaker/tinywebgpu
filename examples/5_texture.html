@@ -47,7 +47,7 @@
 
     // ---- 1. writeTexture: a 2x2 image straight from bytes -------------------------------
     // Row 0 is the first row of the image (v = 0).
-    const checker = G.createTexture2D(2, 2, 'rgba8unorm');
+    const checker = G.createTexture(2, 2, 'rgba8unorm');
     G.writeTexture(checker, new Uint8Array([
       255, 0, 0, 255,    0, 255, 0, 255,      // red    green
       0, 0, 255, 255,  255, 255, 255, 255,    // blue   white
@@ -92,12 +92,12 @@
     // Rendered offscreen so the result can be read back and checked numerically.
     // `format` must match the target texture — it defaults to the canvas format, not this.
     const FMT = 'rgba8unorm';
-    const target = G.createTexture2D(64, 64, FMT);
+    const target = G.createTexture(64, 64, FMT);
     const view = target.createView();
 
-    const red = await G.makeRender(`fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.,0.,0.,1.); }`,
+    const red = await G.makeFrag(`fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.,0.,0.,1.); }`,
       {}, {}, { format: FMT });
-    const greenHalf = await G.makeRender(
+    const greenHalf = await G.makeFrag(
       `fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(0.,1.,0.,0.5); }`,
       {}, {}, { format: FMT, blend: 'alpha' });
 
@@ -116,13 +116,13 @@
       `got ${rgba[0]},${rgba[1]},${rgba[2]}`);
 
     // Same WGSL, different blend — these must be distinct pipelines, not a cache hit.
-    const greenOpaque = await G.makeRender(`fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(0.,1.,0.,0.5); }`,
+    const greenOpaque = await G.makeFrag(`fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(0.,1.,0.,0.5); }`,
       {}, {}, { format: FMT });
     check('blend is part of the pipeline cache key', greenOpaque.pipeline !== greenHalf.pipeline);
 
     // ---- Build the on-canvas demo: both textures side by side, plus a blended tint -------
     const sampler = G.createSampler({ magFilter: 'nearest' });
-    const show = await G.drawQuad({
+    const show = await G.makeQuad({
       frag: `
         fn frag(uv: vec2<f32>) -> vec4<f32> {
           let pick = vec2<f32>(fract(uv.x * 2.), uv.y);
@@ -134,7 +134,7 @@
     });
     show.setResources({ checker, solid, samp: sampler });
 
-    const tint = await G.drawQuad({
+    const tint = await G.makeQuad({
       frag: `fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(1., 1., 0., 0.25 * uv.y); }`,
       clear: 'load',
       blend: 'alpha',

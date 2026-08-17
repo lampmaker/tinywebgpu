@@ -48,7 +48,7 @@ loss; set this to rebuild/recover. Uncaptured WebGPU errors are also logged with
 
 ## Pipelines (the main API)
 
-### `await G.makeRender(fragWGSL, uniforms?, resources?, { format?, blend?, targets? })`
+### `await G.makeFrag(fragWGSL, uniforms?, resources?, { format?, blend?, targets? })`
 Fullscreen pipeline. You provide a WGSL function `fn frag(uv: vec2<f32>) -> vec4<f32>`; the
 toolkit generates the vertex shader (single fullscreen triangle) and the `fs_main` wrapper.
 Only the uniforms you declare exist — nothing is auto-added.
@@ -65,7 +65,7 @@ texture in a different format, or the pipeline won't match the attachment.
 | `'additive'` | Glows, accumulation, light stacking. |
 
 ```js
-const overlay = await G.makeRender(frag, {}, {}, { blend: 'alpha' });
+const overlay = await G.makeFrag(frag, {}, {}, { blend: 'alpha' });
 overlay.drawTo(view, 'load');        // 'load' keeps what's underneath
 ```
 
@@ -74,7 +74,7 @@ overlay.drawTo(view, 'load');        // 'load' keeps what's underneath
 returns `FSOut` instead of `vec4<f32>`, and `drawTo` takes an object keyed the same way:
 
 ```js
-const gbuf = await G.makeRender(`
+const gbuf = await G.makeFrag(`
     fn frag(uv: vec2<f32>) -> FSOut {
       var o: FSOut;
       o.colour = vec4<f32>(uv, 0.0, 1.0);
@@ -96,7 +96,7 @@ ceiling).
 Render pipeline with **your own vertex stage**. `code` is complete WGSL — both
 `@vertex fn vs_main` and `@fragment fn fs_main` — and the only thing prepended is the schema
 (the `UB` struct and the `@group`/`@binding` declarations), exactly as for compute. You keep the
-dual schema, `drawTo`, the frame API and the pipeline cache. `makeRender` is this call with the
+dual schema, `drawTo`, the frame API and the pipeline cache. `makeFrag` is this call with the
 fullscreen vertex stage filled in.
 
 | Option | Default | Notes |
@@ -105,7 +105,7 @@ fullscreen vertex stage filled in.
 | `count` | `3` | Vertices per instance, passed to `draw()`. |
 | `instances` | `1` | Instance count. |
 | `topology` | `'triangle-list'` | Any `GPUPrimitiveTopology`: `'triangle-strip'`, `'line-list'`, `'line-strip'`, `'point-list'`. Part of the pipeline cache key. |
-| `format`, `blend`, `targets` | — | Exactly as `makeRender`. |
+| `format`, `blend`, `targets` | — | Exactly as `makeFrag`. |
 
 `count` and `instances` are also plain properties on the result, so a per-frame count
 (`p.instances = alive`) does not rebuild the pipeline.
@@ -167,20 +167,20 @@ inside the generated entry point, which receives `gid` (global), `lid` (local), 
 Compute-only:
 | Member | Meaning |
 |---|---|
-| `p.dispatch(x=1, y=1, z=1, encoder?)` | Dispatch **workgroups**; self-submits unless a frame encoder is open or one is passed. |
+| `p.dispatch(x=1, y=1, z=1, encoder?)` | Dispatch **workgroups**. Joins the pass `beginCompute()` opened, if one is open; otherwise opens a pass of its own and self-submits unless a frame encoder is open or one is passed. |
 | `p.run(w=1, h=1, d=1, encoder?)` | Same, but counts **items**: divides by `wg` and rounds up. Bounds-check the tail with `if (gid.x >= n) { return; }`. |
 | `p.dispatchIndirect(gpuBuffer, byteOffset=0, encoder?)` | Indirect dispatch from a `[x,y,z]: 3×u32` buffer. |
-| `p.use(pass?)`, `p.dispatchOn(pass?, x,y,z)`, `p.dispatchIndirectOn(pass?, buf, off)` | Chain multiple pipelines inside one compute pass (see Frame API). |
+| `p.bindTo(pass?)` | Escape hatch: bind this pipeline to a compute pass you opened yourself, then dispatch on it with the raw WebGPU calls. Not needed for `beginCompute()` chains. |
 
 Render-only:
 | Member | Meaning |
 |---|---|
 | `p.drawTo(view?, clear=[0,0,0,1], encoder?)` | Draw `p.count` vertices × `p.instances` instances — the fullscreen triangle unless `makeDraw` said otherwise. `view` is a `GPUTextureView` or a `GPUTexture`, defaulting to the frame view or a fresh swapchain view. With `targets`, pass `{ name: view\|texture, … }` instead. `clear` = color array or `'load'` to keep contents. |
-| `p.count` / `p.instances` | Vertices per instance and instance count, writable. `3` / `1` for `makeRender`. Change either per frame without rebuilding the pipeline. |
+| `p.count` / `p.instances` | Vertices per instance and instance count, writable. `3` / `1` for `makeFrag`. Change either per frame without rebuilding the pipeline. |
 
 ### One-liners
-- `await G.drawQuad({ frag, uniforms, resources, clear, format, blend })` → pipeline + `run(u?, view?)`
-- `await G.compute2D({ body, decls, uniforms, resources, size, wg })` → `makeCompute` with a default
+- `await G.makeQuad({ frag, uniforms, resources, clear, format, blend })` → pipeline + `run(u?, view?)`
+- `await G.makeCompute2D({ body, decls, uniforms, resources, size, wg })` → `makeCompute` with a default
   `size`, so `run()` with no arguments covers the whole grid. `body` is the entry-point statements;
   `decls` is for helper functions and structs.
 - `await G.show(tex, view?, opts?)` → draws a texture onto a target. `view` defaults to the canvas
@@ -209,17 +209,17 @@ G.endFrame();            // single queue.submit
 ```
 
 `G.beginCompute()` / `G.endCompute()` keep one compute pass open so chained kernels skip
-per-dispatch pass overhead — use with `p.use()` + `p.dispatchOn()`. Calling plain
-`p.dispatch()` (or `drawTo`) while a chained pass is open auto-closes that pass first; chained
-dispatches after it need a fresh `beginCompute()`.
+per-dispatch pass overhead. There is nothing extra to call: while that pass is open,
+`dispatch`, `run` and `dispatchIndirect` record into it, and rebind only when the pipeline
+actually changes. `drawTo()` closes it first, since a render pass cannot nest.
 
 `beginCompute()` works with or without an enclosing frame. Inside `beginFrame()` the frame owns
 the submit, as usual. **Outside one, `beginCompute()` opens its own encoder and `endCompute()`
 submits it** — so a chained sequence on its own is self-contained:
 
 ```js
-G.beginCompute();  a.use(); a.dispatchOn(null, 64);  b.use(); b.dispatchOn(null, 64);
-G.endCompute();    // submits
+G.beginCompute();  a.dispatch(64); a.dispatch(64); b.dispatch(64);
+G.endCompute();    // one pass, two setPipeline calls, one submit
 ```
 
 While a frame is open, uniform writes, storage `w()` and `clear()` are **frame-ordered**: the
@@ -234,33 +234,32 @@ The swapchain texture is acquired lazily on the first `drawTo()` of a frame and 
 of it, so a compute-only `beginFrame()`/`endFrame()` never touches the canvas.
 
 A copy cannot be encoded inside a pass, so a staged write during a chained sequence closes the
-compute pass and reopens it, restoring the pipeline and bind group from the last `p.use()`. Writing
-uniforms between `dispatchOn()` calls is therefore fine:
+compute pass and reopens it, restoring whichever pipeline was bound. Writing uniforms between
+dispatches is therefore fine:
 
 ```js
 G.beginFrame(); G.beginCompute();
-p.use();
-p.setUniforms({ step: 0 }); p.dispatchOn(null, 64);
-p.setUniforms({ step: 1 }); p.dispatchOn(null, 64);   // sees step = 1
+p.setUniforms({ step: 0 }); p.dispatch(64);
+p.setUniforms({ step: 1 }); p.dispatch(64);   // sees step = 1
 G.endCompute(); G.endFrame();
 ```
 
-If you interleave *two* pipelines, call `use()` again after switching — the reopened pass restores
-whichever pipeline `use()` named last.
+Interleaving two pipelines needs nothing special either — each `dispatch` rebinds if the pass is
+holding someone else's pipeline.
 
 ## Buffers, textures, samplers
 
 | Call | Returns | Notes |
 |---|---|---|
 | `G.createUniformBuffer(bytes)` | `GPUBuffer` | UNIFORM \| COPY_DST |
-| `G.createStorageBuffer(bytesOrData)` | `{ b, w(data, off?), r(nbytes?, off?, Ctor?), clear() }` | STORAGE \| COPY_SRC \| COPY_DST. Pass a byte length, or a TypedArray/ArrayBuffer to size **and** fill in one call. `r` is an async debug readback (stalls!; staging pooled). `w`/`clear` are frame-ordered inside `beginFrame()`. |
-| `G.createBuffer(bytes, usage)` | `{ b, w }` | explicit usage flags; size rounded up to 4 bytes |
-| `G.createDispatchIndirectBuffer()` | `{ b, w }` | 12 bytes, INDIRECT \| STORAGE \| COPY_DST |
+| `G.createStorageBuffer(bytesOrData)` | `{ b, w, r, clear }` (aliases: `buffer`, `write`, `read`) | STORAGE \| COPY_SRC \| COPY_DST. Pass a byte length, or a TypedArray/ArrayBuffer to size **and** fill in one call. `r` is an async debug readback (stalls!; staging pooled). `w`/`clear` are frame-ordered inside `beginFrame()`. |
+| `G.createBuffer(bytes, usage)` | `{ b, w }` (aliases: `buffer`, `write`) | explicit usage flags; size rounded up to 4 bytes |
+| `G.createIndirectBuffer()` | `{ b, w }` | 12 bytes, INDIRECT \| STORAGE \| COPY_DST |
 | `G.createPingPong(bytesOrData)` | `{ read, write, swap() }` | Two storage buffers for read-one/write-the-other simulation steps. A TypedArray/ArrayBuffer seeds **both** halves, so a swap before the first step is harmless. `read`/`write` are ordinary `createStorageBuffer` handles and can be passed straight to `setResources`. |
-| `G.createPingPongTexture2D(w, h, format='rgba16float', usage?)` | `{ read, write, swap() }` | The texture flavour; both halves come from `createStorageTexture2D`. Pass `usage` to add `RENDER_ATTACHMENT` for render-target ping-pong. |
+| `G.createPingPongTexture(w, h, format='rgba16float', usage?)` | `{ read, write, swap() }` | The texture flavour; both halves come from `createStorageTexture`. Pass `usage` to add `RENDER_ATTACHMENT` for render-target ping-pong. |
 | `G.pingPong(make)` | `{ read, write, swap() }` | The general form — calls `make()` twice. |
-| `G.createTexture2D(w, h, format='rgba8unorm', usage?)` | `GPUTexture` | render target / sampled. Default usage is RENDER_ATTACHMENT \| TEXTURE_BINDING \| COPY_SRC \| COPY_DST, so uploads work without opting in. |
-| `G.createStorageTexture2D(w, h, format='rgba32float', usage?)` | `GPUTexture` | `textureStore`/`textureLoad`. Default usage is TEXTURE_BINDING \| STORAGE_BINDING \| COPY_SRC \| COPY_DST. |
+| `G.createTexture(w, h, format='rgba8unorm', usage?)` | `GPUTexture` | render target / sampled. Default usage is RENDER_ATTACHMENT \| TEXTURE_BINDING \| COPY_SRC \| COPY_DST, so uploads work without opting in. |
+| `G.createStorageTexture(w, h, format='rgba32float', usage?)` | `GPUTexture` | `textureStore`/`textureLoad`. Default usage is TEXTURE_BINDING \| STORAGE_BINDING \| COPY_SRC \| COPY_DST. |
 | `G.createSampler({ magFilter, minFilter, wrapU, wrapV })` | `GPUSampler` | defaults nearest/clamp |
 | `G.writeTexture(tex, data, { width?, height?, x?, y?, bytesPerRow?, mipLevel? })` | `GPUTexture` | Raw pixel bytes in (LUTs, generated data). `width`/`height` default to the whole texture; `bytesPerRow` is derived from the format unless you pass it. Needs COPY_DST. |
 | `await G.readTexture(tex, { x?, y?, width?, height?, mipLevel?, Ctor? })` | `Promise<TypedArray>` | Pixels back out. Rows come back **tightly packed** — the 256-byte `bytesPerRow` padding `copyTextureToBuffer` requires is stripped for you. `Ctor` defaults from the format (`*32float` → `Float32Array`, `*32uint` → `Uint32Array`, `*32sint` → `Int32Array`, else `Uint8Array`). Needs COPY_SRC — both texture creators include it. Like `.r()`, it **stalls the pipeline**, and during an open frame it reads pre-frame data and warns. |
@@ -271,9 +270,10 @@ whichever pipeline `use()` named last.
 ## Lower-level escape hatches
 
 `G.makeShader(code)` (returns a cached promise of the compiled module; applies `G.pre`),
-`G.makeRenderPipeline(vs, fs, formatOrFormats, topology?, blend?)` (an array of formats gives multiple targets), `G.makeComputePipeline(module)`,
 `G.bindGroup(pipeline, groupIndex, entries)`,
-`G.makeUniformsAndResources(...)` (the schema engine itself; its result carries `wgsl`, `uniformBuffer` and `uniformWrite`, plus `_`-prefixed internals the minified build renames).
+`G.makeSchema(uniforms, resources, opts?)` (the schema engine itself; its result carries `wgsl`,
+`uniformBuffer` and `uniformWrite`, plus `_`-prefixed internals the minified build renames).
+For anything lower than that, `G.device` is the raw `GPUDevice`.
 
 ## WGSL preprocessing
 
@@ -300,9 +300,9 @@ that reason.
 
 | File | Size | What it is |
 |---|---|---|
-| `tinywebgpu.js` | 72 KB | the source, with comments and every diagnostic. `main`/`exports` point here. |
-| `tinywebgpu.min.js` | 16.1 KB (7.1 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
-| `tinywebgpu.tiny.js` | 10.7 KB (4.9 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
+| `tinywebgpu.js` | 69 KB | the source, with comments and every diagnostic. `main`/`exports` point here. |
+| `tinywebgpu.min.js` | 15.8 KB (7.0 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
+| `tinywebgpu.tiny.js` | 10.4 KB (4.8 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
 
 `build:tiny` drops `writeTexture`, `loadTexture`, `readTexture`, buffer `.r()`, `save`, `show`,
 the ping-pong helpers, `resizeCanvas` and the named blend presets. Keep any of them with
@@ -310,6 +310,6 @@ the ping-pong helpers, `resizeCanvas` and the named blend presets. Keep any of t
 `--without=save,texio`. `--iife` emits a classic `<script>` assigning `globalThis.WEBGPU`.
 Full table of what each switch costs: README → *Tiny build*.
 
-Everything else is always present: `init`, `makeRender`, `makeDraw`, `makeCompute`, `drawQuad`,
-`compute2D`, the schema engine, buffers, textures, samplers, the frame API and frame-ordered
+Everything else is always present: `init`, `makeFrag`, `makeDraw`, `makeCompute`, `makeQuad`,
+`makeCompute2D`, the schema engine, buffers, textures, samplers, the frame API and frame-ordered
 writes.

@@ -8,8 +8,8 @@
 // frame API promises and that no amount of "it returned without throwing" would catch.
 //
 // The call sequences mirror the examples: 3_life and 7_particles (beginFrame batching),
-// 4_indirect (indirect dispatch inside a frame), 6_evolution (beginCompute + use() + dispatchOn
-// with setUniforms between the dispatches).
+// 4_indirect (indirect dispatch inside a frame), 6_evolution (beginCompute chaining with
+// setUniforms between the dispatches).
 //
 // Usage: node test/frame.test.mjs
 //        TWG_ENTRY=../tinywebgpu.min.js node test/frame.test.mjs
@@ -71,13 +71,17 @@ const reset = () => { log = []; encoders = 0; };
 
 // --- pipelines ---------------------------------------------------------------------------------
 const buf = G.createStorageBuffer(1024);
-const indirect = G.createDispatchIndirectBuffer();
+const indirect = G.createIndirectBuffer();
 
 const sim = await G.makeCompute('', 'if (gid.x < UB.n) { data[gid.x] = UB.step; }',
   { n: 'u32', step: 'f32' }, { data: 'array<f32>' }, { wg: [64, 1, 1] });
 sim.setResources({ data: buf });
 
-const draw = await G.makeRender('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, 0., 1.); }');
+// A second pipeline, so the chain can be checked for rebinding when the pipeline changes.
+const other = await G.makeCompute('', 'data[gid.x] = 1.0;', {}, { data: 'array<f32>' }, { wg: [64, 1, 1] });
+other.setResources({ data: buf });
+
+const draw = await G.makeFrag('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, 0., 1.); }');
 
 // --- outside a frame, every call submits on its own ----------------------------------------
 reset();
@@ -116,27 +120,49 @@ check('in-frame clear() is encoded, not self-submitted',
 check('the staging ring is flushed before the frame is submitted',
   log.indexOf('writeBuffer') >= 0 && log.indexOf('writeBuffer') < log.lastIndexOf('submit'), true);
 
-// --- beginCompute chaining, and a staged write mid-chain: example 6 -------------------------
+// --- beginCompute chaining: dispatches join the open pass and bind at most once --------------
+reset();
+G.beginCompute();
+sim.dispatch(1);
+sim.dispatch(1);
+G.endCompute();
+check('chained dispatches share one pass and bind once',
+  log, ['encoder1', 'cpass', 'cpass:setPipeline', 'cpass:setBindGroup',
+    'dispatch(1,1,1)', 'dispatch(1,1,1)', 'cpass:end', 'submit']);
+
+// Switching pipelines mid-chain has to rebind; switching back has to rebind again.
+reset();
+G.beginCompute();
+sim.dispatch(1);
+other.dispatch(1);
+other.dispatch(1);
+sim.dispatch(1);
+G.endCompute();
+check('a chain rebinds only when the pipeline actually changes',
+  log.filter(l => l === 'cpass:setPipeline' || l.startsWith('dispatch')),
+  ['cpass:setPipeline', 'dispatch(1,1,1)', 'cpass:setPipeline', 'dispatch(1,1,1)',
+    'dispatch(1,1,1)', 'cpass:setPipeline', 'dispatch(1,1,1)']);
+
+// --- a staged write mid-chain: example 6 ----------------------------------------------------
 // This is the sharp one. A copy cannot be encoded inside a pass, so setUniforms between two
-// dispatchOn calls has to close the pass, encode the copy, reopen it and rebind the pipeline —
+// dispatches has to close the pass, encode the copy, reopen it and rebind the pipeline —
 // otherwise the second dispatch runs against no pipeline, or against the previous frame's values.
 reset();
 G.beginCompute();
-sim.use();
 sim.setUniforms({ step: 0 });
-sim.dispatchOn(null, 4);
+sim.dispatch(4);
 sim.setUniforms({ step: 1 });
-sim.dispatchOn(null, 4);
+sim.dispatch(4);
 G.endCompute();
 check('beginCompute outside a frame opens one encoder and submits it once',
   [log.filter(l => l.startsWith('encoder')).length, log.filter(l => l === 'submit').length], [1, 1]);
 check('a mid-chain write closes the pass, copies, reopens and rebinds',
   log,
-  ['encoder1', 'cpass', 'cpass:setPipeline', 'cpass:setBindGroup',
-    // first setUniforms: pass torn down, copy encoded, pass reopened and rebound
-    'cpass:end', 'copyB2B', 'cpass', 'cpass:setPipeline', 'cpass:setBindGroup',
-    'dispatch(4,1,1)',
-    // second setUniforms: same again, so the next dispatch sees step = 1
+  ['encoder1', 'cpass',
+    // first setUniforms: nothing bound yet, so the reopened pass is left for dispatch to bind
+    'cpass:end', 'copyB2B', 'cpass',
+    'cpass:setPipeline', 'cpass:setBindGroup', 'dispatch(4,1,1)',
+    // second setUniforms: torn down again, and this time the reopen restores the binding
     'cpass:end', 'copyB2B', 'cpass', 'cpass:setPipeline', 'cpass:setBindGroup',
     'dispatch(4,1,1)',
     'cpass:end', 'writeBuffer', 'submit']);
@@ -145,22 +171,29 @@ check('a mid-chain write closes the pass, copies, reopens and rebinds',
 reset();
 G.beginFrame();
 G.beginCompute();
-sim.use();
-sim.dispatchOn(null, 2);
+sim.dispatch(2);
 G.endCompute();
 check('endCompute inside a frame does not submit', log.filter(l => l === 'submit'), []);
 G.endFrame();
 check('the enclosing frame submits once', log.filter(l => l === 'submit'), ['submit']);
 
-// --- a plain dispatch while a chained pass is open closes that pass first --------------------
+// --- drawTo while a chained pass is open closes it: a render pass cannot nest -----------------
 reset();
+G.beginFrame();
 G.beginCompute();
-sim.use();
-sim.dispatchOn(null, 1);
-sim.dispatch(1);                      // two open passes would be a validation error
+sim.dispatch(1);
+draw.drawTo({});
+G.endFrame();
+check('drawTo mid-chain closes the compute pass rather than nesting',
+  log.filter(l => /^[cr]pass(:end)?$/.test(l)), ['cpass', 'cpass:end', 'rpass', 'rpass:end']);
+
+// --- bindTo is the escape hatch for a pass you opened yourself --------------------------------
+reset();
+const pass = G.beginCompute();
+sim.bindTo(pass);
+check('bindTo binds the pipeline to the given pass',
+  log, ['encoder1', 'cpass', 'cpass:setPipeline', 'cpass:setBindGroup']);
 G.endCompute();
-check('a plain dispatch mid-chain closes the chained pass rather than nesting',
-  log.filter(l => /^cpass(:end)?$/.test(l)), ['cpass', 'cpass:end', 'cpass', 'cpass:end']);
 
 // --- beginFrame twice: the dangling frame is submitted, not leaked ---------------------------
 reset();
