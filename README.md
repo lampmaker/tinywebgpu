@@ -283,7 +283,7 @@ each facet derives its own normal so the shading is flat.
 
 ## Minified build
 
-`tinywebgpu.min.js` — **18.3 KB** (8.2 KB gzipped), versus 89 KB for the source. Rebuild it with
+`tinywebgpu.min.js` — **17.8 KB** (8.2 KB gzipped), versus 91 KB for the source. Rebuild it with
 `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
 
 It is a **production artifact and it is silent**: every `console` warning is stripped, and so are
@@ -299,12 +299,25 @@ accident.
 ## Tiny build (inline / on-chain embedding)
 
 When the library has to be *inlined* — a single self-contained HTML file, an on-chain generative
-artwork with a hard byte budget — 18.3 KB of it is still mostly features you are not using. A
+artwork with a hard byte budget — 17.8 KB of it is still mostly features you are not using. A
 procedural piece renders from a shader and never touches image loading, readback, or PNG export.
 
-`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 11.4 KB** (5.4 KB gzipped) by dropping
+`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 10.4 KB** (5.2 KB gzipped) by dropping
 every optional entry point, and adding `--iife --no-banner` gets a classic
-`<script>` that assigns `globalThis.WEBGPU` for the same size.
+`<script>` that assigns `globalThis.WEBGPU` for the same size. Two of the dropped switches trade
+*behavior* rather than entry points, so know what you are giving up:
+
+- `staging` — without it, writes inside `beginFrame()` become plain queue writes, so the **last**
+  value set before `endFrame()` wins for the whole frame. A piece that sets its uniforms once per
+  frame (most fullscreen art) never sees the difference; per-dispatch uniform sequences need the
+  switch back (`--with=staging`).
+- `aliases` — the long spellings (`buffer`/`write`/`read` on handles, `uniformFields` /
+  `resourceFields`) go; the short forms (`b`/`w`/`r`) always work.
+
+Tiny builds also run a **name-table pass**: repeated long WebGPU member names are rewritten to
+bracket reads from one packed string (`--no-pack` skips it; `--pack` applies it to the stock
+build too). It is raw-bytes-only by design — gzip would deduplicate the names anyway, but the
+inline builds this exists for never gzip.
 
 ```
 npm run build:tiny                                  everything optional removed
@@ -313,20 +326,22 @@ node build-min.mjs --without=save,read,texio        start from the full build in
 node build-min.mjs --tiny --iife --no-banner --out=dist/twg.js
 ```
 
-What each switch is worth, measured against the 18.3 KB build:
+What each switch is worth, measured against the 17.8 KB build:
 
 | `--without=` | Removes | Saves |
 |---|---|---|
 | `msg` | error *text* — throws carry a number instead | 1.2 KB |
 | `texio` | `writeTexture`, `loadTexture` | 1.2 KB |
-| `save` | `save()` (PNG download) | 0.7 KB |
-| `show` | `show()`, the one-call texture blit | 0.7 KB |
+| `save` | `save()` (PNG download) | 0.8 KB |
+| `show` | `show()`, the one-call texture blit | 0.8 KB |
 | `depth` | `makeDraw({depth})` and the depth-texture pool | 0.7 KB |
 | `mips` | `generateMipmaps` and the `mips` texture option | 0.5 KB |
-| `read` | `readTexture`, buffer `.r()`, the staging pool — **`save` needs it** | 1.3 KB¹ |
+| `staging` | frame-ordered writes (see above — behavior trade) | 0.5 KB |
+| `read` | `readTexture`, buffer `.r()`, the readback pool — **`save` needs it** | 1.2 KB¹ |
 | `resize` | `resizeCanvas()` | 0.4 KB |
 | `pingpong` | `pingPong`, `createPingPong`, `createPingPongTexture` | 0.2 KB |
 | `blend` | the named presets; a raw `GPUBlendState` still works | 0.1 KB |
+| `aliases` | the long `buffer`/`write`/`read`/`…Fields` spellings | 0.1 KB |
 
 ¹ on top of `save`; `--without=read,save` is 2.0 KB together. The build warns and keeps a
 dependency rather than producing something that throws at runtime.
@@ -359,10 +374,13 @@ module (or plug in any `(src) => src` function):
 
 ```js
 import { shorthand, TOKENS, SHORT_TOKENS } from './wgsl_shorthand.js';
-G.pre = shorthand();                      // FLOAT INT VEC2/3/4 MAT4 PI TAU EPS
-G.pre = shorthand(TOKENS, SHORT_TOKENS);  // + one-letter aliases F V W X I U U3
-G.pre = shorthand({ RAY: 'MyRay', ...TOKENS });
+G.pre = shorthand();                          // FLOAT INT VEC2/3/4 MAT4 PI TAU EPS
+G.pre = shorthand(TOKENS + SHORT_TOKENS);     // + one-letter aliases F V W X I U U3
+G.pre = shorthand('RAY MyRay\n' + TOKENS);    // custom additions
 ```
+
+A token table is just a string — entries separated by commas or newlines, each one
+`TOKEN replacement` — so composing tables is string concatenation.
 
 ## API at a glance
 

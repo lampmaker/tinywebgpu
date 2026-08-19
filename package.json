@@ -24,7 +24,7 @@
   "scripts": {
     "test": "node test/layout.test.mjs && node test/frame.test.mjs",
     "test:min": "TWG_ENTRY=../tinywebgpu.min.js node test/layout.test.mjs && TWG_ENTRY=../tinywebgpu.min.js node test/frame.test.mjs",
-    "test:tiny": "node build-min.mjs --tiny --with=msg,texio,read,show,pingpong,blend,depth,mips --out=test/.tiny-full.js && TWG_ENTRY=./.tiny-full.js node test/layout.test.mjs && node build-min.mjs --tiny --out=test/.tiny-bare.js && TWG_ENTRY=./.tiny-bare.js node test/tiny.test.mjs",
+    "test:tiny": "node build-min.mjs --tiny --with=msg,texio,read,show,pingpong,blend,depth,mips,staging,aliases --out=test/.tiny-full.js && TWG_ENTRY=./.tiny-full.js node test/layout.test.mjs && node build-min.mjs --tiny --out=test/.tiny-bare.js && TWG_ENTRY=./.tiny-bare.js node test/tiny.test.mjs",
     "test:all": "npm run test && npm run build:min && npm run test:min && npm run test:tiny",
     "build:min": "node build-min.mjs",
     "build:tiny": "node build-min.mjs --tiny",
