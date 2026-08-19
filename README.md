@@ -374,10 +374,13 @@ module (or plug in any `(src) => src` function):
 
 ```js
 import { shorthand, TOKENS, SHORT_TOKENS } from './wgsl_shorthand.js';
-G.pre = shorthand();                      // FLOAT INT VEC2/3/4 MAT4 PI TAU EPS
-G.pre = shorthand(TOKENS, SHORT_TOKENS);  // + one-letter aliases F V W X I U U3
-G.pre = shorthand({ RAY: 'MyRay', ...TOKENS });
+G.pre = shorthand();                          // FLOAT INT VEC2/3/4 MAT4 PI TAU EPS
+G.pre = shorthand(TOKENS + SHORT_TOKENS);     // + one-letter aliases F V W X I U U3
+G.pre = shorthand('RAY MyRay\n' + TOKENS);    // custom additions
 ```
+
+A token table is just a string — entries separated by commas or newlines, each one
+`TOKEN replacement` — so composing tables is string concatenation.
 
 ## API at a glance
 

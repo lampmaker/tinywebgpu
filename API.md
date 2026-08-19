@@ -317,14 +317,16 @@ before compile/caching. The token expander is a separate optional module
 
 ```js
 import { shorthand, TOKENS, SHORT_TOKENS } from './wgsl_shorthand.js';
-G.pre = shorthand();                       // safe stock set: FLOAT INT VEC2/3/4 MAT4 PI TAU EPS
-G.pre = shorthand(TOKENS, SHORT_TOKENS);   // + one-letter legacy aliases F V W X I U U3
-G.pre = shorthand({ RAY: 'MyRay', ...TOKENS });          // custom map
-G.pre = s => shorthand()(myMacros(s));                   // compose freely
+G.pre = shorthand();                          // safe stock set: FLOAT INT VEC2/3/4 MAT4 PI TAU EPS
+G.pre = shorthand(TOKENS + SHORT_TOKENS);     // + one-letter legacy aliases F V W X I U U3
+G.pre = shorthand('RAY MyRay\n' + TOKENS);    // custom additions
+G.pre = s => shorthand()(myMacros(s));        // compose freely
 ```
 
-`shorthand(...maps)` merges the maps (default `TOKENS`), compiles one word-boundary
-alternation regex (longest token wins), and returns a deterministic `src => src` function.
+`shorthand(defs = TOKENS)` takes **one string**: entries separated by commas or newlines, each
+one `TOKEN replacement` (replacements may contain spaces, not commas — they are the entry
+separator). It compiles one word-boundary alternation regex (longest token wins) and returns a
+deterministic `src => src` function. Composing tables is string concatenation.
 
 Careful with `SHORT_TOKENS`: one-letter aliases collide with natural identifier names, so
 `let F = fresnel(...)` becomes `let f32 = ...` and won't compile. They are opt-in for exactly

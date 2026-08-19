@@ -642,7 +642,7 @@ const layoutOf = uniforms => {
 
 // --- wgsl_shorthand ---------------------------------------------------------
 {
-  const full = shorthand(TOKENS, SHORT_TOKENS);
+  const full = shorthand(TOKENS + SHORT_TOKENS);
   check('shorthand expands long tokens', full('fn f(a: VEC3) -> FLOAT'), 'fn f(a: vec3<f32>) -> f32');
   check('shorthand expands short tokens', full('var x: X = X(F(1), 2., 3., PI);'),
     'var x: vec4<f32> = vec4<f32>(f32(1), 2., 3., 3.14159265359);');
@@ -651,6 +651,10 @@ const layoutOf = uniforms => {
   const safe = shorthand();
   check('default set leaves one-letter names alone', safe('let F = 1.0; let v: VEC2;'),
     'let F = 1.0; let v: vec2<f32>;');
+  const custom = shorthand('RAY MyRayStruct\n' + TOKENS);
+  check('custom entries prepend as one string', custom('var r: RAY; var p: VEC2;'),
+    'var r: MyRayStruct; var p: vec2<f32>;');
+  check('comma and newline separators both work', shorthand('A aa, B bb\nC cc')('A B C'), 'aa bb cc');
 }
 
 if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1); }

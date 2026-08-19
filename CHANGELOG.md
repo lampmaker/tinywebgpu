@@ -4,6 +4,14 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Changed — `wgsl_shorthand.js` token tables are strings** (breaking for the companion module)
+
+`TOKENS` and `SHORT_TOKENS` are now plain strings — entries separated by commas or newlines,
+each one `TOKEN replacement` — and `shorthand(defs?)` takes exactly one such string. Composing
+tables is string concatenation: `shorthand(TOKENS + SHORT_TOKENS)`, custom additions are
+`shorthand('RAY MyRay\n' + TOKENS)`. The old `shorthand(...maps)` object-merging form is gone;
+the expansion behavior (word boundaries, longest token wins, deterministic) is unchanged.
+
 **Changed — smaller inline builds (for on-chain / embedded pieces)**
 
 The tiny build drops from 11.4 KB to **10.4 KB** raw (5.2 gz), the stock build from 18.3 KB to
