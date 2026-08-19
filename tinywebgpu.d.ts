@@ -12,6 +12,8 @@ export interface ResourceSchema { [name: string]: string }
 
 export type BlendPreset = 'alpha' | 'premultiplied' | 'additive';
 export type Blend = BlendPreset | GPUBlendState;
+/** "Nothing": the library's own empty marker is `0` (falsy, one byte); null/undefined also count. */
+export type None = 0 | null | undefined;
 /** A clear colour, or 'load' to keep the target's contents. */
 export type Clear = number[] | 'load';
 /** What setResources accepts per name: a buffer handle, raw buffer, texture or view, or sampler. */
@@ -42,7 +44,7 @@ export interface BufferHandle {
 
 export interface StorageBufferHandle extends BufferHandle {
   /** Readback (debug tool — it stalls the pipeline). `r(Float32Array)` reads the whole buffer typed. */
-  r(nbytes?: number, byteOffset?: number, Ctor?: TypedArrayCtor | null): Promise<any>;
+  r(nbytes?: number, byteOffset?: number, Ctor?: TypedArrayCtor | None): Promise<any>;
   r<T>(Ctor: TypedArrayCtor<T>): Promise<T>;
   read: StorageBufferHandle['r'];
   /** Zero the buffer; frame-ordered inside beginFrame(). */
@@ -70,10 +72,10 @@ export interface Pipeline {
 
 export interface ComputePipeline extends Pipeline {
   /** Dispatch workgroups. Joins an open beginCompute() chain; otherwise self-submits. */
-  dispatch(x?: number, y?: number, z?: number, encoder?: GPUCommandEncoder | null): void;
+  dispatch(x?: number, y?: number, z?: number, encoder?: GPUCommandEncoder | None): void;
   /** Dispatch by item count: divides by the workgroup size and rounds up. */
-  run(w?: number, h?: number, d?: number, encoder?: GPUCommandEncoder | null): void;
-  dispatchIndirect(buffer: GPUBuffer | BufferHandle, byteOffset?: number, encoder?: GPUCommandEncoder | null): void;
+  run(w?: number, h?: number, d?: number, encoder?: GPUCommandEncoder | None): void;
+  dispatchIndirect(buffer: GPUBuffer | BufferHandle, byteOffset?: number, encoder?: GPUCommandEncoder | None): void;
   /** Bind to a compute pass you opened yourself. Not needed for beginCompute() chains. */
   bindTo(pass?: GPUComputePassEncoder): void;
 }
@@ -83,8 +85,8 @@ export interface RenderPipeline extends Pipeline {
    * Draw `count` × `instances`. Single target: a view or texture, default the canvas.
    * With `targets`: an object keyed by the targets schema, `drawTo({ name: viewOrTexture })`.
    */
-  drawTo(view?: GPUTextureView | GPUTexture | Record<string, GPUTextureView | GPUTexture> | null,
-    clear?: Clear, encoder?: GPUCommandEncoder | null): void;
+  drawTo(view?: GPUTextureView | GPUTexture | Record<string, GPUTextureView | GPUTexture> | None,
+    clear?: Clear, encoder?: GPUCommandEncoder | None): void;
   /** Vertices per instance — writable, no pipeline rebuild. */
   count: number;
   /** Instance count — writable, no pipeline rebuild. */
@@ -117,34 +119,34 @@ export interface MakeDrawOptions {
   instances?: number;
   topology?: GPUPrimitiveTopology;
   format?: GPUTextureFormat | GPUTextureFormat[];
-  blend?: Blend | null;
+  blend?: Blend | None;
   /** Multiple render targets: { name: format }, drawn with `drawTo({ name: view })`. */
-  targets?: Record<string, GPUTextureFormat> | null;
-  depth?: Depth | null;
+  targets?: Record<string, GPUTextureFormat> | None;
+  depth?: Depth | None;
 }
 
 export interface MakeFragOptions {
   format?: GPUTextureFormat | GPUTextureFormat[];
-  blend?: Blend | null;
-  targets?: Record<string, GPUTextureFormat> | null;
-  depth?: Depth | null;
+  blend?: Blend | None;
+  targets?: Record<string, GPUTextureFormat> | None;
+  depth?: Depth | None;
 }
 
 export interface TinyWebGPU {
   // ─── Device & lifecycle ───────────────────────────────────────────────────────────────────
   device: GPUDevice;
-  context: GPUCanvasContext | null;
+  context: GPUCanvasContext | 0;
   format: GPUTextureFormat;
-  features: GPUSupportedFeatures | null;
+  features: GPUSupportedFeatures | 0;
   /** Extra per-uniform warnings (DIAG builds only). */
   debug: boolean;
   /** Optional WGSL preprocessing hook, applied before hashing/compiling. Must be deterministic. */
-  pre: ((src: string) => string) | null;
+  pre: ((src: string) => string) | None;
   /** Called on device loss (not on G.destroy()). Set this to rebuild. */
-  onDeviceLost: ((info: GPUDeviceLostInfo) => void) | null;
+  onDeviceLost: ((info: GPUDeviceLostInfo) => void) | None;
 
   /** Initialize WebGPU. Pass a 'webgpu' context, a canvas, a CSS selector — or nothing for compute-only. */
-  init(ctx?: GPUCanvasContext | HTMLCanvasElement | OffscreenCanvas | string | null, opts?: InitOptions): Promise<TinyWebGPU>;
+  init(ctx?: GPUCanvasContext | HTMLCanvasElement | OffscreenCanvas | string | None, opts?: InitOptions): Promise<TinyWebGPU>;
   /** Destroy the device, pooled resources and caches. The instance is not reusable afterwards. */
   destroy(): void;
 
@@ -232,7 +234,7 @@ export interface TinyWebGPU {
   makeSchema(uniforms?: UniformSchema, resources?: ResourceSchema, opts?: {
     group?: number; startBinding?: number; structName?: string; varName?: string;
     readOnly?: string[]; emitUniform?: boolean;
-  }): { wgsl: string; uniformBuffer: GPUBuffer | null; uniformWrite: (values: Record<string, any>) => void };
+  }): { wgsl: string; uniformBuffer: GPUBuffer | 0; uniformWrite: (values: Record<string, any>) => void };
 }
 
 /** Creates an independent toolkit instance. Call `await G.init(ctx?)` before anything else. */

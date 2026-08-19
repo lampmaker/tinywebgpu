@@ -1204,10 +1204,10 @@ G.endFrame();</code></pre>
     // One device for the whole page. A device per demo would be tidier in theory and a lot of
     // memory in practice, so the demos share one and the canvas context is swapped in as each
     // takes the stage — which is why only one canvas demo animates at a time.
-    let G = null, initPromise = null;
+    let G = 0, initPromise = 0;
     const configured = new WeakSet();
 
-    const getG = () => (initPromise ??= WEBGPU().init());
+    const getG = () => (initPromise ||= WEBGPU().init());
 
     const useCanvas = canvas => {
       if (!canvas) return;
@@ -1228,7 +1228,7 @@ G.endFrame();</code></pre>
     };
 
     const demos = [];
-    let activeCanvasDemo = null;
+    let activeCanvasDemo = 0;
 
     class Demo {
       constructor(root) {
@@ -1242,7 +1242,7 @@ G.endFrame();</code></pre>
         this.ran = false;
       }
       setStatus(text, cls = '') { this.status.textContent = text; this.status.className = 'status ' + cls; }
-      stop() { this.gen++; if (activeCanvasDemo === this) activeCanvasDemo = null; }
+      stop() { this.gen++; if (activeCanvasDemo === this) activeCanvasDemo = 0; }
 
       async run() {
         if (!supported) { this.setStatus('no WebGPU', 'err'); return; }
@@ -1269,7 +1269,7 @@ G.endFrame();</code></pre>
         const log = (...a) => { this.out.textContent += a.map(fmt).join(' ') + '\n'; };
 
         try {
-          G ??= await getG();
+          G ||= await getG();
           if (!alive()) return;
           if (this.canvas) {
             if (activeCanvasDemo && activeCanvasDemo !== this) activeCanvasDemo.stop();
@@ -1372,13 +1372,13 @@ G.endFrame();</code></pre>
     wire();
 
     // Test hooks, also handy from the devtools console: `__G` is the shared TinyWebGPU
-    // instance (null until the first box runs) and `__demos` is the list of boxes.
+    // instance (0 until the first box runs) and `__demos` is the list of boxes.
     Object.defineProperty(window, '__G', { get: () => G });
     window.__demos = demos;
 
     // Runs every box in order and reports what broke. Used by the repo's headless checks;
     // harmless in a browser.
-    window.__runAll = async (only = null) => {
+    window.__runAll = async only => {
       const results = [];
       for (const d of demos) {
         const id = d.root.closest('section')?.id ?? '?';

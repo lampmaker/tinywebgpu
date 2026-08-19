@@ -239,7 +239,7 @@ check('frame() still submits when the callback throws',
 reset();
 G.destroy();
 check('destroy() releases the staging ring and the device, and clears G.device',
-  [log.includes('bufDestroy'), log.includes('deviceDestroy'), G.device], [true, true, null]);
+  [log.includes('bufDestroy'), log.includes('deviceDestroy'), G.device], [true, true, 0]);
 
 if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nall frame-lifecycle tests passed');

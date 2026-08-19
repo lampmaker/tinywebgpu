@@ -4,6 +4,64 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Changed — build settings moved into config files; single-line output; pack legend**
+
+- Each build's settings now live in a config file — `build.min.config.mjs` and
+  `build.tiny.config.mjs` — picked by name: `node build-min.mjs tiny` (default `min`;
+  `--config=path` for your own; `--tiny` still accepted). `build-min.mjs` keeps only the
+  machinery: the feature registry, the `ERRORS` table, and the transforms. CLI flags
+  (`--out=`, `--with=`, `--without=`, `--iife`, `--pack`/`--no-pack`, `--no-banner`)
+  override the config per run.
+- Both artifacts are now a **single line**: the raw newlines esbuild leaves inside template
+  literals (the embedded WGSL) are escaped to `\n` after minifying (`singleLine` in the
+  config). Semantics unchanged — the strings are identical at runtime.
+- The tiny build ends with a **pack legend** — `/*pack:$a=beginComputePass,…*/` — naming what
+  the name-table pass packed (`packComment` in the config), so the packed output reads without
+  the build script at hand.
+- New opt-in `rename` config (and `--rename` / `--rename=name:code,…`): truly rename the
+  library's *own* API in a piece build — `setResources` → `sR`, `resources` → `rS`,
+  `createStorageBuffer` → `cSB` — via esbuild's mangleCache, so a piece written against the
+  renamed build saves the bytes on both sides of every call (~10 B per `setResources` site; the
+  library's internal savings roughly pay for the legend). The table is `RENAMES` in
+  `build.tiny.config.mjs`; the `/*renamed:sR=setResources,…*/` legend appended to the output is
+  the renamed build's API contract, trimmed to the names that survived the feature strip.
+  Platform member names (`createRenderPipeline`, …) and WebGPU dictionary keys (`format`,
+  `buffer`, …) are refused with an explanation — the browser owns those names; the name-table
+  pack aliases them instead, and the new `packNames` config picks mnemonic pack codes
+  (`{ createRenderPipeline: 'cRP' }` → `[cRP](`) at ~1 B per use over the `$x` defaults.
+  The stock artifacts keep the long names; `npm run test:all` now also builds a renamed tiny
+  and runs `test/rename.test.mjs` against it.
+- New opt-in `shorthand` config: build a wgsl_shorthand token table into the library. Its own
+  WGSL then ships compressed (`V` for `vec2<f32>`, …) and the piece's WGSL may use the same
+  tokens without shipping `wgsl_shorthand.js` — a `const SHORTHAND = 0;` seam in the source is
+  swapped for an expander that runs on every shader at compile time. Off in both stock
+  configs: measured on the bare tiny build the expander costs ~145 B against 93 B of internal
+  string savings, so it pays only once your own WGSL uses ~7+ tokens. Schema type strings are
+  never expanded.
+
+**Changed — `0` is the library's empty value, not `null`** (breaking only if you compared with `===`)
+
+Every internal "nothing here" sentinel is now `0` instead of `null`: one byte instead of four in
+the raw builds (the stock build drops ~0.4 KB, tiny ~0.4 KB), and every check is a plain falsy
+test. Observable edges of that change:
+
+- `G.context` / `G.format` / `G.features` are `0` before `init()`, and `G.device` is `0` after
+  `destroy()`. `G.pre` and `G.onDeviceLost` default to `0` (assigning `null` still works — all
+  checks are falsy tests).
+- `makeSchema(...)` returns `uniformBuffer: 0` when there are no uniforms, and its internal
+  `_uniformBinding` is `-1` (not `null`) when no uniform binding is emitted — `0` is a real
+  binding number, so that one keeps a numeric sentinel.
+- Everywhere the API *accepted* `null` (a skipped `view`, `encoder`, `blend`, `Ctor`…), `0`,
+  `null` and `undefined` are all fine — pass whichever is shortest. The d.ts spells this
+  `None = 0 | null | undefined`.
+- If you compared against `null` (`G.device === null`, `_resolveBlend(x) === null`), switch to a
+  falsy check; that is the whole breaking surface.
+
+The same pass rewrote block-bodied arrows to expression bodies (comma sequences, trailing
+parameters as locals) where a `return`/`{}` could be dropped, and replaced nullish operators
+that guarded the old `null` sentinels: `??`/`??=`/`?.` do not treat `0` as empty, so those are
+now `||`/`||=`/`&&`.
+
 **Added — a build picker on every demo page**
 
 The tutorial, the demo index and all eight examples now take `?lib=full|min|tiny` and load that

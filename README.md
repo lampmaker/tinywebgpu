@@ -151,7 +151,7 @@ produced something and you just want to look at it:
 
 ```js
 G.show(result);                                  // onto the canvas
-G.show(hdr, null, { scale: [0.25, 0.25, 0.25, 1] });   // tone-map an HDR buffer on the way
+G.show(hdr, 0, { scale: [0.25, 0.25, 0.25, 1] });      // tone-map an HDR buffer on the way
 G.show(depth, myTarget.createView());            // or into a texture you own
 ```
 
@@ -318,14 +318,33 @@ every optional entry point, and adding `--iife --no-banner` gets a classic
 
 Tiny builds also run a **name-table pass**: repeated long WebGPU member names are rewritten to
 bracket reads from one packed string (`--no-pack` skips it; `--pack` applies it to the stock
-build too). It is raw-bytes-only by design — gzip would deduplicate the names anyway, but the
-inline builds this exists for never gzip.
+build too), and a `/*pack:$a=beginComputePass,…*/` legend at the end of the file says what maps
+to what. `packNames` in the config picks mnemonic codes instead of `$x` —
+`{ createRenderPipeline: 'cRP' }` gives `[cRP](` — at ~1 B per use. It is raw-bytes-only by
+design — gzip would deduplicate the names anyway, but the inline builds this exists for never
+gzip. Both artifacts come out as a **single line**: the newlines inside the WGSL template
+strings are escaped after minifying.
+
+A piece build can go further and **rename the library's own API** (`--rename`, or `rename: true`
+in the config): `setResources` becomes `sR`, `createStorageBuffer` becomes `cSB`, and your piece
+calls the short names — the bytes are saved in the library *and* in your inlined code, ~10 B per
+`setResources` call site. The table is `RENAMES` in `build.tiny.config.mjs`; the
+`/*renamed:sR=setResources,…*/` legend at the end of the output is the renamed build's API
+contract (only names that survived the feature strip are listed). The stock artifacts keep the
+long names — the demos, tutorial and tests speak them. Platform names (`createRenderPipeline`,
+`createTexture`, …) can never be renamed — the browser owns those, which is exactly what the
+name-table pack is for — and `build-min.mjs` refuses them loudly, along with WebGPU dictionary
+keys like `format` or `buffer`.
+
+Each build's settings live in a config file — `build.min.config.mjs` / `build.tiny.config.mjs` —
+picked by name; the CLI flags override them per run:
 
 ```
 npm run build:tiny                                  everything optional removed
-node build-min.mjs --tiny --with=show,blend         ...except these
-node build-min.mjs --without=save,read,texio        start from the full build instead
-node build-min.mjs --tiny --iife --no-banner --out=dist/twg.js
+node build-min.mjs tiny --with=show,blend           ...except these
+node build-min.mjs min --without=save,read,texio    start from the full build instead
+node build-min.mjs tiny --iife --no-banner --out=dist/twg.js
+node build-min.mjs --config=my.config.mjs           a config of your own
 ```
 
 What each switch is worth, measured against the 17.8 KB build:
@@ -351,10 +370,10 @@ dependency rather than producing something that throws at runtime.
 What is never optional: `init`, the dual-schema engine, `makeFrag`/`makeDraw`/`makeCompute`
 and their one-liners, buffers, textures, samplers, the frame API and frame-ordered writes.
 
-**Errors in a tiny build.** `--without=msg` (which `--tiny` implies) replaces every message with
-a number — `Error: 15` instead of `No resources bound. Call setResources({ … })`. The numbers are
-listed in the `ERRORS` table at the top of `build-min.mjs`. Debug against `tinywebgpu.js` and
-build tiny last; if you want the sentences back, `--tiny --with=msg`.
+**Errors in a tiny build.** Dropping `msg` (which the tiny config does) replaces every message
+with a number — `Error: 15` instead of `No resources bound. Call setResources({ … })`. The
+numbers are listed in the `ERRORS` table in `build-min.mjs`. Debug against `tinywebgpu.js` and
+build tiny last; if you want the sentences back, `node build-min.mjs tiny --with=msg`.
 
 **How it works, and why it is a build switch and not an option.** The library is one file with a
 row of `const NAME = true;` declarations at the top. `build-min.mjs` rewrites the ones you named
