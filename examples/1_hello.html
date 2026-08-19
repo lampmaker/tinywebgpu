@@ -25,7 +25,8 @@
 <body>
   <canvas id="c" width="800" height="450"></canvas>
   <script type="module">
-    import { WEBGPU } from '../tinywebgpu.js';
+    import { loadLib } from '../libselect.js';
+    const { WEBGPU } = await loadLib([], '..');   // ?lib=min|tiny switches the build
 
     const G = await WEBGPU().init(document.getElementById('c').getContext('webgpu'));
     const quad = await G.makeQuad({

@@ -101,7 +101,8 @@
   </main>
 
   <script type="module">
-    import { WEBGPU } from '../tinywebgpu.js';
+    import { loadLib } from '../libselect.js';
+    const { WEBGPU } = await loadLib(['read'], '..');   // ?lib=min|tiny switches the build
 
     const canvas = document.getElementById('c');
     const el = id => document.getElementById(id);

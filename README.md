@@ -82,7 +82,9 @@ textures, and the sharp edges worth knowing before you hit them.
 ## Examples
 
 Eight single-file examples live in `examples/` — **[run them live](https://lampmaker.github.io/tinywebgpu/)**
-(or serve the folder yourself and open them in a WebGPU browser):
+(or serve the folder yourself and open them in a WebGPU browser). Every demo page — the tutorial
+included — has a build picker in the corner (`?lib=full|min|tiny`) that swaps in the minified or
+tiny build; pages that use features the tiny build drops say so instead of failing.
 
 1. `1_hello.html` — animated fullscreen shader in ~10 lines
 2. `2_compute_readback.html` — compute → storage buffer → readback, no canvas

@@ -60,7 +60,9 @@
   <main>
     <h1>TinyWebGPU</h1>
     <p class="tag">One file, no dependencies, no build step. Live demos below — each is a single
-      self-contained HTML file.</p>
+      self-contained HTML file. The picker in the corner switches every demo between the readable
+      source, the minified build and the tiny build — the tiny one drops optional features, so
+      demos that need them will say so.</p>
 
     <a class="demo start" href="tutorial.html">
       <strong>Start here · The tutorial</strong>
@@ -115,6 +117,11 @@
 
   <script>
     if (!navigator.gpu) document.getElementById('unsupported').style.display = 'block';
+  </script>
+  <script type="module">
+    // The build picker: draws the corner control and carries ?lib= into every demo link.
+    import { initPicker } from './libselect.js';
+    initPicker();
   </script>
 </body>
 

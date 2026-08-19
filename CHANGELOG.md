@@ -4,6 +4,19 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Added — a build picker on every demo page**
+
+The tutorial, the demo index and all eight examples now take `?lib=full|min|tiny` and load that
+build, with a picker in the corner of each page and the choice carried across the links between
+them — so every page doubles as a smoke test of the build it claims to run on. The stock tiny
+build drops whole entry points, and the pages are honest about it: a page that needs a dropped
+feature shows a warning strip, the picker marks the tiny option with `*` and names what is
+missing, and a tutorial box whose code uses readback, `resizeCanvas`, textures or a named blend
+preset says "not in tiny" instead of dying on a TypeError (the check runs against the live
+editor content, so deleting the offending call makes the box runnable again). Tiny's numbered
+errors are translated back to text in the tutorial's output panels. The shared logic lives in
+`libselect.js`, next to the pages; the published npm package is unchanged.
+
 **Changed — `wgsl_shorthand.js` token tables are strings** (breaking for the companion module)
 
 `TOKENS` and `SHORT_TOKENS` are now plain strings — entries separated by commas or newlines,

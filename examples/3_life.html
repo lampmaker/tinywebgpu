@@ -27,7 +27,8 @@
 <body>
   <canvas id="c" width="512" height="512"></canvas>
   <script type="module">
-    import { WEBGPU } from '../tinywebgpu.js';
+    import { loadLib } from '../libselect.js';
+    const { WEBGPU } = await loadLib([], '..');   // ?lib=min|tiny switches the build
 
     const W = 256, H = 256;
     const G = await WEBGPU().init(document.getElementById('c').getContext('webgpu'));

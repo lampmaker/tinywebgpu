@@ -21,7 +21,8 @@
 <body>
   <pre id="out">running…</pre>
   <script type="module">
-    import { WEBGPU } from '../tinywebgpu.js';
+    import { loadLib } from '../libselect.js';
+    const { WEBGPU } = await loadLib(['read'], '..');   // ?lib=min|tiny switches the build
 
     const G = await WEBGPU().init();          // compute-only: no canvas
     const N = 16;
