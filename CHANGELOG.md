@@ -4,6 +4,19 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Changed — expression bodies everywhere a `return` could go** (min −266 B → 16.4 KB, tiny −143 B → 9.5 KB, on top of the repeat pass below)
+
+The minifier merges statements into sequences but never removes a `let`, never converts a
+loop, and keeps `return` whenever a body is not a single expression — so those are hand-work:
+block-bodied functions became expression arrows (trailing parameters as locals, `&&`/ternary
+for `if`, comma for `;`, `forEach` for `for…of`), taking the output from 35 `return`s to 16 in
+the stock build and 21 to 8 in tiny. What keeps a block keeps it for a reason: `try`/`catch`
+(`beginFrame`, `frame`, `endPass`, `checkSize`), string-building loops (`hash`,
+`uniformWrite`, the compile-log formatter — now an IIFE so DIAG builds can strip it from
+expression position), and the `WEBGPU()` factory itself. Also folded in passing: `show()` and
+`makeQuad` lean on `drawTo`'s clear fallback instead of restating `[0, 0, 0, 1]`, and
+`loadTexture`/`writeTexture` reuse the shared `sz(w, h)` extent helper.
+
 **Changed — a repeat-hunting pass over the minified output** (min −775 B → 16.7 KB, tiny −552 B → 9.6 KB)
 
 `find-repeats.mjs` (suffix-array repeat finder, now in the repo) profiled the builds; every

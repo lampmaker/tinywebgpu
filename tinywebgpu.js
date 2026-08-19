@@ -202,61 +202,51 @@ export let WEBGPU = () => {
      *   throwing, so check `G.features` for what was granted.
      * @returns {Promise<Object>} this instance, with device/context/format/features populated
      */
-    init: async (ctx = 0, opts = {}) => {
-      let gpu = navigator.gpu;
-      if (!gpu) err(1, MSG && 'WebGPU not supported');
-      if (typeof ctx === 'string') {
-        let sel = ctx;
-        ctx = document.querySelector(sel);
-        if (!ctx) err(23, MSG && `init: nothing matches '${sel}'.`);
-      }
-      if (ctx?.getContext) ctx = ctx.getContext('webgpu');   // a canvas rather than a context
-      let a = await gpu.requestAdapter();
-      if (!a) err(2, MSG && 'No GPU adapter');
-
+    // Trailing parameters are locals (see the note above oneShot): `a` holds the CSS selector,
+    // then the adapter; `w` the wanted feature list; `d` the required limits, then the device;
+    // `f` the canvas format. OA returns S, so the chain's last value is the documented return.
+    init: async (ctx = 0, opts = {}, gpu = navigator.gpu, a, w, d, f) => (
+      gpu || err(1, MSG && 'WebGPU not supported'),
+      typeof ctx === 'string' &&
+        (ctx = document.querySelector(a = ctx) || err(23, MSG && `init: nothing matches '${a}'.`)),
+      ctx?.getContext && (ctx = ctx.getContext('webgpu')),   // a canvas rather than a context
+      (a = await gpu.requestAdapter()) || err(2, MSG && 'No GPU adapter'),
       // Raise these to whatever the adapter allows; anything in opts.limits still wins.
-      let requiredLimits = { ...opts.limits };
-      for (let k of ['maxStorageBufferBindingSize', 'maxBufferSize']) requiredLimits[k] ??= a.limits[k];
-
+      d = { ...opts.limits },
+      ['maxStorageBufferBindingSize', 'maxBufferSize'].forEach(k => d[k] ??= a.limits[k]),
       // Asking for a feature the adapter lacks would throw, so filter first.
-      let wanted = opts.features ?? [];
-      let requiredFeatures = wanted.filter(f => a.features.has(f));
-      if (DIAG) {
-        let dropped = wanted.filter(f => !a.features.has(f));
-        if (dropped.length) console.warn(`[TinyWebGPU] Adapter does not support ${dropped.map(f => `'${f}'`).join(', ')}; continuing without.`);
-      }
-
-      let d = await a.requestDevice({ requiredLimits, requiredFeatures });
+      w = opts.features ?? [],
+      DIAG && (drop => drop.length && console.warn(
+        `[TinyWebGPU] Adapter does not support ${drop.map(x => `'${x}'`).join(', ')}; continuing without.`))(
+        w.filter(x => !a.features.has(x))),
+      d = await a.requestDevice({ requiredLimits: d, requiredFeatures: w.filter(x => a.features.has(x)) }),
       d.lost.then(info => info.reason !== 'destroyed' && (   // 'destroyed' = G.destroy(), not a loss
         console.error(`[TinyWebGPU] GPU device lost (${info.reason || 'unknown'}): ${info.message}`),
-        S.onDeviceLost && S.onDeviceLost(info)));
+        S.onDeviceLost && S.onDeviceLost(info))),
       // The handler's whole body is the log, so without DIAG there is nothing left to install.
-      if (DIAG) d.onuncapturederror = e => console.error('[TinyWebGPU] Uncaptured WebGPU error:', e.error?.message ?? e);
-      let f = gpu.getPreferredCanvasFormat();
+      DIAG && (d.onuncapturederror = e => console.error('[TinyWebGPU] Uncaptured WebGPU error:', e.error?.message ?? e)),
+      f = gpu.getPreferredCanvasFormat(),
       // usage defaults to RENDER_ATTACHMENT, as the spec does; add COPY_SRC to it if you want to
       // G.save() the canvas texture itself rather than your own render target.
-      if (ctx) ctx.configure({ device: d, format: f, alphaMode: opts.alphaMode ?? 'opaque', usage: opts.canvasUsage ?? TEX_RENDER_ATTACHMENT });
-      OA(S, { device: d, context: ctx, format: f, features: d.features });
-      return S;
-    },
+      ctx && ctx.configure({ device: d, format: f, alphaMode: opts.alphaMode ?? 'opaque', usage: opts.canvasUsage ?? TEX_RENDER_ATTACHMENT }),
+      OA(S, { device: d, context: ctx, format: f, features: d.features })),
 
     /**
      * Tears the instance down: destroys the device and every pooled GPU resource, and empties
      * the caches. For SPA teardown, hot-reload dev servers and live-coding pages — the leak
      * those environments hit otherwise is real. The instance is not reusable afterwards.
      */
-    destroy: () => {
-      endPass();
-      fEnc = 0;
-      fReset();
-      if (F_STAGING) { for (let c of ring._chunks) c._buf.destroy(); ring._chunks = []; ring._i = 0; }
-      if (F_READ) { for (let l of stagingPool.values()) for (let b of l) b.destroy(); stagingPool.clear(); }
-      if (F_DEPTH) { for (let t of depthCache.values()) t.destroy(); depthCache.clear(); }
-      if (F_SHOW) blitCache.clear();
-      shaderCache.clear(); pipelineCache.clear();
-      D && D.destroy();   // `&&`, not `?.` — the empty value is 0, which `?.` would try to call through
-      D = 0;
-    },
+    destroy: () => (
+      endPass(),
+      fEnc = 0,
+      fReset(),
+      F_STAGING && (ring._chunks.forEach(c => c._buf.destroy()), ring._chunks = [], ring._i = 0),
+      F_READ && (stagingPool.forEach(l => l.forEach(b => b.destroy())), stagingPool.clear()),
+      F_DEPTH && (depthCache.forEach(t => t.destroy()), depthCache.clear()),
+      F_SHOW && blitCache.clear(),
+      shaderCache.clear(), pipelineCache.clear(),
+      D && D.destroy(),   // `&&`, not `?.` — the empty value is 0, which `?.` would try to call through
+      D = 0),
 
 
 
@@ -319,20 +309,19 @@ ${frag}
      *   depth?: boolean|Object}} opts
      * @returns {Promise<RenderPipeline>}
      */
-    makeDraw: opts => {
-      // `targets` is {name: format}; the matching `struct FSOut { … }` is generated here so the
-      // @location indices — the part that is easy to get wrong by hand — follow the key order.
-      // WGSL module-scope declarations are order-independent, so the struct may land above the
-      // shader that returns it. Everything else spreads through to makePipeline, which owns the
-      // option defaults (uniforms, resources, readOnly, count, instances, topology, format).
-      let names = opts.targets ? OK(opts.targets) : 0;
-      return makePipeline({
+    // `targets` is {name: format}; the matching `struct FSOut { … }` is generated here so the
+    // @location indices — the part that is easy to get wrong by hand — follow the key order.
+    // WGSL module-scope declarations are order-independent, so the struct may land above the
+    // shader that returns it. Everything else spreads through to makePipeline, which owns the
+    // option defaults (uniforms, resources, readOnly, count, instances, topology, format).
+    makeDraw: (opts, names) => (
+      names = opts.targets ? OK(opts.targets) : 0,
+      makePipeline({
         ...opts,
         isCompute: false, targetNames: names,
         code: names ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: vec4<f32>`).join(', ')}};\n${opts.code}` : opts.code,
         format: names ? OV(opts.targets) : opts.format,
-      });
-    },
+      })),
 
     /**
      * A compute pipeline. `body` holds declarations (helper functions, structs); `main` holds the
@@ -408,15 +397,13 @@ ${main}
       // lazily by targetView(), so a compute-only frame never touches (or presents) the canvas.
       fReset(opts.view);
     },
-    endFrame: () => {
-      if (!fEnc) return;
-      endPass();
-      if (F_STAGING) flushRing();
-      let enc = fEnc;
-      fEnc = 0;                            // cleared first: a throwing finish() must not leave it dangling
-      fReset();
-      submit(enc);
-    },
+    endFrame: enc => fEnc && (
+      endPass(),
+      F_STAGING && flushRing(),
+      enc = fEnc,
+      fEnc = 0,                            // cleared first: a throwing finish() must not leave it dangling
+      fReset(),
+      submit(enc)),
     // beginFrame/endFrame with exception safety: the frame goes out even if `fn` throws, so a
     // bug in one frame's code cannot leave a dangling encoder behind. Returns fn's result.
     frame: (fn, opts) => { S.beginFrame(opts); try { return fn(); } finally { S.endFrame(); } },
@@ -459,34 +446,35 @@ ${main}
      *   (the buffer is sized from it and filled in the same call)
      * @returns {BufferHandle}
      */
-    createStorageBuffer: sizeOrData => {
-      let init = typeof sizeOrData === 'number' ? 0 : sizeOrData;
-      let h = S.createBuffer(init ? len(init) : sizeOrData, BUF_STORAGE | BUF_COPY_SRC | BUF_COPY_DST, 'storage');
-      let { b, w } = h, n = b.size;
+    createStorageBuffer: (sizeOrData, init, h, b, n, r) => (
+      init = typeof sizeOrData === 'number' ? 0 : sizeOrData,
+      h = S.createBuffer(init ? len(init) : sizeOrData, BUF_STORAGE | BUF_COPY_SRC | BUF_COPY_DST, 'storage'),
+      b = h.b, n = b.size,
       // `r` is a debug/export path, not a hot one: F_READ drops it (and the staging pool with it).
       // C is the result view, e.g. Float32Array — passing it as the *only* argument
       // (`buf.r(Float32Array)`) reads the whole buffer typed, no byte counting.
-      let r = !F_READ ? void 0 : (nbytes = n, o = 0, C = U8) => (
+      r = !F_READ ? void 0 : (nbytes = n, o = 0, C = U8) => (
         typeof nbytes === 'function' && ([C, nbytes] = [nbytes, n]),
         readBack(nbytes, (enc, rb, need) => enc.copyBufferToBuffer(b, o, rb, 0, need), DIAG && 'readback')
-          .then(ab => C ? new C(ab) : ab));
-      let clear = () => fEnc
-        ? outsidePass(() => fEnc.clearBuffer(b, 0, n))
-        : oneShot(enc => enc.clearBuffer(b, 0, n), DIAG && 'clear');
-      if (init) w(init);
+          .then(ab => C ? new C(ab) : ab)),
+      init && h.w(init),
       // Long names alias the short ones, so `parts.write(data)` and `parts.w(data)` are the same
       // function; pick whichever reads better where you are. F_ALIASES drops the long spellings.
-      return OA(h, { r, clear, ...(F_ALIASES ? { read: r } : {}) });
-    },
+      OA(h, {
+        r,
+        clear: () => fEnc
+          ? outsidePass(() => fEnc.clearBuffer(b, 0, n))
+          : oneShot(enc => enc.clearBuffer(b, 0, n), DIAG && 'clear'),
+        ...(F_ALIASES ? { read: r } : {}),
+      })),
 
     // Explicit usage flags, minimal helpers. Size is rounded up to 4 bytes; `label` is internal.
-    createBuffer: (size, usage, label = 'buffer') => {
-      let n = (size + 3) & ~3;
-      if (DIAG) checkSize(n, !!(usage & BUF_STORAGE));
-      let b = mkBuf({ size: n, usage, ...(DIAG && { label: `${label} ${n}B` }) });
-      let w = writerFor(b);
-      return { b, w, ...(F_ALIASES ? { buffer: b, write: w } : {}) };
-    },
+    createBuffer: (size, usage, label = 'buffer', b, w) => (
+      size = (size + 3) & ~3,
+      DIAG && checkSize(size, !!(usage & BUF_STORAGE)),
+      b = mkBuf({ size, usage, ...(DIAG && { label: `${label} ${size}B` }) }),
+      w = writerFor(b),
+      { b, w, ...(F_ALIASES ? { buffer: b, write: w } : {}) }),
 
     // Small and read-only in shaders. Written with writeUniforms, or by a pipeline's uniform setters.
     createUniformBuffer: byteLength =>
@@ -505,12 +493,11 @@ ${main}
     // buffers. COPY_DST is in the default usage set so writeTexture/loadTexture work unopted-in.
     // The 4th argument is usage flags, or `{ usage, mips }` — `mips: true` allocates the full
     // mip chain (fill it with generateMipmaps), a number allocates that many levels.
-    createTexture: (width, height, format = 'rgba8unorm', usageOrOpts) => {
-      let { usage, mips } = typeof usageOrOpts === 'number' ? { usage: usageOrOpts } : usageOrOpts ?? {};
-      return tex2d(width, height, format,
-        usage ?? (TEX_RENDER_ATTACHMENT | TEX_BINDING | TEX_COPY_SRC | TEX_COPY_DST), 'texture',
-        mips === true ? mipCount(width, height) : mips || 1);
-    },
+    createTexture: (width, height, format = 'rgba8unorm', o) => (
+      o = typeof o === 'number' ? { usage: o } : o ?? {},
+      tex2d(width, height, format,
+        o.usage ?? (TEX_RENDER_ATTACHMENT | TEX_BINDING | TEX_COPY_SRC | TEX_COPY_DST), 'texture',
+        o.mips === true ? mipCount(width, height) : o.mips || 1)),
     // Writable from WGSL via textureStore(), readable via textureLoad() — compute output,
     // accumulation buffers, GPGPU. Same COPY_DST default.
     createStorageTexture: (width, height, format = 'rgba32float', usage) =>
@@ -531,15 +518,14 @@ ${main}
        * texture's own size. Needs COPY_DST, which `createTexture` includes.
        * @returns {GPUTexture} the same texture, for chaining
        */
-      writeTexture: (tex, data, opts = {}) => {
-        let [w, h] = texWH(tex, opts);
-        let bpt = texelBytes(tex.format);
-        if (!(opts.bytesPerRow || bpt))
-          err(9, MSG && `writeTexture: ${texelMsg(tex.format)}; pass bytesPerRow explicitly.`);
+      writeTexture: (tex, data, opts = {}, wh, bpt) => (
+        wh = texWH(tex, opts),
+        bpt = texelBytes(tex.format),
+        opts.bytesPerRow || bpt ||
+          err(9, MSG && `writeTexture: ${texelMsg(tex.format)}; pass bytesPerRow explicitly.`),
         D.queue.writeTexture(texDst(tex, opts),
-          data, { bytesPerRow: opts.bytesPerRow ?? w * bpt, rowsPerImage: h }, sz(w, h));
-        return tex;
-      },
+          data, { bytesPerRow: opts.bytesPerRow ?? wh[0] * bpt, rowsPerImage: wh[1] }, sz(...wh)),
+        tex),
 
       /**
        * Loads an image into a texture from a URL, Blob, ImageBitmap, <img>, <canvas>,
@@ -550,39 +536,35 @@ ${main}
        * `vec2(uv.x, 1.0 - uv.y)` (or show()) to put an image on screen upright.
        * @returns {Promise<GPUTexture>}
        */
-      loadTexture: async (src, opts = {}) => {
-        // `bmp` is whatever needs decoding into an ImageBitmap first; everything else (canvas,
-        // video, an ImageBitmap already) is used as the copy source directly.
-        let source = src, bmp = 0;
-        if (typeof src === 'string') {
-          // Without this, a 404 surfaces as an opaque createImageBitmap decode error.
-          let resp = await fetch(src);
-          if (!resp.ok) err(20, MSG && `loadTexture: HTTP ${resp.status} for '${src}'.`);
-          bmp = await resp.blob();
-        } else if (src instanceof Blob) bmp = src;
-        else if (typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement) {
-          if (!src.complete) await src.decode();
-          bmp = src;
-        }
-        if (bmp) source = await createImageBitmap(bmp);
+      // `bmp` is whatever needs decoding into an ImageBitmap first; everything else (canvas,
+      // video, an ImageBitmap already) is used as the copy source directly.
+      loadTexture: async (src, opts = {}, source = src, bmp = 0, w, h, tex) => (
+        typeof src === 'string'
+          // Without the .ok check, a 404 surfaces as an opaque createImageBitmap decode error.
+          ? (bmp = await fetch(src),
+            bmp.ok || err(20, MSG && `loadTexture: HTTP ${bmp.status} for '${src}'.`),
+            bmp = await bmp.blob())
+          : src instanceof Blob ? bmp = src
+          : typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement &&
+            (src.complete || await src.decode(), bmp = src),
+        bmp && (source = await createImageBitmap(bmp)),
         // Every accepted source type reports its size under one of these pairs. `||`, not `??`:
         // a <video> always *has* a `width` property and it is 0 until the layout attribute is set,
         // so the nullish form picked the zero and never reached videoWidth.
-        let w = source.videoWidth || source.displayWidth || source.width;
-        let h = source.videoHeight || source.displayHeight || source.height;
-        if (!w || !h) err(10, MSG && 'loadTexture: could not determine source dimensions.');
+        w = source.videoWidth || source.displayWidth || source.width,
+        h = source.videoHeight || source.displayHeight || source.height,
+        w && h || err(10, MSG && 'loadTexture: could not determine source dimensions.'),
         // copyExternalImageToTexture requires RENDER_ATTACHMENT in addition to COPY_DST.
-        let tex = opts.texture ?? S.createTexture(w, h, opts.format,   // createTexture defaults the format
-          { usage: opts.usage, mips: F_MIPS && opts.mips });
+        tex = opts.texture ?? S.createTexture(w, h, opts.format,   // createTexture defaults the format
+          { usage: opts.usage, mips: F_MIPS && opts.mips }),
         D.queue.copyExternalImageToTexture(
           { source, flipY: opts.flipY ?? false },
           { texture: tex, premultipliedAlpha: opts.premultipliedAlpha ?? false, colorSpace: opts.colorSpace ?? 'srgb' },
-          { width: w, height: h });
+          sz(w, h)),
         // ImageBitmaps we created ourselves are ours to release; caller-owned sources are not.
-        if (source !== src && typeof source.close === 'function') source.close();
-        if (F_MIPS && opts.mips) await S.generateMipmaps(tex);
-        return tex;
-      },
+        source !== src && typeof source.close === 'function' && source.close(),
+        F_MIPS && opts.mips && await S.generateMipmaps(tex),
+        tex),
     } : {}),
 
     ...(F_READ ? {
@@ -711,17 +693,15 @@ ${main}
        * @param {HTMLCanvasElement|OffscreenCanvas} [canvas] defaults to the canvas init() configured
        * @returns {{width: number, height: number, changed: boolean}}
        */
-      resizeCanvas: (canvas = S.context?.canvas, opts = {}) => {
-        if (!canvas) err(8, MSG && 'resizeCanvas: no canvas — init() with a context, or pass one.');
-        let dpr = opts.dpr ?? globalThis.devicePixelRatio ?? 1;
-        let max = D ? D.limits.maxTextureDimension2D : Infinity;
+      resizeCanvas: (canvas = S.context?.canvas, opts = {}, fit, width, height, changed) => (
+        canvas || err(8, MSG && 'resizeCanvas: no canvas — init() with a context, or pass one.'),
         // clientWidth is 0 on an OffscreenCanvas (no CSS box) — fall back to the current size.
-        let fit = (css, cur) => Math.max(1, Math.min(max, Math.round((css || cur) * dpr)));
-        let width = fit(canvas.clientWidth, canvas.width), height = fit(canvas.clientHeight, canvas.height);
-        let changed = canvas.width !== width || canvas.height !== height;
-        if (changed) { canvas.width = width; canvas.height = height; }
-        return { width, height, changed };
-      },
+        fit = (css, cur) => Math.max(1, Math.min(D ? D.limits.maxTextureDimension2D : Infinity,
+          Math.round((css || cur) * (opts.dpr ?? globalThis.devicePixelRatio ?? 1)))),
+        width = fit(canvas.clientWidth, canvas.width), height = fit(canvas.clientHeight, canvas.height),
+        changed = canvas.width !== width || canvas.height !== height,
+        changed && (canvas.width = width, canvas.height = height),
+        { width, height, changed }),
     } : {}),
 
     ...(F_SHOW ? {
@@ -735,34 +715,31 @@ ${main}
        *   signed buffer without writing a shader. `flipY` for a bottom-up source.
        * @returns {Promise<RenderPipeline>} the blit pipeline, in case you want to keep drawing with it
        */
-      show: async (tex, view, opts = {}) => {
-        // A GPUTexture target knows its own format; a raw view or the canvas default does not.
-        let format = opts.format ?? view?.format ?? S.format;
-        let sample = /uint$/.test(tex.format) ? 'u32' : /sint$/.test(tex.format) ? 'i32' : 'f32';
-        // The generated uv has 0 at the *bottom* of the target, so the default inverts y to put the
-        // source's first row on the target's first row — images stay upright and show/readTexture
-        // round-trips. Writing this blit by hand without the flip is what turns your image over.
-        let flip = opts.flipY ? 'uv.y' : '1.0 - uv.y';
-        let key = `${format}|${sample}|${opts.flipY ? 1 : 0}`;
-        let entry = blitCache.get(key);
+      // A GPUTexture target knows its own format; a raw view or the canvas default does not.
+      // The generated uv has 0 at the *bottom* of the target, so by default the blit inverts y
+      // to put the source's first row on the target's first row — images stay upright and
+      // show/readTexture round-trips. Writing this blit by hand without the flip is what turns
+      // your image over.
+      show: async (tex, view, opts = {}, format = opts.format ?? view?.format ?? S.format, sample, key, entry, p) => (
+        sample = /uint$/.test(tex.format) ? 'u32' : /sint$/.test(tex.format) ? 'i32' : 'f32',
+        key = `${format}|${sample}|${opts.flipY ? 1 : 0}`,
+        entry = blitCache.get(key),
         // `pre` is compared too: a different G.pre means different generated WGSL, and the entry
         // must not outlive the hook it was compiled under. The promise is cached, like
         // shaderCache, so two concurrent first calls share a compile.
-        if (!entry || entry.pre !== S.pre) {
-          let pending = S.makeFrag(`fn frag(uv: vec2<f32>) -> vec4<f32> {
+        (!entry || entry.pre !== S.pre) && (
+          p = S.makeFrag(`fn frag(uv: vec2<f32>) -> vec4<f32> {
     let d = vec2<f32>(textureDimensions(src));
-    let c = vec2<i32>(clamp(vec2<f32>(uv.x, ${flip}) * d, vec2<f32>(0.0), d - 1.0));
+    let c = vec2<i32>(clamp(vec2<f32>(uv.x, ${opts.flipY ? 'uv.y' : '1.0 - uv.y'}) * d, vec2<f32>(0.0), d - 1.0));
     return vec4<f32>(textureLoad(src, c, 0)) * UB.scale + UB.offset;
-  }`, { scale: 'vec4<f32>', offset: 'vec4<f32>' }, { src: `texture_2d<${sample}>` }, { format });
-          pending.catch(() => blitCache.delete(key));
-          blitCache.set(key, entry = { pre: S.pre, p: pending });
-        }
-        let p = await entry.p;
-        p.setResources({ src: tex });
-        p.setUniforms({ scale: opts.scale ?? [1, 1, 1, 1], offset: opts.offset ?? [0, 0, 0, 0] });
-        p.drawTo(view, opts.clear ?? [0, 0, 0, 1]);
-        return p;
-      },
+  }`, { scale: 'vec4<f32>', offset: 'vec4<f32>' }, { src: `texture_2d<${sample}>` }, { format }),
+          p.catch(() => blitCache.delete(key)),
+          blitCache.set(key, entry = { pre: S.pre, p })),
+        p = await entry.p,
+        p.setResources({ src: tex }),
+        p.setUniforms({ scale: opts.scale ?? [1, 1, 1, 1], offset: opts.offset ?? [0, 0, 0, 0] }),
+        p.drawTo(view, opts.clear),   // undefined falls back to drawTo's own [0,0,0,1]
+        p),
     } : {}),
 
     ...(F_SAVE ? {
@@ -826,17 +803,14 @@ ${main}
      * `G.pre` — makePipeline does, so its cache key is computed on the post-pre source.
      * @param {string} code @returns {Promise<GPUShaderModule>}
      */
-    makeShader: (code, applyPre = true) => {
-      if (applyPre && S.pre) code = S.pre(code);
-      let key = ckey(code);
-      let promise = shaderCache.get(key);
-      if (!promise) {
+    makeShader: (code, applyPre = true, key, promise) => (
+      applyPre && S.pre && (code = S.pre(code)),
+      key = ckey(code),
+      (promise = shaderCache.get(key)) || (
         // the promise (not the module) is cached, so concurrent calls share one compile
-        shaderCache.set(key, promise = compileShader(code, key));
-        promise.catch(() => shaderCache.delete(key));
-      }
-      return promise;
-    },
+        shaderCache.set(key, promise = compileShader(code, key)),
+        promise.catch(() => shaderCache.delete(key))),
+      promise),
     // entries: [{ binding:0, resource:{ buffer } }, { binding:1, resource: textureView }, ...]
     bindGroup: (pipeline, groupIndex, entries) =>
       D.createBindGroup({ layout: pipeline.getBindGroupLayout(groupIndex), entries }),
@@ -925,7 +899,7 @@ ${main}
   // to keep recording. Public endCompute() is the one that may submit.
   let endPass = () => { try { fPass && fPass.end(); } catch { } fPass = 0; };
   // Reset the per-frame state; `view` is the next frame's target (omitted for none).
-  let fReset = view => { fView = view; fPass = fPassOpts = fBound = 0; fOwned = false; };
+  let fReset = view => (fView = view, fPass = fPassOpts = fBound = 0, fOwned = false);
 
   // Buffer copies cannot be encoded inside a pass. Close the chained pass, encode, then reopen it
   // and restore the pipeline/bind group of whatever was last bound, so a mid-chain write is
@@ -966,13 +940,9 @@ ${main}
   };
   // Upload all staged chunk contents; must run just before submitting the frame encoder (queue
   // writes execute before subsequently submitted command buffers).
-  let flushRing = !F_STAGING ? 0 : () => {
-    for (let c of ring._chunks) {
-      if (c._at > 0) D.queue.writeBuffer(c._buf, 0, c._cpu, 0, c._at);
-      c._at = 0;
-    }
-    ring._i = 0;
-  };
+  let flushRing = !F_STAGING ? 0 : () => (
+    ring._chunks.forEach(c => (c._at && D.queue.writeBuffer(c._buf, 0, c._cpu, 0, c._at), c._at = 0)),
+    ring._i = 0);
 
   // Pooled staging buffers for readbacks, keyed by size, max 4 kept per size. Reached through S
   // (see the test seams at the bottom) so test/layout.test.mjs can stub them.
@@ -986,17 +956,16 @@ ${main}
   // the caller's copy into a one-shot submission, map, copy out, release. `nbytes` may be
   // unaligned — copy sizes and mapped ranges must be 4-byte multiples, so the copy is padded
   // (`need`, handed to the encode callback) and the result trimmed back to `nbytes`.
-  let readBack = !F_READ ? 0 : async (nbytes, encode, label) => {
-    if (fEnc) console.warn('[TinyWebGPU] readback during an open frame reads pre-frame data — call endFrame() first.');
-    let need = (nbytes + 3) & ~3;
-    let rb = S._acquireStaging(need);
-    oneShot(enc => encode(enc, rb, need), label);
-    await rb.mapAsync(1);   // GPUMapMode.READ — normative value, like the usage flags above
-    let ab = rb.getMappedRange(0, need).slice(0, nbytes);   // copy: stays valid after unmap
-    rb.unmap();
-    S._releaseStaging(rb);
-    return ab;
-  };
+  let readBack = !F_READ ? 0 : async (nbytes, encode, label, need, rb, ab) => (
+    fEnc && console.warn('[TinyWebGPU] readback during an open frame reads pre-frame data — call endFrame() first.'),
+    need = (nbytes + 3) & ~3,
+    rb = S._acquireStaging(need),
+    oneShot(enc => encode(enc, rb, need), label),
+    await rb.mapAsync(1),   // GPUMapMode.READ — normative value, like the usage flags above
+    ab = rb.getMappedRange(0, need).slice(0, nbytes),   // copy: stays valid after unmap
+    rb.unmap(),
+    S._releaseStaging(rb),
+    ab);
 
   // ─── Small helpers ─────────────────────────────────────────────────────────────────────────
   // The one createTexture call behind createTexture, createStorageTexture and the depth pool.
@@ -1088,22 +1057,19 @@ ${main}
   // Buffer writer: staged inside an open frame so writes order against dispatches, a plain queue
   // write outside. Rejects plain Arrays — `[1,2,3]` has no byteLength, and the old `?? d.length`
   // fallback silently wrote 3 bytes of nothing.
-  let writerFor = b => (d, o = 0) => {
-    if (!(AB.isView(d) || d instanceof AB))
-      err(5, MSG && 'buffer write: expected a TypedArray or ArrayBuffer.');
+  let writerFor = b => (d, o = 0, p) => (
+    AB.isView(d) || d instanceof AB || err(5, MSG && 'buffer write: expected a TypedArray or ArrayBuffer.'),
     // Both write paths (writeBuffer and copyBufferToBuffer) take only 4-byte offsets — name the
     // constraint instead of letting the driver reject it.
-    if (o & 3) err(6, MSG && `buffer write: byteOffset must be a multiple of 4 (got ${o}).`);
-    if (F_STAGING && fEnc) return stageCopy(b, o, d, len(d));
-    // writeBuffer also wants a 4-byte-multiple size; pad a copy of the tail rather than reject
-    // the write. Buffer sizes are rounded up at creation, so the padding never overruns.
-    if (len(d) & 3) {
-      let p = new U8((len(d) + 3) & ~3);
-      p.set(AB.isView(d) ? new U8(d.buffer, d.byteOffset, len(d)) : new U8(d));
-      d = p;
-    }
-    return S.writeUniforms(b, d, o);
-  };
+    o & 3 && err(6, MSG && `buffer write: byteOffset must be a multiple of 4 (got ${o}).`),
+    F_STAGING && fEnc ? stageCopy(b, o, d, len(d)) : (
+      // writeBuffer also wants a 4-byte-multiple size; pad a copy of the tail rather than reject
+      // the write. Buffer sizes are rounded up at creation, so the padding never overruns.
+      len(d) & 3 && (
+        p = new U8((len(d) + 3) & ~3),
+        p.set(AB.isView(d) ? new U8(d.buffer, d.byteOffset, len(d)) : new U8(d)),
+        d = p),
+      S.writeUniforms(b, d, o)));
 
   let blitCache = F_SHOW ? new Map() : 0;
 
@@ -1112,34 +1078,31 @@ ${main}
     !blend || typeof blend !== 'string' ? blend || 0
       : BLENDS[blend] ?? err(4, MSG && `Unknown blend preset '${blend}'. Use ${OK(BLENDS).map(k => `'${k}'`).join(', ')} or a GPUBlendState object.`);
 
-  let compileShader = async (code, label) => {
-    if (SHORTHAND) code = SHORTHAND(code);   // builds with a token table expand it here
-    let module = D.createShaderModule({ code, ...(DIAG && { label: `shader ${label ?? ''}` }) });
-    let info = await module.getCompilationInfo();
-    let msgs = info.messages.filter(m => m.message && m.type !== 'info');
-    if (msgs.length) {
-      let hasError = msgs.some(m => m.type === 'error');
-      // DIAG is folded to false in the minified build, which removes this whole formatter. The
-      // throw below sits outside it on purpose — errors stay loud in every build.
-      if (DIAG) {
-        let L = code.split('\n');
-        let log = '\n=== WGSL Compile Log ===\n';
-        for (let m of msgs) {
-          let ln = m.lineNum, col = m.linePos, t = m.type.toUpperCase();
-          let s = Math.max(0, ln - 10), e = Math.min(L.length, ln + 4);
-          log += `\n${t} @ ${ln}:${col} — ${m.message}\n\n`;
-          for (let i = s; i < e; i++) {
-            let n = i + 1;
-            log += `${String(n).padStart(4, ' ')} | ${L[i]}\n`;
-            if (n === ln) log += `     | ${' '.repeat(Math.max(0, col - 1))}^\n`;
-          }
+  let compileShader = async (code, label, module, msgs, hasError) => (
+    SHORTHAND && (code = SHORTHAND(code)),   // builds with a token table expand it here
+    module = D.createShaderModule({ code, ...(DIAG && { label: `shader ${label ?? ''}` }) }),
+    msgs = (await module.getCompilationInfo()).messages.filter(m => m.message && m.type !== 'info'),
+    hasError = msgs.some(m => m.type === 'error'),
+    // DIAG is folded to false in the minified build, which removes this whole formatter (an
+    // IIFE, so its loops can sit in expression position). The throw below stays outside it on
+    // purpose — errors stay loud in every build.
+    DIAG && msgs.length && (() => {
+      let L = code.split('\n');
+      let log = '\n=== WGSL Compile Log ===\n';
+      for (let m of msgs) {
+        let ln = m.lineNum, col = m.linePos, t = m.type.toUpperCase();
+        let s = Math.max(0, ln - 10), e = Math.min(L.length, ln + 4);
+        log += `\n${t} @ ${ln}:${col} — ${m.message}\n\n`;
+        for (let i = s; i < e; i++) {
+          let n = i + 1;
+          log += `${String(n).padStart(4, ' ')} | ${L[i]}\n`;
+          if (n === ln) log += `     | ${' '.repeat(Math.max(0, col - 1))}^\n`;
         }
-        (hasError ? console.error : console.warn)(log);
       }
-      if (hasError) err(3, MSG && 'WGSL compilation failed.');
-    }
-    return module;
-  };
+      (hasError ? console.error : console.warn)(log);
+    })(),
+    hasError && err(3, MSG && 'WGSL compilation failed.'),
+    module);
 
   // `layout: 'auto'` derives the bind group layout from what the shader actually references.
   // `format` is one format string, or an array of them for multiple render targets in @location
@@ -1193,14 +1156,13 @@ ${main}
     let uniformEntries = OE(uniforms);
     if (uniformEntries.length > 0) {
       let offset = 0, layout = {};
-      let structFields = uniformEntries.map(([name, wgslType]) => {
-        let [size, al, comps, packRows] = typeInfo(wgslType);
-        offset = alignTo(offset, al);
+      // The trailing destructuring parameter unpacks typeInfo per entry (map passes 3 args).
+      let structFields = uniformEntries.map(([name, wgslType], i, a, [size, al, comps, packRows] = typeInfo(wgslType)) => (
+        offset = alignTo(offset, al),
         // `_`-prefixed: internal fields the minified build renames (see build-min.mjs).
-        layout[name] = { _offset: offset, _comps: comps, _packRows: packRows, _wgslType: wgslType };
-        offset += size;
-        return `  ${name}: ${wgslType},`;
-      });
+        layout[name] = { _offset: offset, _comps: comps, _packRows: packRows, _wgslType: wgslType },
+        offset += size,
+        `  ${name}: ${wgslType},`));
 
       offset = alignTo(offset, 4);                 // struct size must be 16-byte aligned
       let byteSize = offset * 4;
@@ -1210,11 +1172,10 @@ ${main}
 
       // Resolve the destination view and the integer coercion once, here — this used to be two
       // regexes per field on every setUniforms() call, i.e. in the middle of the animation loop.
-      for (let f of OV(layout)) {
-        f._isU = /u32/.test(f._wgslType);
-        f._isI = /i32/.test(f._wgslType);
-        f._view = f._isU ? U32 : f._isI ? I32 : F32;
-      }
+      OV(layout).forEach(f => (
+        f._isU = /u32/.test(f._wgslType),
+        f._isI = /i32/.test(f._wgslType),
+        f._view = f._isU ? U32 : f._isI ? I32 : F32));
 
       uniformWrite = values => {
         for (let [name, value] of OE(values)) {
@@ -1255,28 +1216,22 @@ ${structFields.join('\n')}
     // Three forms: `array<…>` is kept as-is, a full `struct Foo {…}` is emitted and bound by name,
     // and a bare primitive/vector/matrix is auto-wrapped in `struct name_buf { value: T }`.
     let resourceLayout = {};
-    let resourceWGSL = OE(resources).map(([name, wgslType]) => {
-      let currentBinding = binding++;
-      let isTex = wgslType.startsWith('texture_');
-      let isSampler = wgslType.startsWith('sampler');   // 'sampler' | 'sampler_comparison'
-      let isBuf = !(isTex || isSampler);
-
-      let decls = '', typeForBinding = wgslType;
-      if (isBuf && !wgslType.startsWith('array<')) {
-        if (/^struct\s+/.test(wgslType)) {
-          decls = wgslType.trim();
-          typeForBinding = wgslType.match(/^struct\s+([A-Za-z_][A-Za-z0-9_]*)/)?.[1] ?? wgslType;
-        } else {
-          typeForBinding = `${name}_buf`;
-          decls = `struct ${typeForBinding} {\n  value: ${wgslType},\n}`;
-        }
-      }
-
-      resourceLayout[name] = { _binding: currentBinding, _wgslType: wgslType, _isBuf: isBuf, _isTex: isTex, _isSampler: isSampler };
-      let addrSpace = isBuf ? (readOnly.includes(name) ? '<storage, read>' : '<storage, read_write>') : '';
-      let varLine = `${gb(currentBinding)}${addrSpace} ${name}: ${typeForBinding};`;
-      return decls ? `${decls}\n${varLine}` : varLine;
-    });
+    let resourceWGSL = OE(resources).map(([name, wgslType], i, a,
+      b = binding++,
+      isTex = wgslType.startsWith('texture_'),
+      isSampler = wgslType.startsWith('sampler'),   // 'sampler' | 'sampler_comparison'
+      isBuf = !(isTex || isSampler),
+      decls, typeForBinding) => (
+      decls = '', typeForBinding = wgslType,
+      isBuf && !wgslType.startsWith('array<') && (
+        /^struct\s+/.test(wgslType)
+          ? (decls = wgslType.trim(),
+            typeForBinding = wgslType.match(/^struct\s+([A-Za-z_][A-Za-z0-9_]*)/)?.[1] ?? wgslType)
+          : (typeForBinding = `${name}_buf`,
+            decls = `struct ${typeForBinding} {\n  value: ${wgslType},\n}`)),
+      resourceLayout[name] = { _binding: b, _wgslType: wgslType, _isBuf: isBuf, _isTex: isTex, _isSampler: isSampler },
+      (decls && `${decls}\n`) +
+        `${gb(b)}${isBuf ? (readOnly.includes(name) ? '<storage, read>' : '<storage, read_write>') : ''} ${name}: ${typeForBinding};`));
 
     // `wgsl` / `uniformBuffer` / `uniformWrite` are the documented shape and keep their names. The
     // rest is internal, so it is `_`-prefixed and the minified build renames it.
@@ -1417,34 +1372,30 @@ ${structFields.join('\n')}
     // Bind groups are cached per resource-identity tuple, so a ping-pong that alternates between
     // two states builds two groups total instead of one per swap per frame.
     let bgCache = new Map();
-    let rebindResources = resourceValues => {
-      let next = { ...bound };
-      for (let [name, v] of OE(resourceValues ?? {})) {
+    let rebindResources = (resourceValues, next, key, hit) => (
+      next = { ...bound },
+      OE(resourceValues ?? {}).forEach(([name, v]) => (
         // A typo'd name used to vanish in silence — the resource twin of the unknown-uniform trap.
-        if (!(name in resources))
-          err(22, MSG && `Unknown resource '${name}'. Declared: ${OK(resources).join(', ') || '(none)'}.`);
-        if (!(name in rLayout)) continue;   // declared but unused by the shader — warned at build
-        next[name] = rLayout[name]._isBuf && typeof v?.b?.mapAsync === 'function' ? v.b : v;
-      }
-      if (bindGroup && bound && rFields.every(n => next[n] === bound[n])) return;
-      bound = next;
-      let key = rFields.map(n => next[n] ? idOf(next[n]) : 0).join(',');
-      let hit = bgCache.get(key);
-      if (hit) return void (bindGroup = hit);
-      if (DIAG && rFields.length > 0) validateResources(next);
-      let entries = [
-        ...(uBinding >= 0 ? [{ binding: 0, resource: { buffer: schema.uniformBuffer } }] : []),
-        ...schema._entries(next),
-      ];
-      // Reporting only, as at pipeline creation — the driver rejects a bad group regardless.
-      if (DIAG) D.pushErrorScope('validation');
-      bindGroup = S.bindGroup(pipeline, 0, entries);
-      if (DIAG) D.popErrorScope().then(err => {
-        if (err) console.error(`[TinyWebGPU] createBindGroup failed.\n${err.message}`);
-      }).catch(() => { });   // scope pop rejects if the device is lost meanwhile
-      if (bgCache.size >= 8) bgCache.delete(bgCache.keys().next().value);   // oldest out
-      bgCache.set(key, bindGroup);
-    };
+        name in resources ||
+          err(22, MSG && `Unknown resource '${name}'. Declared: ${OK(resources).join(', ') || '(none)'}.`),
+        // `name in rLayout` skips names declared but unused by the shader — warned at build.
+        name in rLayout && (next[name] = rLayout[name]._isBuf && typeof v?.b?.mapAsync === 'function' ? v.b : v))),
+      bindGroup && bound && rFields.every(n => next[n] === bound[n]) || (
+        bound = next,
+        key = rFields.map(n => next[n] ? idOf(next[n]) : 0).join(','),
+        (hit = bgCache.get(key)) ? bindGroup = hit : (
+          DIAG && rFields.length > 0 && validateResources(next),
+          // Reporting only, as at pipeline creation — the driver rejects a bad group regardless.
+          DIAG && D.pushErrorScope('validation'),
+          bindGroup = S.bindGroup(pipeline, 0, [
+            ...(uBinding >= 0 ? [{ binding: 0, resource: { buffer: schema.uniformBuffer } }] : []),
+            ...schema._entries(next),
+          ]),
+          DIAG && D.popErrorScope().then(err => {
+            if (err) console.error(`[TinyWebGPU] createBindGroup failed.\n${err.message}`);
+          }).catch(() => { }),   // scope pop rejects if the device is lost meanwhile
+          bgCache.size >= 8 && bgCache.delete(bgCache.keys().next().value),   // oldest out
+          bgCache.set(key, bindGroup))));
 
     // Nothing left for the caller to supply: build @group(0) now. Otherwise wait for
     // setResources, so the group is never built against a layout still missing entries.
