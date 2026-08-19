@@ -4,6 +4,35 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Changed — pipeline creation is synchronous; the shader and pipeline caches are gone**
+(min −626 B → 15.7 KB, tiny −592 B → 8.8 KB)
+
+Every WebGPU call on the pipeline path is synchronous by spec — `createShaderModule`,
+`createRenderPipeline`, `createComputePipeline` — and the one `await` the library had there,
+`getCompilationInfo()`, existed only to format the compile log. That log is now fire-and-forget:
+the module comes back immediately and DIAG builds report warnings and errors asynchronously
+with the same pretty source window, while a bad module also fails pipeline creation, which the
+DIAG validation scope reports — so nothing fails silently in any build. The upshot:
+`makeFrag` / `makeDraw` / `makeCompute` / `makeQuad` / `makeCompute2D` / `makeShader` / `show` /
+`generateMipmaps` all **return their result directly, not a promise** — the pipeline is usable
+on the next line, and pieces never await a factory. Only the genuinely async paths keep their
+promises: `init` (adapter/device), `loadTexture` (fetch/decode), and the readbacks
+(`.r()`, `readTexture`, `save`). Existing code that `await`s a factory keeps working — awaiting
+a non-promise is a no-op — so this is a soft break; just drop the `await`s. Error 3
+(“WGSL compilation failed”) is retired: you can no longer try/catch a bad shader at the call
+site; the failure surfaces as the pipeline-creation validation error instead.
+
+With the values no longer promises, the shader and pipeline caches earned their keep even less
+and are **removed entirely** — along with the FNV-1a hash that keyed them. The caches only ever
+deduplicated the GPU objects (the wrapper, uniform buffer and bind-group state were always
+built fresh per call), so no API semantics change: pieces that create each pipeline once at
+startup — all of them — see no difference, and a piece that generates evolving WGSL no longer
+leaks every generation's pipeline into an unbounded cache. The one internal dependant,
+`generateMipmaps`, now memoizes its blit pipeline per format itself (tracking `G.pre` by
+identity, exactly like `show()`'s blit cache). `G.pre` no longer needs to be deterministic —
+nothing keys on its output anymore; install a new function to change it rather than mutating
+one the memos captured.
+
 **Changed — repeated strings hoisted into shared constants** (min −101 B → 16.3 KB, tiny −35 B → 9.4 KB)
 
 The WGSL fragments the generated shaders repeat — `vec2<f32>`, `vec4<f32>`, `vec3<u32>`,

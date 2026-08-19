@@ -147,22 +147,22 @@ export interface TinyWebGPU {
 
   /** Initialize WebGPU. Pass a 'webgpu' context, a canvas, a CSS selector — or nothing for compute-only. */
   init(ctx?: GPUCanvasContext | HTMLCanvasElement | OffscreenCanvas | string | None, opts?: InitOptions): Promise<TinyWebGPU>;
-  /** Destroy the device, pooled resources and caches. The instance is not reusable afterwards. */
+  /** Destroy the device, pooled resources and memos. The instance is not reusable afterwards. */
   destroy(): void;
 
   // ─── Pipelines ────────────────────────────────────────────────────────────────────────────
   /** Fullscreen pipeline from `fn frag(uv: vec2<f32>) -> vec4<f32>`; the vertex stage is generated. */
-  makeFrag(frag: string, uniforms?: UniformSchema, resources?: ResourceSchema, opts?: MakeFragOptions): Promise<RenderPipeline>;
+  makeFrag(frag: string, uniforms?: UniformSchema, resources?: ResourceSchema, opts?: MakeFragOptions): RenderPipeline;
   /** Render pipeline with your own vertex stage. No vertex buffers — pull from storage buffers. */
-  makeDraw(opts: MakeDrawOptions): Promise<RenderPipeline>;
+  makeDraw(opts: MakeDrawOptions): RenderPipeline;
   /** Compute pipeline: `body` = declarations, `main` = entry-point statements (gid/lid/wid in scope). */
   makeCompute(body: string, main: string, uniforms?: UniformSchema, resources?: ResourceSchema,
-    opts?: { wg?: number[] }): Promise<ComputePipeline>;
+    opts?: { wg?: number[] }): ComputePipeline;
   /** makeFrag plus `run(uniforms?, view?)`. All makeFrag options pass through. */
-  makeQuad(opts: { frag: string; uniforms?: UniformSchema; resources?: ResourceSchema; clear?: Clear } & MakeFragOptions): Promise<QuadPipeline>;
+  makeQuad(opts: { frag: string; uniforms?: UniformSchema; resources?: ResourceSchema; clear?: Clear } & MakeFragOptions): QuadPipeline;
   /** makeCompute with a default grid size, so `run()` with no arguments covers it. */
   makeCompute2D(opts: { body: string; decls?: string; uniforms?: UniformSchema; resources?: ResourceSchema;
-    size?: number[]; wg?: number[] }): Promise<ComputePipeline>;
+    size?: number[]; wg?: number[] }): ComputePipeline;
 
   // ─── Frame API ────────────────────────────────────────────────────────────────────────────
   /** One encoder + one swapchain view for the whole frame; endFrame() is the single submit. */
@@ -207,7 +207,7 @@ export interface TinyWebGPU {
   readTexture(tex: GPUTexture, opts?: { x?: number; y?: number; width?: number; height?: number;
     mipLevel?: number; Ctor?: TypedArrayCtor }): Promise<any>;
   /** Fill the smaller mip levels from level 0 by linear-filtered blits. */
-  generateMipmaps(tex: GPUTexture): Promise<GPUTexture>;
+  generateMipmaps(tex: GPUTexture): GPUTexture;
 
   // ─── Ping-pong ────────────────────────────────────────────────────────────────────────────
   pingPong<T>(make: () => T): PingPong<T>;
@@ -220,14 +220,14 @@ export interface TinyWebGPU {
     { width: number; height: number; changed: boolean };
   /** Draw a texture onto a target (textureLoad — unfilterable formats work). */
   show(tex: GPUTexture, view?: GPUTextureView | GPUTexture, opts?: { format?: GPUTextureFormat;
-    scale?: number[]; offset?: number[]; clear?: Clear; flipY?: boolean }): Promise<RenderPipeline>;
+    scale?: number[]; offset?: number[]; clear?: Clear; flipY?: boolean }): RenderPipeline;
   /** Download a texture as an image file; returns the Blob. 8-bit RGBA/BGRA only. */
   save(tex: GPUTexture, filename?: string, opts?: { type?: string; quality?: number; download?: boolean;
     x?: number; y?: number; width?: number; height?: number; mipLevel?: number }): Promise<Blob>;
 
   // ─── Escape hatches ───────────────────────────────────────────────────────────────────────
-  /** Compile a WGSL module, cached, applying G.pre. */
-  makeShader(code: string, applyPre?: boolean): Promise<GPUShaderModule>;
+  /** Compile a WGSL module, applying G.pre. Diagnostics are reported asynchronously. */
+  makeShader(code: string, applyPre?: boolean): GPUShaderModule;
   bindGroup(pipeline: GPURenderPipeline | GPUComputePipeline, groupIndex: number,
     entries: GPUBindGroupEntry[]): GPUBindGroup;
   /** The schema engine itself; the result carries `wgsl`, `uniformBuffer`, `uniformWrite`. */

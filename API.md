@@ -35,7 +35,7 @@ Requesting a feature makes it *available* — the library doesn't build anything
 
 ### `G.destroy()`
 Tears the instance down: destroys the device and every pooled GPU resource (staging ring,
-readback pool, depth textures) and empties the caches. For SPA teardown, hot-reload dev servers
+readback pool, depth textures) and empties the memos. For SPA teardown, hot-reload dev servers
 and live-coding pages — the environments that otherwise leak a device per reload. Intentional
 destruction does not fire `onDeviceLost`. The instance is not reusable afterwards.
 
@@ -46,12 +46,15 @@ The `GPU*` names come from TypeScript's own `lib.dom`; on an older TS add `@webg
 
 ### `G.debug = true|false` (default false)
 Enables uniform-write warnings (width overflow, non-integer into int fields). WGSL compile
-checking is always on: errors throw with a pretty source-window log, warnings are logged.
+reporting is always on in the source build: errors and warnings are logged asynchronously with
+a pretty source-window log, and a bad module also fails pipeline creation (reported through the
+validation scope), so nothing fails silently.
 
 ### `G.pre = 0 | (src: string) => string` (default 0)
-Optional WGSL preprocessing hook, applied in `makeShader` before hashing/compiling. Any falsy
-value (the default is `0`) means user WGSL is never rewritten. Must be deterministic — the
-shader cache keys on the post-`pre` source. See “WGSL preprocessing” below for the stock
+Optional WGSL preprocessing hook, applied in `makeShader` before compiling. Any falsy
+value (the default is `0`) means user WGSL is never rewritten. `show()` and `generateMipmaps`
+memoize their blit pipelines per `pre` (compared by identity), so swap in a new function
+rather than mutating one they captured. See “WGSL preprocessing” below for the stock
 token expander.
 
 ### `G.onDeviceLost = 0 | (info: GPUDeviceLostInfo) => void` (default 0)
@@ -61,7 +64,7 @@ loss; set this to rebuild/recover. Uncaptured WebGPU errors are also logged with
 
 ## Pipelines (the main API)
 
-### `await G.makeFrag(fragWGSL, uniforms?, resources?, { format?, blend?, targets?, depth? })`
+### `G.makeFrag(fragWGSL, uniforms?, resources?, { format?, blend?, targets?, depth? })`
 Fullscreen pipeline. You provide a WGSL function `fn frag(uv: vec2<f32>) -> vec4<f32>`; the
 toolkit generates the vertex shader (single fullscreen triangle) and the `fs_main` wrapper.
 Only the uniforms you declare exist — nothing is auto-added.
@@ -78,7 +81,7 @@ texture in a different format, or the pipeline won't match the attachment.
 | `'additive'` | Glows, accumulation, light stacking. |
 
 ```js
-const overlay = await G.makeFrag(frag, {}, {}, { blend: 'alpha' });
+const overlay = G.makeFrag(frag, {}, {}, { blend: 'alpha' });
 overlay.drawTo(view, 'load');        // 'load' keeps what's underneath
 ```
 
@@ -87,7 +90,7 @@ overlay.drawTo(view, 'load');        // 'load' keeps what's underneath
 returns `FSOut` instead of `vec4<f32>`, and `drawTo` takes an object keyed the same way:
 
 ```js
-const gbuf = await G.makeFrag(`
+const gbuf = G.makeFrag(`
     fn frag(uv: vec2<f32>) -> FSOut {
       var o: FSOut;
       o.colour = vec4<f32>(uv, 0.0, 1.0);
@@ -105,11 +108,11 @@ attachments must share width/height/sampleCount, and the device caps both the nu
 (`maxColorAttachmentBytesPerSample`, often 32 — two `rgba32float` targets and you are at the
 ceiling).
 
-### `await G.makeDraw({ code, uniforms?, resources?, readOnly?, count?, instances?, topology?, format?, blend?, targets?, depth? })`
+### `G.makeDraw({ code, uniforms?, resources?, readOnly?, count?, instances?, topology?, format?, blend?, targets?, depth? })`
 Render pipeline with **your own vertex stage**. `code` is complete WGSL — both
 `@vertex fn vs_main` and `@fragment fn fs_main` — and the only thing prepended is the schema
 (the `UB` struct and the `@group`/`@binding` declarations), exactly as for compute. You keep the
-dual schema, `drawTo`, the frame API and the pipeline cache. `makeFrag` is this call with the
+dual schema, `drawTo` and the frame API. `makeFrag` is this call with the
 fullscreen vertex stage filled in.
 
 | Option | Default | Notes |
@@ -117,8 +120,8 @@ fullscreen vertex stage filled in.
 | `readOnly: string[]` | `[]` | Resources bound `var<storage, read>` instead of `read_write`. **Required for anything the vertex stage reads** — see below. |
 | `count` | `3` | Vertices per instance, passed to `draw()`. |
 | `instances` | `1` | Instance count. |
-| `topology` | `'triangle-list'` | Any `GPUPrimitiveTopology`: `'triangle-strip'`, `'line-list'`, `'line-strip'`, `'point-list'`. Part of the pipeline cache key. |
-| `depth` | off | `true` for depth testing with the defaults (`depth24plus`, `less`, writes on, an auto-managed depth texture), or `{format?, compare?, write?, texture?}` to override. Part of the pipeline cache key. See below. |
+| `topology` | `'triangle-list'` | Any `GPUPrimitiveTopology`: `'triangle-strip'`, `'line-list'`, `'line-strip'`, `'point-list'`. |
+| `depth` | off | `true` for depth testing with the defaults (`depth24plus`, `less`, writes on, an auto-managed depth texture), or `{format?, compare?, write?, texture?}` to override. See below. |
 | `format`, `blend`, `targets` | — | Exactly as `makeFrag`. |
 
 `count` and `instances` are also plain properties on the result, so a per-frame count
@@ -135,7 +138,7 @@ emits by default. Omit it and pipeline creation fails with a bind-group layout e
 not point back here. Resources only the fragment stage touches need nothing.
 
 ```js
-const p = await G.makeDraw({
+const p = G.makeDraw({
   code: vsAndFsWGSL,
   uniforms: { size: 'f32' }, resources: { parts: 'array<vec4<f32>>' },
   readOnly: ['parts'],
@@ -156,7 +159,7 @@ auto-managed texture needs the target's size, which the library knows for the ca
 `GPUTexture` passed to `drawTo`; handing `drawTo` a raw `GPUTextureView` it has never seen makes
 it throw and ask for a texture or `depth.texture`.
 
-### `await G.makeCompute(bodyWGSL, mainWGSL, uniforms?, resources?, { wg = [8,8,1] })`
+### `G.makeCompute(bodyWGSL, mainWGSL, uniforms?, resources?, { wg = [8,8,1] })`
 Compute pipeline. `bodyWGSL` = declarations (functions, structs); `mainWGSL` = statements placed
 inside the generated entry point, which receives `gid` (global), `lid` (local), `wid`
 (workgroup) invocation ids. `wg` is the `@workgroup_size`; missing axes default to 1, so
@@ -205,12 +208,12 @@ Render-only:
 | `p.count` / `p.instances` | Vertices per instance and instance count, writable. `3` / `1` for `makeFrag`. Change either per frame without rebuilding the pipeline. |
 
 ### One-liners
-- `await G.makeQuad({ frag, uniforms, resources, clear, ...makeFragOpts })` → pipeline + `run(u?, view?)`.
+- `G.makeQuad({ frag, uniforms, resources, clear, ...makeFragOpts })` → pipeline + `run(u?, view?)`.
   Every `makeFrag` option (`format`, `blend`, `targets`, `depth`) passes through.
-- `await G.makeCompute2D({ body, decls, uniforms, resources, size, wg })` → `makeCompute` with a default
+- `G.makeCompute2D({ body, decls, uniforms, resources, size, wg })` → `makeCompute` with a default
   `size`, so `run()` with no arguments covers the whole grid. `body` is the entry-point statements;
   `decls` is for helper functions and structs.
-- `await G.show(tex, view?, opts?)` → draws a texture onto a target. `view` defaults to the canvas
+- `G.show(tex, view?, opts?)` → draws a texture onto a target. `view` defaults to the canvas
   and accepts a `GPUTexture` or a view. Reads with `textureLoad`, **not** a sampler, so
   unfilterable formats (`rgba32float`, the integer formats) work — at the cost of no filtering.
   The source's first row lands on the target's first row, so images are the right way up and
@@ -293,7 +296,7 @@ holding someone else's pipeline.
 | `G.createPingPongTexture(w, h, format='rgba16float', usage?)` | `{ read, write, swap() }` | The texture flavour; both halves come from `createStorageTexture`. Pass `usage` to add `RENDER_ATTACHMENT` for render-target ping-pong. |
 | `G.pingPong(make)` | `{ read, write, swap() }` | The general form — calls `make()` twice. |
 | `G.createTexture(w, h, format='rgba8unorm', usage \| {usage, mips}?)` | `GPUTexture` | render target / sampled. Default usage is RENDER_ATTACHMENT \| TEXTURE_BINDING \| COPY_SRC \| COPY_DST, so uploads work without opting in. `mips: true` allocates the full mip chain (a number allocates that many levels) — fill it with `generateMipmaps`. |
-| `await G.generateMipmaps(tex)` | `Promise<GPUTexture>` | Fills the smaller mip levels from level 0 by successive linear-filtered blits. Needs TEXTURE_BINDING + RENDER_ATTACHMENT (the defaults) and a filterable, renderable format. Call after `writeTexture`, or whenever level 0 changed. |
+| `G.generateMipmaps(tex)` | `GPUTexture` | Fills the smaller mip levels from level 0 by successive linear-filtered blits. Needs TEXTURE_BINDING + RENDER_ATTACHMENT (the defaults) and a filterable, renderable format. Call after `writeTexture`, or whenever level 0 changed. |
 | `G.createStorageTexture(w, h, format='rgba32float', usage?)` | `GPUTexture` | `textureStore`/`textureLoad`. Default usage is TEXTURE_BINDING \| STORAGE_BINDING \| COPY_SRC \| COPY_DST. |
 | `G.createSampler({ magFilter, minFilter, wrapU, wrapV, wrapW, ...rest })` | `GPUSampler` | defaults nearest/clamp. `wrapU/V/W` map to `addressModeU/V/W`; anything else (`mipmapFilter`, `compare`, `maxAnisotropy`, lod clamps) passes straight through. |
 | `G.writeTexture(tex, data, { width?, height?, x?, y?, bytesPerRow?, mipLevel? })` | `GPUTexture` | Raw pixel bytes in (LUTs, generated data). `width`/`height` default to the whole texture; `bytesPerRow` is derived from the format unless you pass it. Needs COPY_DST. |
@@ -304,7 +307,7 @@ holding someone else's pipeline.
 
 ## Lower-level escape hatches
 
-`G.makeShader(code)` (returns a cached promise of the compiled module; applies `G.pre`),
+`G.makeShader(code)` (compiles and returns the module synchronously; applies `G.pre`),
 `G.bindGroup(pipeline, groupIndex, entries)`,
 `G.makeSchema(uniforms, resources, opts?)` (the schema engine itself; its result carries `wgsl`,
 `uniformBuffer` and `uniformWrite`, plus `_`-prefixed internals the minified build renames).
@@ -313,7 +316,7 @@ For anything lower than that, `G.device` is the raw `GPUDevice`.
 ## WGSL preprocessing
 
 The core does **no rewriting by default**. `G.pre` is an optional `(src) => src` hook applied
-before compile/caching. The token expander is a separate optional module
+before compiling. The token expander is a separate optional module
 `wgsl_shorthand.js`:
 
 ```js
@@ -338,8 +341,8 @@ that reason.
 | File | Size | What it is |
 |---|---|---|
 | `tinywebgpu.js` | 91 KB | the source, with comments and every diagnostic. `main`/`exports` point here. |
-| `tinywebgpu.min.js` | 17.8 KB (8.2 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
-| `tinywebgpu.tiny.js` | 10.4 KB (5.2 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
+| `tinywebgpu.min.js` | 15.7 KB (7.7 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
+| `tinywebgpu.tiny.js` | 8.8 KB (4.6 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
 
 `build:tiny` drops `writeTexture`, `loadTexture`, `readTexture`, buffer `.r()`, `save`, `show`,
 the ping-pong helpers, `resizeCanvas`, depth support, mipmaps, the staging ring (in-frame writes become plain queue writes — last value per frame wins), the long aliases, and the named blend presets. Tiny builds also pack repeated WebGPU member names into a string table (`--no-pack` to skip). Keep any of them with

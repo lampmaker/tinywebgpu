@@ -153,8 +153,7 @@ export let WEBGPU = () => {
     fPass = 0,                 // the open chained compute pass, if beginCompute() opened one
     fPassOpts = 0,             // that pass's descriptor, so a mid-chain reopen keeps e.g. timestampWrites
     fOwned = false,            // the encoder came from beginCompute(), so endCompute() submits it
-    fBound = 0,                // the bind fn of the pipeline currently bound to fPass
-    shaderCache = new Map(), pipelineCache = new Map();
+    fBound = 0;                // the bind fn of the pipeline currently bound to fPass
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   // PUBLIC API
@@ -166,8 +165,9 @@ export let WEBGPU = () => {
     context: 0, format: 0, features: 0,
 
     debug: false,                // extra per-uniform warnings; DIAG builds only
-    // Optional WGSL preprocessing hook, `(src: string) => string`, applied before hashing and
-    // compiling. Must be deterministic — the shader and pipeline caches key on its output.
+    // Optional WGSL preprocessing hook, `(src: string) => string`, applied before compiling.
+    // show() and generateMipmaps memoize their pipelines per `pre` (compared by identity), so
+    // swap in a new function to change behaviour rather than mutating one they captured.
     // For token shorthands see the companion module wgsl_shorthand.js.
     pre: 0,
     // Called with the GPUDeviceLostInfo on a context crash, driver reset or tab backgrounding.
@@ -244,7 +244,7 @@ export let WEBGPU = () => {
       F_READ && (stagingPool.forEach(l => l.forEach(b => b.destroy())), stagingPool.clear()),
       F_DEPTH && (depthCache.forEach(t => t.destroy()), depthCache.clear()),
       F_SHOW && blitCache.clear(),
-      shaderCache.clear(), pipelineCache.clear(),
+      F_MIPS && mipCache.clear(),
       D && D.destroy(),   // `&&`, not `?.` — the empty value is 0, which `?.` would try to call through
       D = 0),
 
@@ -272,7 +272,7 @@ export let WEBGPU = () => {
          * @param {{format?: string|string[], blend?: string|GPUBlendState, targets?: Object}} [opts]
          *   `blend`: 'alpha' | 'premultiplied' | 'additive' or a raw GPUBlendState; omitted = opaque.
          *   `targets`: {name: format} for multiple render targets, drawn with `drawTo({name: view})`.
-         * @returns {Promise<RenderPipeline>}
+         * @returns {RenderPipeline}
          */
     makeFrag: (frag, uniforms, resources, opts = {}) =>
       // The fullscreen triangle and the wrapper that hands `frag` its uv. Everything else — the
@@ -307,7 +307,7 @@ ${frag}
      *   readOnly?: string[], count?: number, instances?: number, topology?: string,
      *   format?: string|string[], blend?: string|GPUBlendState, targets?: Object,
      *   depth?: boolean|Object}} opts
-     * @returns {Promise<RenderPipeline>}
+     * @returns {RenderPipeline}
      */
     // `targets` is {name: format}; the matching `struct FSOut { … }` is generated here so the
     // @location indices — the part that is easy to get wrong by hand — follow the key order.
@@ -329,7 +329,7 @@ ${frag}
      * @param {string} body @param {string} main
      * @param {UniformSchema} [uniforms] @param {ResourceSchema} [resources]
      * @param {{wg?: number[]}} [opts] workgroup size, default [8,8,1]
-     * @returns {Promise<ComputePipeline>}
+     * @returns {ComputePipeline}
      */
     makeCompute: (body, main, uniforms, resources, { wg = [8, 8, 1] } = {}) => (
       // Missing axes default to 1 — `wg: [64]` used to interpolate `undefined` into the WGSL.
@@ -348,22 +348,24 @@ ${main}
     /**
      * `makeFrag` plus a `run(uniformValues?, view?)` that uploads and draws in one call.
      * Besides `clear`, every makeFrag option (format, blend, targets, depth) passes through.
-     * @returns {Promise<RenderPipeline & {run: (u?: Object, view?: GPUTextureView) => void}>}
+     * @returns {RenderPipeline & {run: (u?: Object, view?: GPUTextureView) => void}}
      */
-    makeQuad: ({ frag, uniforms, resources, clear, ...opts }) =>
-      S.makeFrag(frag, uniforms, resources, opts).then(p =>
-        OA(p, { run: (u = {}, view = targetView()) => (u && OK(u).length && (p.uniforms = u), p.drawTo(view, clear)) })),
+    // `p` is a trailing-parameter local holding the pipeline the run() closure captures.
+    makeQuad: ({ frag, uniforms, resources, clear, ...opts }, p) => (
+      p = S.makeFrag(frag, uniforms, resources, opts),
+      OA(p, { run: (u = {}, view = targetView()) => (u && OK(u).length && (p.uniforms = u), p.drawTo(view, clear)) })),
 
     /**
      * `makeCompute` with a default `size`, so `run()` with no arguments covers the whole grid.
      * `body` is the entry-point statements; `decls` is for helper functions and structs. Bounds-
      * check the tail with `if (gid.x >= n) { return; }` when the size is not a multiple of `wg`.
-     * @returns {Promise<ComputePipeline & {run: (w?: number, h?: number, d?: number) => void}>}
+     * @returns {ComputePipeline & {run: (w?: number, h?: number, d?: number) => void}}
      */
-    // The .then callback's `run` parameter is a local capturing p.run before OA overwrites it.
-    makeCompute2D: ({ body, decls = '', uniforms, resources, size = [1, 1], wg }) =>
-      S.makeCompute(decls, body, uniforms, resources, { wg }).then((p, run = p.run) =>
-        OA(p, { run: (w = size[0], h = size[1], d = 1, encoder) => run(w, h, d, encoder) })),
+    // `p` and `run` are trailing-parameter locals; `run` captures p.run before OA overwrites it.
+    makeCompute2D: ({ body, decls = '', uniforms, resources, size = [1, 1], wg }, p, run) => (
+      p = S.makeCompute(decls, body, uniforms, resources, { wg }),
+      run = p.run,
+      OA(p, { run: (w = size[0], h = size[1], d = 1, encoder) => run(w, h, d, encoder) })),
 
 
 
@@ -563,7 +565,7 @@ ${main}
           sz(w, h)),
         // ImageBitmaps we created ourselves are ours to release; caller-owned sources are not.
         source !== src && typeof source.close === 'function' && source.close(),
-        F_MIPS && opts.mips && await S.generateMipmaps(tex),
+        F_MIPS && opts.mips && S.generateMipmaps(tex),
         tex),
     } : {}),
 
@@ -604,12 +606,19 @@ ${main}
        * Needs TEXTURE_BINDING and RENDER_ATTACHMENT (createTexture's defaults) and a filterable,
        * renderable format. `createTexture(w, h, fmt, { mips: true })` allocates the chain;
        * `loadTexture(src, { mips: true })` does both steps in one call.
-       * @param {GPUTexture} tex @returns {Promise<GPUTexture>} the same texture
+       * @param {GPUTexture} tex @returns {GPUTexture} the same texture
        */
-      generateMipmaps: async tex => {
-        let p = await S.makeFrag(
-          `fn frag(uv: ${V2}) -> ${V4} { return textureSample(src, samp, ${V2}(uv.x, 1.0 - uv.y)); }`,
-          {}, { src: 'texture_2d<f32>', samp: 'sampler' }, { format: tex.format });
+      generateMipmaps: tex => {
+        // The blit pipeline is memoized per format, like show()'s blitCache — and like there,
+        // `pre` is compared too, so an entry never outlives the hook it was compiled under.
+        let entry = mipCache.get(tex.format);
+        (!entry || entry.pre !== S.pre) && mipCache.set(tex.format, entry = {
+          pre: S.pre,
+          p: S.makeFrag(
+            `fn frag(uv: ${V2}) -> ${V4} { return textureSample(src, samp, ${V2}(uv.x, 1.0 - uv.y)); }`,
+            {}, { src: 'texture_2d<f32>', samp: 'sampler' }, { format: tex.format }),
+        });
+        let p = entry.p;
         mipSamp ||= S.createSampler({ magFilter: 'linear', minFilter: 'linear' });
         // One frame → one submit for the whole chain, unless the caller already has one open.
         let own = !fEnc, mip = l => tex.createView({ baseMipLevel: l, mipLevelCount: 1 });
@@ -713,29 +722,27 @@ ${main}
        * @param {{format?: string, scale?: number[], offset?: number[], clear?: number[]|'load', flipY?: boolean}} [opts]
        *   `scale`/`offset` are per-channel, `value * scale + offset` — enough to look at an HDR or
        *   signed buffer without writing a shader. `flipY` for a bottom-up source.
-       * @returns {Promise<RenderPipeline>} the blit pipeline, in case you want to keep drawing with it
+       * @returns {RenderPipeline} the blit pipeline, in case you want to keep drawing with it
        */
       // A GPUTexture target knows its own format; a raw view or the canvas default does not.
       // The generated uv has 0 at the *bottom* of the target, so by default the blit inverts y
       // to put the source's first row on the target's first row — images stay upright and
       // show/readTexture round-trips. Writing this blit by hand without the flip is what turns
       // your image over.
-      show: async (tex, view, opts = {}, format = opts.format ?? view?.format ?? S.format, sample, key, entry, p) => (
+      show: (tex, view, opts = {}, format = opts.format ?? view?.format ?? S.format, sample, key, entry, p) => (
         sample = /uint$/.test(tex.format) ? 'u32' : /sint$/.test(tex.format) ? 'i32' : 'f32',
         key = `${format}|${sample}|${opts.flipY ? 1 : 0}`,
         entry = blitCache.get(key),
         // `pre` is compared too: a different G.pre means different generated WGSL, and the entry
-        // must not outlive the hook it was compiled under. The promise is cached, like
-        // shaderCache, so two concurrent first calls share a compile.
+        // must not outlive the hook it was compiled under.
         (!entry || entry.pre !== S.pre) && (
           p = S.makeFrag(`fn frag(uv: ${V2}) -> ${V4} {
     let d = ${V2}(textureDimensions(src));
     let c = vec2<i32>(clamp(${V2}(uv.x, ${opts.flipY ? 'uv.y' : '1.0 - uv.y'}) * d, ${V2}(0.0), d - 1.0));
     return ${V4}(textureLoad(src, c, 0)) * UB.scale + UB.offset;
   }`, { scale: V4, offset: V4 }, { src: `texture_2d<${sample}>` }, { format }),
-          p.catch(() => blitCache.delete(key)),
           blitCache.set(key, entry = { pre: S.pre, p })),
-        p = await entry.p,
+        p = entry.p,
         p.setResources({ src: tex }),
         p.setUniforms({ scale: opts.scale ?? [1, 1, 1, 1], offset: opts.offset ?? [0, 0, 0, 0] }),
         p.drawTo(view, opts.clear),   // undefined falls back to drawTo's own [0,0,0,1]
@@ -798,19 +805,15 @@ ${main}
                                                                                      
      */
     /**
-     * Compiles a WGSL shader module, cached, applying `G.pre`. Compile errors throw with a pretty
-     * source-window log; warnings are logged. `applyPre` is false when the caller already ran
-     * `G.pre` — makePipeline does, so its cache key is computed on the post-pre source.
-     * @param {string} code @returns {Promise<GPUShaderModule>}
+     * Compiles a WGSL shader module, applying `G.pre`. The module comes back synchronously;
+     * DIAG builds report compile warnings and errors asynchronously with a pretty source-window
+     * log, and a bad module also fails pipeline creation, so errors stay loud in every build.
+     * `applyPre` is false when the caller already ran `G.pre` — makePipeline does.
+     * @param {string} code @returns {GPUShaderModule}
      */
-    makeShader: (code, applyPre = true, key, promise) => (
+    makeShader: (code, applyPre = true) => (
       applyPre && S.pre && (code = S.pre(code)),
-      key = ckey(code),
-      (promise = shaderCache.get(key)) || (
-        // the promise (not the module) is cached, so concurrent calls share one compile
-        shaderCache.set(key, promise = compileShader(code, key)),
-        promise.catch(() => shaderCache.delete(key))),
-      promise),
+      compileShader(code)),
     // entries: [{ binding:0, resource:{ buffer } }, { binding:1, resource: textureView }, ...]
     bindGroup: (pipeline, groupIndex, entries) =>
       D.createBindGroup({ layout: pipeline.getBindGroupLayout(groupIndex), entries }),
@@ -980,22 +983,15 @@ ${main}
     size: sz(width, height), format, mipLevelCount: mips, sampleCount: 1, usage,
     ...(DIAG && { label: `${label} ${width}x${height} ${format}` })
   });
-  // Levels in a full mip chain, and the linear sampler generateMipmaps reuses across calls.
+  // Levels in a full mip chain, and the sampler + per-format blit pipelines generateMipmaps
+  // reuses across calls.
   let mipCount = (w, h) => 32 - Math.clz32(Math.max(w, h));
-  let mipSamp = 0;
+  let mipSamp = 0, mipCache = F_MIPS ? new Map() : 0;
 
   // A stable small integer per GPU object, for building bind-group cache keys out of resource
   // identities. WeakMap-backed, so it holds nothing alive.
   let rids = new WeakMap(), ridN = 0;
   let idOf = o => rids.get(o) ?? (rids.set(o, ++ridN), ridN);
-
-  // FNV-1a, for cache keys. ckey appends the length, which guards against 32-bit collisions.
-  let hash = s => {
-    let h = 2166136261 >>> 0;
-    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
-    return (h >>> 0).toString(16);
-  };
-  let ckey = s => hash(s) + ':' + s.length;
 
   // The default view of a texture, memoized — bind groups are rebuilt often and a fresh
   // createView() per rebind is pure garbage. The view's size is recorded on the way through, so
@@ -1085,15 +1081,17 @@ ${main}
     !blend || typeof blend !== STR ? blend || 0
       : BLENDS[blend] ?? err(4, MSG && `Unknown blend preset '${blend}'. Use ${OK(BLENDS).map(k => `'${k}'`).join(', ')} or a GPUBlendState object.`);
 
-  let compileShader = async (code, label, module, msgs, hasError) => (
+  // Synchronous by design: createShaderModule hands the module back immediately, and the pretty
+  // compile log is fire-and-forget — getCompilationInfo() resolves later and only *reports*.
+  // A bad module also fails pipeline creation, which is where errors stay loud in every build:
+  // DIAG through its validation scope, stripped builds through the driver. DIAG guards the whole
+  // chain, so stripped builds never even request the info (and never await anything).
+  let compileShader = (code, module) => (
     SHORTHAND && (code = SHORTHAND(code)),   // builds with a token table expand it here
-    module = D.createShaderModule({ code, ...(DIAG && { label: `shader ${label ?? ''}` }) }),
-    msgs = (await module.getCompilationInfo()).messages.filter(m => m.message && m.type !== 'info'),
-    hasError = msgs.some(m => m.type === 'error'),
-    // DIAG is folded to false in the minified build, which removes this whole formatter (an
-    // IIFE, so its loops can sit in expression position). The throw below stays outside it on
-    // purpose — errors stay loud in every build.
-    DIAG && msgs.length && (() => {
+    module = D.createShaderModule({ code, ...(DIAG && { label: 'shader' }) }),
+    DIAG && module.getCompilationInfo().then(({ messages }) => {
+      let msgs = messages.filter(m => m.message && m.type !== 'info');
+      if (!msgs.length) return;
       let L = code.split('\n');
       let log = '\n=== WGSL Compile Log ===\n';
       for (let m of msgs) {
@@ -1106,9 +1104,8 @@ ${main}
           if (n === ln) log += `     | ${' '.repeat(Math.max(0, col - 1))}^\n`;
         }
       }
-      (hasError ? console.error : console.warn)(log);
-    })(),
-    hasError && err(3, MSG && 'WGSL compilation failed.'),
+      (msgs.some(m => m.type === 'error') ? console.error : console.warn)(log);
+    }),
     module);
 
   // `layout: 'auto'` derives the bind group layout from what the shader actually references.
@@ -1261,10 +1258,12 @@ ${structFields.join('\n')}
   };
 
   // ─── Pipeline factory ──────────────────────────────────────────────────────────────────────
-  // The engine behind makeFrag / makeDraw / makeCompute: generate the schema WGSL, compile and
-  // cache the pipeline, and hand back the object those three return.
+  // The engine behind makeFrag / makeDraw / makeCompute: generate the schema WGSL, compile the
+  // pipeline, and hand back the object those three return. Synchronous throughout — every
+  // WebGPU call on this path is synchronous by spec (see compileShader above), so the pipeline
+  // is usable on the next line and pieces never await a factory.
   // `wg` has no default: makeCompute always normalizes and passes it, and render never reads it.
-  let makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format,
+  let makePipeline = ({ code, uniforms = {}, resources = {}, format = S.format,
     isCompute = false, blend, wg, targetNames,
     topology = 'triangle-list', count = 3, instances = 1, readOnly = [], depth }) => {
     // The resolved depth config: defaults, overridable field by field. `texture` is the caller's
@@ -1295,39 +1294,18 @@ ${structFields.join('\n')}
     // both faster and — since the minifier renames it — a great deal shorter than the path.
     let { _resourceFields: rFields, _resourceLayout: rLayout, _uniformBinding: uBinding, uniformWrite: uWrite } = schema;
 
-    // Prepend the schema WGSL, then run the G.pre hook once, here — the pipeline cache keys on the
-    // result, so switching G.pre can't hand back a stale pipeline.
+    // Prepend the schema WGSL, then run the G.pre hook once, here, on the complete source.
     let preCode = schema.wgsl ? `${schema.wgsl}\n${code}` : code;
     let finalCode = S.pre ? S.pre(preCode) : preCode;
 
-    // Blend and depth are part of the render key: identical WGSL with a different blend or depth
-    // state is a different pipeline, and omitting them here would hand back the wrong one.
-    // (`dep.texture` is an attachment, not pipeline state, so it stays out of the key.)
-    let blendKey = isCompute || !blend ? '' : (typeof blend === STR ? blend : JSON.stringify(blend)) + '|';
-    let depthKey = F_DEPTH && dep ? `D${dep.format},${dep.compare},${dep.write}|` : '';
-    let cacheKey = (isCompute ? `C|` : `R|${[format].flat().join(',')}|${blendKey}${depthKey}${topology}|`) + ckey(finalCode);
-    // The *promise* is cached, like shaderCache — two concurrent builds of the same source share
-    // one pipeline instead of both missing and creating duplicates.
-    let pending = pipelineCache.get(cacheKey);
-    if (!pending) {
-      pending = S.makeShader(finalCode, false).then(module => {   // S.pre already applied above
-        // The error scope is purely for reporting: WebGPU rejects a bad pipeline either way, and
-        // without DIAG the driver's own message is the one that surfaces.
-        if (DIAG) D.pushErrorScope('validation');
-        let pl = isCompute ? rawCompute(module) : rawRender(module, format, topology, blend, dep);
-        if (DIAG) D.popErrorScope().then(err => {
-          if (!err) return;
-          // Evict, or the next build of the same source would reuse the broken pipeline and,
-          // having skipped this branch entirely, report nothing at all.
-          pipelineCache.delete(cacheKey);
-          console.error(`[TinyWebGPU] Pipeline creation failed (${cacheKey}):\n${err.message}`);
-        }).catch(() => { });   // scope pop rejects if the device is lost meanwhile
-        return pl;
-      });
-      pending.catch(() => pipelineCache.delete(cacheKey));
-      pipelineCache.set(cacheKey, pending);
-    }
-    let pipeline = await pending;
+    // The error scope is purely for reporting: WebGPU rejects a bad pipeline either way, and
+    // without DIAG the driver's own message is the one that surfaces.
+    if (DIAG) D.pushErrorScope('validation');
+    let module = S.makeShader(finalCode, false);   // S.pre already applied above
+    let pipeline = isCompute ? rawCompute(module) : rawRender(module, format, topology, blend, dep);
+    if (DIAG) D.popErrorScope().then(err => {
+      err && console.error(`[TinyWebGPU] Pipeline creation failed:\n${err.message}`);
+    }).catch(() => { });   // scope pop rejects if the device is lost meanwhile
 
     let bindGroup = 0, bound = 0;   // `bound` = the resource map the current group was built from
 
