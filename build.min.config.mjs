@@ -15,9 +15,16 @@ export default {
   iife: false,         // false = ESM export; true = classic <script> assigning globalThis.WEBGPU
 
   // The name-table rewrite only pays in raw bytes, and this build is HTTP-delivered (gzipped),
-  // so it stays off. packComment appends a /*pack:$a=…*/ legend when pack is on.
+  // so it stays off. packComment appends a /*pack:$a=…*/ legend when pack is on, and packNames
+  // picks mnemonic codes for chosen names ({ createRenderPipeline: 'cRP' }).
   pack: false,
   packComment: false,
+  packNames: {},
+
+  // Renaming the library's own API (see RENAMES in build.tiny.config.mjs) is for private piece
+  // builds; this build is the public library, so its API stays put.
+  rename: false,
+  renames: {},
 
   // Escape the newlines inside template literals after minifying, so the file is one line.
   singleLine: true,

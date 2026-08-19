@@ -33,8 +33,14 @@
 //      seam in the source for an expander that runs on every shader at compile time, then
 //      compresses the library's own WGSL template literals to the same tokens.
 //   6. `pack` rewrites repeated long WebGPU member names to bracket reads from one packed
-//      string table; `packComment` appends a legend naming them.
-//   7. `singleLine` escapes the raw newlines esbuild leaves inside template literals, so the
+//      string table (`packNames` picks mnemonic codes, e.g. cRP for createRenderPipeline);
+//      `packComment` appends a legend naming them. Platform names can only be aliased this
+//      way — the browser owns them.
+//   7. `rename` (config table / --rename) truly renames the library's *own* API via esbuild's
+//      mangleCache — setResources → sR, resources → rS — so a piece built against it saves the
+//      bytes on both sides of every call. The build ends with a /*renamed:…*/ legend; the
+//      stock artifacts keep the long names, since the demos and tests speak them.
+//   8. `singleLine` escapes the raw newlines esbuild leaves inside template literals, so the
 //      output file is a single line.
 //
 // Errors still throw in every build. With the `msg` feature off they carry a number instead of
@@ -47,6 +53,8 @@
 //   node build-min.mjs min --without=pingpong            ...minus one
 //   node build-min.mjs tiny --out=dist/twg.js            write somewhere else
 //   node build-min.mjs tiny --iife                       a plain <script>: globalThis.WEBGPU
+//   node build-min.mjs tiny --rename                     apply the config's RENAMES table
+//   node build-min.mjs tiny --rename=drawTo:dT,setResources:sR   exactly these renames
 //   node build-min.mjs --config=my.config.mjs            a config of your own
 //   (--tiny is accepted as an alias for the tiny config.)
 
@@ -76,6 +84,39 @@ const FEATURES = {
 
 // A feature that cannot stand on its own. Asking for the key implies the values.
 const REQUIRES = { save: ['read'] };
+
+// WebGPU member names the name-table pack may alias. These are the *browser's* names — the
+// library must call them verbatim, so they can only be aliased ([$a] bracket reads), never
+// renamed. The library's own API names are the `rename` config's territory instead.
+const CANDIDATES = [
+  'beginComputePass', 'beginRenderPass', 'createShaderModule', 'getCompilationInfo',
+  'dispatchWorkgroups', 'dispatchWorkgroupsIndirect', 'createCommandEncoder', 'createBindGroup',
+  'createRenderPipeline', 'createComputePipeline', 'getBindGroupLayout', 'setBindGroup',
+  'setPipeline', 'writeBuffer', 'copyBufferToBuffer', 'copyTextureToBuffer', 'getMappedRange',
+  'mapAsync', 'createView', 'createTexture', 'requestAdapter', 'requestDevice', 'writeTexture',
+  'createSampler', 'getCurrentTexture', 'clearBuffer', 'destroy', 'configure',
+  'getPreferredCanvasFormat', 'pushErrorScope', 'popErrorScope',
+];
+
+// Names the `rename` table must never touch: platform members the library calls (see
+// CANDIDATES) and descriptor/dictionary keys it writes. mangleProps cannot tell our objects
+// from a descriptor handed to the driver, so renaming any of these would corrupt the build —
+// refuse loudly instead. Not exhaustive; it guards the obvious traps.
+const RESERVED = new Set([
+  ...CANDIDATES,
+  'gpu', 'queue', 'limits', 'features', 'lost', 'reason', 'message', 'device', 'format',
+  'buffer', 'texture', 'view', 'sampler', 'usage', 'size', 'label', 'code', 'entries',
+  'binding', 'resource', 'layout', 'module', 'entryPoint', 'targets', 'blend', 'primitive',
+  'topology', 'vertex', 'fragment', 'compute', 'colorAttachments', 'depthStencilAttachment',
+  'depthClearValue', 'depthLoadOp', 'depthStoreOp', 'depthWriteEnabled', 'depthCompare',
+  'depthStencil', 'loadOp', 'storeOp', 'clearValue', 'requiredLimits', 'requiredFeatures',
+  'width', 'height', 'origin', 'mipLevel', 'bytesPerRow', 'rowsPerImage', 'baseMipLevel',
+  'mipLevelCount', 'sampleCount', 'alphaMode', 'colorSpace', 'flipY', 'premultipliedAlpha',
+  'magFilter', 'minFilter', 'addressModeU', 'addressModeV', 'addressModeW', 'compare',
+  'byteLength', 'byteOffset', 'messages', 'type', 'lineNum', 'linePos', 'onuncapturederror',
+  'unmap', 'finish', 'end', 'draw', 'complete', 'decode', 'close', 'then', 'catch',
+  'b', 'w', 'r',
+]);
 
 // What the numbered errors in a MSG=false build mean. Keep in sync with tinywebgpu.js — the
 // check at the bottom fails the build if a number is used twice or a message goes unnumbered.
@@ -140,6 +181,31 @@ const OUT = flag('out') ?? config.out;
 const iife = args.includes('--iife') || (config.iife && !args.includes('--no-iife'));
 const pack = args.includes('--pack') || (config.pack && !args.includes('--no-pack'));
 const banner = config.banner !== false && !args.includes('--no-banner');
+
+// ── the rename table: truly rename the library's own API names ────────────────────────────────
+// `--rename=setResources:sR,drawTo:dT` applies exactly those pairs; bare `--rename` (or
+// `rename: true` in the config) applies the config's `renames` table; `--no-rename` wins over
+// both. The renamed build is a different API — the legend comment appended to the output is
+// the contract — so the stock artifacts keep it off: the demos, tutorial and tests speak the
+// long names.
+const renames = args.includes('--no-rename') ? {}
+  : flag('rename')
+    ? Object.fromEntries(flag('rename').split(',')
+      .map(s => s.split(':').map(t => t.trim())).filter(p => p.length === 2 && p[0] && p[1]))
+    : (args.includes('--rename') || config.rename) ? (config.renames ?? {}) : {};
+const renameEntries = Object.entries(renames);
+{
+  const bad = [], codes = new Set();
+  for (const [long, short] of renameEntries) {
+    if (RESERVED.has(long)) bad.push(`cannot rename '${long}' — it is a WebGPU platform name or dictionary key (the name-table pack aliases those instead).`);
+    if (!/^[A-Za-z_$][\w$]*$/.test(short)) bad.push(`rename code '${short}' (for '${long}') is not a valid identifier.`);
+    if (RESERVED.has(short)) bad.push(`rename code '${short}' (for '${long}') collides with a WebGPU name the library uses.`);
+    if (codes.has(short)) bad.push(`rename code '${short}' is used twice.`);
+    codes.add(short);
+    if (short.length >= long.length) console.warn(`build-min: renaming '${long}' to '${short}' saves nothing.`);
+  }
+  if (bad.length) { for (const b of bad) console.error('build-min: ' + b); process.exit(1); }
+}
 
 // ── shared helper: walk minified JS, applying `fn` to template-literal text spans ─────────────
 // Both the shorthand compression and the single-line escape need to touch only the *text* of
@@ -238,7 +304,14 @@ const { code, warnings } = await transform(source, {
   format: iife ? 'iife' : 'esm',
   minify: true,
   drop: ['console'],
-  mangleProps: /^_/,
+  // The `_`-prefixed internals always mangle. A rename table widens the net to the listed API
+  // names, and mangleCache pins each one to its chosen code — esbuild then rewrites the
+  // property everywhere it appears (definitions, accesses, destructuring, object literals), so
+  // the renamed build is internally consistent by construction.
+  mangleProps: renameEntries.length
+    ? new RegExp(`^_|^(?:${renameEntries.map(([long]) => escapeRe(long)).join('|')})$`)
+    : /^_/,
+  ...(renameEntries.length ? { mangleCache: { ...renames } } : {}),
   // Reserved because test/layout.test.mjs reaches for them by name when run against this build:
   // the staging pair is stubbed out, and the texel-size derivation and blend presets are
   // asserted directly.
@@ -304,15 +377,18 @@ if (compressTokens.length) {
 // string disqualifies it, so the rewrite can never change an API contract.
 const packTable = [], prePack = packed.length;
 if (pack) {
-  const CANDIDATES = [
-    'beginComputePass', 'beginRenderPass', 'createShaderModule', 'getCompilationInfo',
-    'dispatchWorkgroups', 'dispatchWorkgroupsIndirect', 'createCommandEncoder', 'createBindGroup',
-    'createRenderPipeline', 'createComputePipeline', 'getBindGroupLayout', 'setBindGroup',
-    'setPipeline', 'writeBuffer', 'copyBufferToBuffer', 'copyTextureToBuffer', 'getMappedRange',
-    'mapAsync', 'createView', 'createTexture', 'requestAdapter', 'requestDevice', 'writeTexture',
-    'createSampler', 'getCurrentTexture', 'clearBuffer', 'destroy', 'configure',
-    'getPreferredCanvasFormat', 'pushErrorScope', 'popErrorScope',
-  ];
+  // `packNames` in the config picks mnemonic codes for chosen names ({ createRenderPipeline:
+  // 'cRP' }); everything else gets the cheapest free `$x`. A mnemonic code must be word
+  // characters (the `\b` collision test below needs that) and costs its extra length once per
+  // use — readability the legend comment otherwise provides for free.
+  const packNames = config.packNames ?? {};
+  const seen = new Set();
+  for (const [n, id] of Object.entries(packNames)) {
+    if (!CANDIDATES.includes(n)) { console.error(`build-min: packNames: '${n}' is not a pack candidate.`); process.exit(1); }
+    if (!/^[A-Za-z_]\w*$/.test(id)) { console.error(`build-min: packNames: code '${id}' (for '${n}') must be word characters.`); process.exit(1); }
+    if (seen.has(id)) { console.error(`build-min: packNames: code '${id}' is used twice.`); process.exit(1); }
+    seen.add(id);
+  }
   // Short identifiers guaranteed absent from the minified output.
   const ids = [];
   for (const c of 'abcdefghijklmnopqrstuvwxyz') {
@@ -320,16 +396,20 @@ if (pack) {
     if (!new RegExp(`\\$${c}\\b`).test(packed)) ids.push(id);
   }
   for (const name of CANDIDATES) {
-    if (!ids.length) break;
+    let id = packNames[name];
+    if (id && new RegExp(`\\b${escapeRe(id)}\\b`).test(packed)) {
+      console.warn(`build-min: packNames: '${id}' already appears in the output — using an auto id for '${name}'.`);
+      id = undefined;
+    }
+    if (!id) { if (!ids.length) continue; id = ids[0]; }
     const total = packed.split(name).length - 1;
     const uses = [...packed.matchAll(new RegExp(`(\\?\\.|\\.)${name}\\b`, 'g'))];
     if (total === 0 || uses.length !== total) continue;   // key/string appearance → unsafe, skip
-    const id = ids[0];
     // profit: each `.name` (1+len) → `[id]` (2+id.len); `?.name` → `?.[id]` costs 2 more.
     const saved = uses.reduce((a, m) => a + name.length + 1 - (2 + id.length) - (m[1] === '?.' ? 2 : 0), 0);
     const cost = name.length + 1 + id.length + 1;         // table string entry + destructure slot
     if (saved <= cost) continue;
-    ids.shift();
+    if (id === ids[0]) ids.shift();
     packTable.push([name, id]);
     packed = packed.replace(new RegExp(`(\\?\\.|\\.)${name}\\b`, 'g'),
       (m, d) => (d === '?.' ? '?.[' : '[') + id + ']');
@@ -359,6 +439,16 @@ if (config.singleLine !== false) {
 // output stays readable without this script at hand.
 if (packTable.length && (config.packComment || args.includes('--pack-comment'))) {
   packed = packed.trimEnd() + `/*pack:${packTable.map(([n, id]) => `${id}=${n}`).join(',')}*/\n`;
+}
+
+// The renamed build is a different API, so its legend is not optional: without this comment
+// nobody — including you, next month — knows what `sR` is. Only the pairs that survived into
+// this build are listed — a stripped build should not pay legend bytes for renames of entry
+// points it does not contain.
+if (renameEntries.length) {
+  const applied = renameEntries.filter(([, short]) => new RegExp(`\\b${escapeRe(short)}\\b`).test(packed));
+  packed = packed.trimEnd() + `/*renamed:${applied.map(([long, short]) => `${short}=${long}`).join(',')}*/\n`;
+  console.log(`  renamed: ${applied.length} API name(s) (of ${renameEntries.length} in the table); legend comment appended`);
 }
 
 // The transforms above edit minified output textually — prove the result still parses before

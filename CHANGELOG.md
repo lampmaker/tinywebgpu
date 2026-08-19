@@ -18,6 +18,19 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 - The tiny build ends with a **pack legend** — `/*pack:$a=beginComputePass,…*/` — naming what
   the name-table pass packed (`packComment` in the config), so the packed output reads without
   the build script at hand.
+- New opt-in `rename` config (and `--rename` / `--rename=name:code,…`): truly rename the
+  library's *own* API in a piece build — `setResources` → `sR`, `resources` → `rS`,
+  `createStorageBuffer` → `cSB` — via esbuild's mangleCache, so a piece written against the
+  renamed build saves the bytes on both sides of every call (~10 B per `setResources` site; the
+  library's internal savings roughly pay for the legend). The table is `RENAMES` in
+  `build.tiny.config.mjs`; the `/*renamed:sR=setResources,…*/` legend appended to the output is
+  the renamed build's API contract, trimmed to the names that survived the feature strip.
+  Platform member names (`createRenderPipeline`, …) and WebGPU dictionary keys (`format`,
+  `buffer`, …) are refused with an explanation — the browser owns those names; the name-table
+  pack aliases them instead, and the new `packNames` config picks mnemonic pack codes
+  (`{ createRenderPipeline: 'cRP' }` → `[cRP](`) at ~1 B per use over the `$x` defaults.
+  The stock artifacts keep the long names; `npm run test:all` now also builds a renamed tiny
+  and runs `test/rename.test.mjs` against it.
 - New opt-in `shorthand` config: build a wgsl_shorthand token table into the library. Its own
   WGSL then ships compressed (`V` for `vec2<f32>`, …) and the piece's WGSL may use the same
   tokens without shipping `wgsl_shorthand.js` — a `const SHORTHAND = 0;` seam in the source is

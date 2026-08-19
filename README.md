@@ -319,9 +319,22 @@ every optional entry point, and adding `--iife --no-banner` gets a classic
 Tiny builds also run a **name-table pass**: repeated long WebGPU member names are rewritten to
 bracket reads from one packed string (`--no-pack` skips it; `--pack` applies it to the stock
 build too), and a `/*pack:$a=beginComputePass,…*/` legend at the end of the file says what maps
-to what. It is raw-bytes-only by design — gzip would deduplicate the names anyway, but the
-inline builds this exists for never gzip. Both artifacts come out as a **single line**: the
-newlines inside the WGSL template strings are escaped after minifying.
+to what. `packNames` in the config picks mnemonic codes instead of `$x` —
+`{ createRenderPipeline: 'cRP' }` gives `[cRP](` — at ~1 B per use. It is raw-bytes-only by
+design — gzip would deduplicate the names anyway, but the inline builds this exists for never
+gzip. Both artifacts come out as a **single line**: the newlines inside the WGSL template
+strings are escaped after minifying.
+
+A piece build can go further and **rename the library's own API** (`--rename`, or `rename: true`
+in the config): `setResources` becomes `sR`, `createStorageBuffer` becomes `cSB`, and your piece
+calls the short names — the bytes are saved in the library *and* in your inlined code, ~10 B per
+`setResources` call site. The table is `RENAMES` in `build.tiny.config.mjs`; the
+`/*renamed:sR=setResources,…*/` legend at the end of the output is the renamed build's API
+contract (only names that survived the feature strip are listed). The stock artifacts keep the
+long names — the demos, tutorial and tests speak them. Platform names (`createRenderPipeline`,
+`createTexture`, …) can never be renamed — the browser owns those, which is exactly what the
+name-table pack is for — and `build-min.mjs` refuses them loudly, along with WebGPU dictionary
+keys like `format` or `buffer`.
 
 Each build's settings live in a config file — `build.min.config.mjs` / `build.tiny.config.mjs` —
 picked by name; the CLI flags override them per run:

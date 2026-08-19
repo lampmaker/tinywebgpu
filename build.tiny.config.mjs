@@ -7,6 +7,31 @@
 // Imported so the `shorthand` option below is one edit away; unused while it stays ''.
 import { SHORT_TOKENS } from './wgsl_shorthand.js';
 
+// The rename table: short codes for the library's *own* API names, applied with `--rename` (or
+// `rename: true` below). The build then truly renames them — `p.setResources(...)` becomes
+// `p.sR(...)` — and a piece written against the renamed build saves the bytes on both sides of
+// every call. A `/*renamed:sR=setResources,…*/` legend at the end of the output is the contract.
+// Platform names (createRenderPipeline, createTexture, writeTexture, destroy, …) and WebGPU
+// dictionary keys can NOT go in here — the browser owns those; the name-table `pack` below
+// aliases them instead, and build-min.mjs refuses them loudly. Extend or trim freely; option
+// keys you pass as objects (uniforms:, resources:, …) rename too, so write the short keys.
+export const RENAMES = {
+  // pipeline factories
+  makeFrag: 'mF', makeDraw: 'mD', makeCompute: 'mC', makeQuad: 'mQ', makeCompute2D: 'mC2',
+  makeShader: 'mSh', makeSchema: 'mS',
+  // buffers & textures
+  createStorageBuffer: 'cSB', createUniformBuffer: 'cUB', createIndirectBuffer: 'cIB',
+  createStorageTexture: 'cST', createPingPong: 'cPP', createPingPongTexture: 'cPPT',
+  pingPong: 'pP', writeUniforms: 'wU', loadTexture: 'lT', readTexture: 'rT',
+  generateMipmaps: 'gM', resizeCanvas: 'rC',
+  // frame & passes
+  beginFrame: 'bF', endFrame: 'eF', beginCompute: 'bC', endCompute: 'eC',
+  // pipeline members (uniforms/resources are the setter properties and the option keys)
+  setUniforms: 'sU', setUniform: 'sU1', setResources: 'sR', uniforms: 'uS', resources: 'rS',
+  drawTo: 'dT', dispatchIndirect: 'dI', bindTo: 'bT',
+  uniformFields: 'uF', resourceFields: 'rF',
+};
+
 export default {
   out: 'tinywebgpu.tiny.js',
 
@@ -20,6 +45,15 @@ export default {
   // and the legend comment makes the packed output readable ($a=beginComputePass, …).
   pack: true,
   packComment: true,
+  // Mnemonic ids for chosen packed names instead of $x — e.g. { createRenderPipeline: 'cRP' }
+  // gives `[cRP](` in the output. Costs the extra id length once per use; the legend already
+  // names the $x codes for free, so this is purely a readability preference.
+  packNames: {},
+
+  // Apply the RENAMES table above (also per run: --rename, or --rename=name:code,…). Off for
+  // the shipped artifact — the demos, tutorial and tests call the long names.
+  rename: false,
+  renames: RENAMES,
 
   // One line out: newlines inside template literals become \n escapes after minifying.
   singleLine: true,
