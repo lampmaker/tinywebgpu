@@ -4,6 +4,35 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Changed — smaller inline builds (for on-chain / embedded pieces)**
+
+The tiny build drops from 11.4 KB to **10.4 KB** raw (5.2 gz), the stock build from 18.3 KB to
+**17.8 KB** (8.2 gz). Raw bytes are the target: the inline/on-chain use-case never gzips.
+
+- **New switch `staging` (0.5 KB)** — the staging ring behind frame-ordered writes. Without it,
+  writes inside `beginFrame()` become plain queue writes: the *last* value set before
+  `endFrame()` wins for the whole frame. Pieces that set uniforms once per frame (most
+  fullscreen art) never see the difference; per-dispatch uniform sequences keep the switch.
+  `--tiny` drops it; `--with=staging` brings it back. Verified on-device both ways.
+- **New switch `aliases` (0.1 KB)** — the long spellings (`buffer`/`write`/`read` on handles,
+  `uniformFields`/`resourceFields`). The short forms (`b`/`w`/`r`) always exist.
+- **`err(n, MSG && 'text')` shared-throw helper** replaces 22 inline `throw Error(MSG ? … : n)`
+  sites. The `MSG &&` stays at the call site on purpose: a function argument can never be
+  dead-code-eliminated, so this is the only shape that still lets a msg-less build fold every
+  message string away. build-min's error-code audit now matches this shape.
+- **`U8`/`AB` constructor aliases and `mkBuf`/`len` wrappers** — `Uint8Array`, `ArrayBuffer`,
+  `D.createBuffer` and `.byteLength` were the most-repeated unminifiable names left.
+- **Internal layout fields are `_`-prefixed** (`_binding`, `_wgslType`, `_isBuf`, …) so
+  `mangleProps` renames them; the never-read `size` field is gone.
+- **Name-table pass in build-min.mjs** (tiny builds by default; `--pack`/`--no-pack` override):
+  repeated long WebGPU member names are rewritten to bracket reads from one packed string. A
+  name is rewritten only when *every* occurrence in the output is a member access — one
+  appearance as an object key or in a string disqualifies it, so API contracts cannot change.
+  Honest numbers: after the source-level dedup, little repetition is left to pack (−3 B tiny,
+  −33 B with `--pack` on the stock build) — the pass is kept because it is self-guarding and
+  pays more as code grows. WGSL token compression was measured and rejected: expander + map
+  overhead ≈ the ~120 B of remaining generated-shader text it would save.
+
 **Added — ease of use, from the user's chair**
 
 - **TypeScript declarations.** `tinywebgpu.d.ts` ships with the package and is wired through

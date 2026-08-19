@@ -91,6 +91,15 @@ const F_RESIZE = true;    // resizeCanvas
 const F_BLEND = true;     // the named blend presets ('alpha' | 'premultiplied' | 'additive')
 const F_DEPTH = true;     // makeDraw({depth}) — depth testing with an auto-managed depth texture
 const F_MIPS = true;      // generateMipmaps, and the mips option on createTexture/loadTexture
+// F_STAGING: the staging ring that makes writes frame-ordered, so per-dispatch uniform values
+// work inside one beginFrame() submit. Without it, writes inside a frame become plain queue
+// writes — they execute before the frame's submit, so the *last* value set wins for the whole
+// frame. A piece that sets uniforms once per frame (most fullscreen art) never sees the
+// difference; drop it for the bytes.
+const F_STAGING = true;
+// F_ALIASES: the readable long names — buffer/write/read on handles, uniformFields /
+// resourceFields on pipelines. The short forms (b/w/r) always exist.
+const F_ALIASES = true;
 
 // The generated uniform variable's name; makePipeline tests the shader for it.
 const UNIFORM_VAR = 'UB';
@@ -182,15 +191,15 @@ export let WEBGPU = () => {
      * @returns {Promise<Object>} this instance, with device/context/format/features populated
      */
     init: async (ctx = null, opts = {}) => {
-      if (!navigator.gpu) throw Error(MSG ? 'WebGPU not supported' : 1);
+      if (!navigator.gpu) err(1, MSG && 'WebGPU not supported');
       if (typeof ctx === 'string') {
         let sel = ctx;
         ctx = document.querySelector(sel);
-        if (!ctx) throw Error(MSG ? `init: nothing matches '${sel}'.` : 23);
+        if (!ctx) err(23, MSG && `init: nothing matches '${sel}'.`);
       }
       if (ctx?.getContext) ctx = ctx.getContext('webgpu');   // a canvas rather than a context
       let a = await navigator.gpu.requestAdapter();
-      if (!a) throw Error(MSG ? 'No GPU adapter' : 2);
+      if (!a) err(2, MSG && 'No GPU adapter');
 
       // Raise these to whatever the adapter allows; anything in opts.limits still wins.
       let requiredLimits = { ...opts.limits };
@@ -229,8 +238,7 @@ export let WEBGPU = () => {
       endPass();
       fEnc = null;
       fReset(null);
-      for (let c of ring._chunks) c._buf.destroy();
-      ring._chunks = []; ring._i = 0;
+      if (F_STAGING) { for (let c of ring._chunks) c._buf.destroy(); ring._chunks = []; ring._i = 0; }
       if (F_READ) { for (let l of stagingPool.values()) for (let b of l) b.destroy(); stagingPool.clear(); }
       if (F_DEPTH) { for (let t of depthCache.values()) t.destroy(); depthCache.clear(); }
       if (F_SHOW) blitCache.clear();
@@ -390,7 +398,7 @@ ${main}
     endFrame: () => {
       if (!fEnc) return;
       endPass();
-      flushRing();
+      if (F_STAGING) flushRing();
       let enc = fEnc;
       fEnc = null;                         // cleared first: a throwing finish() must not leave it dangling
       fReset(null);
@@ -443,12 +451,12 @@ ${main}
      */
     createStorageBuffer: sizeOrData => {
       let init = typeof sizeOrData === 'number' ? null : sizeOrData;
-      let h = S.createBuffer(init ? init.byteLength : sizeOrData, BUF_STORAGE | BUF_COPY_SRC | BUF_COPY_DST, 'storage');
+      let h = S.createBuffer(init ? len(init) : sizeOrData, BUF_STORAGE | BUF_COPY_SRC | BUF_COPY_DST, 'storage');
       let { b, w } = h, n = b.size;
       // `r` is a debug/export path, not a hot one: F_READ drops it (and the staging pool with it).
       // C is the result view, e.g. Float32Array — passing it as the *only* argument
       // (`buf.r(Float32Array)`) reads the whole buffer typed, no byte counting.
-      let r = !F_READ ? void 0 : (nbytes = n, o = 0, C = Uint8Array) => {
+      let r = !F_READ ? void 0 : (nbytes = n, o = 0, C = U8) => {
         if (typeof nbytes === 'function') [C, nbytes] = [nbytes, n];
         return readBack(nbytes, (enc, rb, need) => enc.copyBufferToBuffer(b, o, rb, 0, need), DIAG && 'readback')
           .then(ab => C ? new C(ab) : ab);
@@ -458,29 +466,29 @@ ${main}
         : oneShot(enc => enc.clearBuffer(b, 0, n), DIAG && 'clear');
       if (init) w(init);
       // Long names alias the short ones, so `parts.write(data)` and `parts.w(data)` are the same
-      // function; pick whichever reads better where you are.
-      return OA(h, { r, clear, read: r });
+      // function; pick whichever reads better where you are. F_ALIASES drops the long spellings.
+      return OA(h, { r, clear, ...(F_ALIASES ? { read: r } : {}) });
     },
 
     // Explicit usage flags, minimal helpers. Size is rounded up to 4 bytes; `label` is internal.
     createBuffer: (size, usage, label = 'buffer') => {
       let n = (size + 3) & ~3;
       if (DIAG) checkSize(n, !!(usage & BUF_STORAGE));
-      let b = D.createBuffer({ size: n, usage, ...(DIAG && { label: `${label} ${n}B` }) });
+      let b = mkBuf({ size: n, usage, ...(DIAG && { label: `${label} ${n}B` }) });
       let w = writerFor(b);
-      return { b, w, buffer: b, write: w };
+      return { b, w, ...(F_ALIASES ? { buffer: b, write: w } : {}) };
     },
 
     // Small and read-only in shaders. Written with writeUniforms, or by a pipeline's uniform setters.
     createUniformBuffer: byteLength =>
-      D.createBuffer({ size: byteLength, usage: BUF_UNIFORM | BUF_COPY_DST, ...(DIAG && { label: `uniforms ${byteLength}B` }) }),
+      mkBuf({ size: byteLength, usage: BUF_UNIFORM | BUF_COPY_DST, ...(DIAG && { label: `uniforms ${byteLength}B` }) }),
 
     // 3×u32 of [x,y,z] workgroup counts, for dispatchIndirect.
     createIndirectBuffer: () => S.createBuffer(12, BUF_INDIRECT | BUF_STORAGE | BUF_COPY_DST),
 
     // Raw uniform write (DataView or TypedArray).
     writeUniforms: (buffer, dataViewOrTypedArray, byteOffset = 0) =>
-      D.queue.writeBuffer(buffer, byteOffset, dataViewOrTypedArray.buffer ?? dataViewOrTypedArray, dataViewOrTypedArray.byteOffset ?? 0, dataViewOrTypedArray.byteLength),
+      D.queue.writeBuffer(buffer, byteOffset, dataViewOrTypedArray.buffer ?? dataViewOrTypedArray, dataViewOrTypedArray.byteOffset ?? 0, len(dataViewOrTypedArray)),
 
     // ─── Textures & samplers ─────────────────────────────────────────────────────────────────
     // Read-only in shaders except as a render pass output — images, render targets, post-process
@@ -517,7 +525,7 @@ ${main}
         let w = opts.width ?? tex.width, h = opts.height ?? tex.height;
         let bpt = texelBytes(tex.format);
         if (opts.bytesPerRow == null && !bpt)
-          throw Error(MSG ? `writeTexture: unknown bytes-per-texel for format '${tex.format}'; pass bytesPerRow explicitly.` : 9);
+          err(9, MSG && `writeTexture: unknown bytes-per-texel for format '${tex.format}'; pass bytesPerRow explicitly.`);
         D.queue.writeTexture(
           { texture: tex, mipLevel: opts.mipLevel ?? 0, origin: { x: opts.x ?? 0, y: opts.y ?? 0 } },
           data, { bytesPerRow: opts.bytesPerRow ?? w * bpt, rowsPerImage: h }, { width: w, height: h });
@@ -540,7 +548,7 @@ ${main}
           if (typeof src === 'string') {
             // Without this, a 404 surfaces as an opaque createImageBitmap decode error.
             let resp = await fetch(src);
-            if (!resp.ok) throw Error(MSG ? `loadTexture: HTTP ${resp.status} for '${src}'.` : 20);
+            if (!resp.ok) err(20, MSG && `loadTexture: HTTP ${resp.status} for '${src}'.`);
             blob = await resp.blob();
           }
           source = await createImageBitmap(blob);
@@ -553,7 +561,7 @@ ${main}
         // so the nullish form picked the zero and never reached videoWidth.
         let w = source.videoWidth || source.displayWidth || source.width;
         let h = source.videoHeight || source.displayHeight || source.height;
-        if (!w || !h) throw Error(MSG ? 'loadTexture: could not determine source dimensions.' : 10);
+        if (!w || !h) err(10, MSG && 'loadTexture: could not determine source dimensions.');
         // copyExternalImageToTexture requires RENDER_ATTACHMENT in addition to COPY_DST.
         let tex = opts.texture ?? S.createTexture(w, h, opts.format ?? 'rgba8unorm',
           { usage: opts.usage, mips: F_MIPS && opts.mips });
@@ -582,20 +590,20 @@ ${main}
       readTexture: async (tex, opts = {}) => {
         let w = opts.width ?? tex.width, h = opts.height ?? tex.height;
         let bpt = texelBytes(tex.format);
-        if (!bpt) throw Error(MSG ? `readTexture: unknown bytes-per-texel for format '${tex.format}'.` : 11);
+        if (!bpt) err(11, MSG && `readTexture: unknown bytes-per-texel for format '${tex.format}'.`);
         let tight = w * bpt, padded = (tight + 255) & ~255;   // copyTextureToBuffer wants 256-byte rows
-        let src = new Uint8Array(await readBack(padded * h, (enc, rb) => enc.copyTextureToBuffer(
+        let src = new U8(await readBack(padded * h, (enc, rb) => enc.copyTextureToBuffer(
           { texture: tex, mipLevel: opts.mipLevel ?? 0, origin: { x: opts.x ?? 0, y: opts.y ?? 0 } },
           { buffer: rb, bytesPerRow: padded, rowsPerImage: h }, { width: w, height: h }),
           DIAG && 'readTexture'));
-        let out = new Uint8Array(tight * h);
+        let out = new U8(tight * h);
         for (let y = 0; y < h; y++) out.set(src.subarray(y * padded, y * padded + tight), y * tight);  // drop row padding
         let f = tex.format;
         // 16float falls back to raw half bits where Float16Array is not available yet.
         let C = opts.Ctor ?? (/32float$/.test(f) ? Float32Array : /32uint$/.test(f) ? Uint32Array
           : /32sint$/.test(f) ? Int32Array : /16float$/.test(f) ? (globalThis.Float16Array ?? Uint16Array)
-            : /16uint$/.test(f) ? Uint16Array : /16sint$/.test(f) ? Int16Array : Uint8Array);
-        return C === Uint8Array ? out : new C(out.buffer);
+            : /16uint$/.test(f) ? Uint16Array : /16sint$/.test(f) ? Int16Array : U8);
+        return C === U8 ? out : new C(out.buffer);
       },
     } : {}),
 
@@ -696,7 +704,7 @@ ${main}
        * @returns {{width: number, height: number, changed: boolean}}
        */
       resizeCanvas: (canvas = S.context?.canvas, opts = {}) => {
-        if (!canvas) throw Error(MSG ? 'resizeCanvas: no canvas — init() with a context, or pass one.' : 8);
+        if (!canvas) err(8, MSG && 'resizeCanvas: no canvas — init() with a context, or pass one.');
         let dpr = opts.dpr ?? globalThis.devicePixelRatio ?? 1;
         let max = D?.limits.maxTextureDimension2D ?? Infinity;
         // clientWidth is 0 on an OffscreenCanvas (no CSS box) — fall back to the current size.
@@ -762,14 +770,14 @@ ${main}
        */
       save: async (tex, filename = 'capture.png', opts = {}) => {
         if (!/^(rgba|bgra)8unorm(-srgb)?$/.test(tex.format))
-          throw Error(MSG ? `save: needs an 8-bit RGBA texture, got '${tex.format}'. Render it into an rgba8unorm target first.` : 19);
+          err(19, MSG && `save: needs an 8-bit RGBA texture, got '${tex.format}'. Render it into an rgba8unorm target first.`);
         let width = opts.width ?? tex.width, height = opts.height ?? tex.height;
-        let px = await S.readTexture(tex, { x: opts.x, y: opts.y, width, height, mipLevel: opts.mipLevel, Ctor: Uint8Array });
+        let px = await S.readTexture(tex, { x: opts.x, y: opts.y, width, height, mipLevel: opts.mipLevel, Ctor: U8 });
         // ImageData is RGBA; the canvas format is BGRA on most platforms, so swap the ends.
         if (tex.format.startsWith('bgra'))
           for (let i = 0; i < px.length; i += 4) { let b = px[i]; px[i] = px[i + 2]; px[i + 2] = b; }
         let cv = new OffscreenCanvas(width, height);
-        cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(px.buffer, px.byteOffset, px.byteLength), width, height), 0, 0);
+        cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(px.buffer, px.byteOffset, len(px)), width, height), 0, 0);
         let blob = await cv.convertToBlob({ type: opts.type ?? 'image/png', quality: opts.quality ?? 1 });
         if (opts.download !== false) {
           let a = document.createElement('a');
@@ -883,6 +891,17 @@ ${main}
   // The two longest names in the WebGPU surface, spelled once each. Every encoder in the library
   // comes out of mkEnc and every submission goes through submit. `label` is passed as
   // `DIAG && '…'` at the call sites, so the strings fold away with DIAG.
+  // Shared throw: call sites read `err(n, MSG && 'text')`. The `MSG &&` lives at the call site
+  // on purpose — an argument to a function can never be dead-code-eliminated, so this is the
+  // only shape that lets a msg-less build fold every message string away. build-min.mjs audits
+  // the numbers by matching this exact call shape.
+  let err = (n, m) => { throw Error(m || n); };
+  // Aliases the minifier cannot make on its own: global constructors are spelled out at every
+  // use otherwise, and property names on the device survive verbatim. Raw bytes only — gzip
+  // would deduplicate these anyway, but the inline/on-chain builds never gzip.
+  let U8 = Uint8Array, AB = ArrayBuffer;
+  let mkBuf = d => D.createBuffer(d);
+  let len = d => d.byteLength;
   let mkEnc = label => DIAG ? D.createCommandEncoder({ label }) : D.createCommandEncoder();
   let submit = enc => D.queue.submit([enc.finish()]);
   // One-shot submission — open an encoder, record, submit. The outside-a-frame path everywhere.
@@ -912,22 +931,23 @@ ${main}
   // ─── Staging ring ──────────────────────────────────────────────────────────────────────────
   // While a frame is open, uniform/buffer writes are staged CPU-side and copyBufferToBuffer'd
   // inside the frame encoder, so writes order against *dispatches* (per-dispatch uniforms in one
-  // submit) instead of against whole submits.
+  // submit) instead of against whole submits. F_STAGING drops the whole mechanism: writes then
+  // fall back to plain queue writes everywhere (see the switch's comment for what that changes).
   // The `_` field names are minifier instructions: build-min.mjs renames every `_`-prefixed
   // property, and nothing outside this file reads them.
-  let ring = { _chunks: [], _i: 0, _cap: 1 << 18 };
-  let stageCopy = (dst, dstOff, data, size) => {
+  let ring = F_STAGING ? { _chunks: [], _i: 0, _cap: 1 << 18 } : null;
+  let stageCopy = !F_STAGING ? null : (dst, dstOff, data, size) => {
     let need = (size + 3) & ~3;       // copyBufferToBuffer needs 4-byte multiples
     while (ring._chunks[ring._i] && ring._chunks[ring._i]._buf.size - ring._chunks[ring._i]._at < need) ring._i++;
     let c = ring._chunks[ring._i];
     if (!c) {
       let cap = Math.max(ring._cap, need);
       c = ring._chunks[ring._i] = {
-        _buf: D.createBuffer({ size: cap, usage: BUF_COPY_SRC | BUF_COPY_DST, ...(DIAG && { label: 'staging ring' }) }),
-        _cpu: new Uint8Array(cap), _at: 0
+        _buf: mkBuf({ size: cap, usage: BUF_COPY_SRC | BUF_COPY_DST, ...(DIAG && { label: 'staging ring' }) }),
+        _cpu: new U8(cap), _at: 0
       };
     }
-    let src = ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, size) : new Uint8Array(data, 0, size);
+    let src = AB.isView(data) ? new U8(data.buffer, data.byteOffset, size) : new U8(data, 0, size);
     c._cpu.set(src, c._at);
     // The copy is rounded up to 4 bytes; zero the tail so a short write cannot smear whatever the
     // previous frame left in the ring into the bytes past the caller's data.
@@ -938,7 +958,7 @@ ${main}
   };
   // Upload all staged chunk contents; must run just before submitting the frame encoder (queue
   // writes execute before subsequently submitted command buffers).
-  let flushRing = () => {
+  let flushRing = !F_STAGING ? null : () => {
     for (let c of ring._chunks) {
       if (c._at > 0) D.queue.writeBuffer(c._buf, 0, c._cpu, 0, c._at);
       c._at = 0;
@@ -950,7 +970,7 @@ ${main}
   // (see the test seams at the bottom) so test/layout.test.mjs can stub them.
   let stagingPool = F_READ ? new Map() : null;
   let acquireStaging = !F_READ ? null : size => stagingPool.get(size)?.pop()
-    ?? D.createBuffer({ size, usage: BUF_COPY_DST | BUF_MAP_READ, ...(DIAG && { label: 'readback staging' }) });
+    ?? mkBuf({ size, usage: BUF_COPY_DST | BUF_MAP_READ, ...(DIAG && { label: 'readback staging' }) });
   let releaseStaging = !F_READ ? null : buf => {
     let list = stagingPool.get(buf.size) ?? [];
     if (list.length < 4) { list.push(buf); stagingPool.set(buf.size, list); }
@@ -1015,7 +1035,7 @@ ${main}
   // same swapchain texture, and a frame that never draws never acquires one at all.
   let targetView = () => {
     let v = fView ?? (S.context && viewOf(S.context.getCurrentTexture()));
-    if (!v) throw Error(MSG ? 'No render target: init() was called without a canvas context — pass an explicit view.' : 7);
+    if (!v) err(7, MSG && 'No render target: init() was called without a canvas context — pass an explicit view.');
     if (fEnc) fView = v;
     return v;
   };
@@ -1026,7 +1046,7 @@ ${main}
   let depthCache = F_DEPTH ? new Map() : null;
   let depthFor = !F_DEPTH ? null : (colorView, format) => {
     let s = viewSize.get(colorView);
-    if (!s) throw Error(MSG ? 'depth: target size unknown. Pass a GPUTexture (not a view) to drawTo, or supply depth.texture.' : 21);
+    if (!s) err(21, MSG && 'depth: target size unknown. Pass a GPUTexture (not a view) to drawTo, or supply depth.texture.');
     let key = `${s[0]}x${s[1]} ${format}`;
     let t = depthCache.get(key);
     if (!t) {
@@ -1063,20 +1083,20 @@ ${main}
   // write outside. Rejects plain Arrays — `[1,2,3]` has no byteLength, and the old `?? d.length`
   // fallback silently wrote 3 bytes of nothing.
   let writerFor = b => (d, o = 0) => {
-    if (!(ArrayBuffer.isView(d) || d instanceof ArrayBuffer))
-      throw Error(MSG ? 'buffer write: expected a TypedArray or ArrayBuffer.' : 5);
+    if (!(AB.isView(d) || d instanceof AB))
+      err(5, MSG && 'buffer write: expected a TypedArray or ArrayBuffer.');
     // Both write paths (writeBuffer and copyBufferToBuffer) take only 4-byte offsets — name the
     // constraint instead of letting the driver reject it.
-    if (o & 3) throw Error(MSG ? `buffer write: byteOffset must be a multiple of 4 (got ${o}).` : 6);
-    if (fEnc) return stageCopy(b, o, d, d.byteLength);
+    if (o & 3) err(6, MSG && `buffer write: byteOffset must be a multiple of 4 (got ${o}).`);
+    if (F_STAGING && fEnc) return stageCopy(b, o, d, len(d));
     // writeBuffer also wants a 4-byte-multiple size; pad a copy of the tail rather than reject
     // the write. Buffer sizes are rounded up at creation, so the padding never overruns.
-    if (d.byteLength & 3) {
-      let p = new Uint8Array((d.byteLength + 3) & ~3);
-      p.set(ArrayBuffer.isView(d) ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength) : new Uint8Array(d));
+    if (len(d) & 3) {
+      let p = new U8((len(d) + 3) & ~3);
+      p.set(AB.isView(d) ? new U8(d.buffer, d.byteOffset, len(d)) : new U8(d));
       d = p;
     }
-    return D.queue.writeBuffer(b, o, d.buffer ?? d, d.byteOffset ?? 0, d.byteLength);
+    return D.queue.writeBuffer(b, o, d.buffer ?? d, d.byteOffset ?? 0, len(d));
   };
 
   let blitCache = F_SHOW ? new Map() : null;
@@ -1085,7 +1105,7 @@ ${main}
   let resolveBlend = blend => {
     if (!blend || typeof blend !== 'string') return blend || null;
     let b = BLENDS[blend];
-    if (!b) throw Error(MSG ? `Unknown blend preset '${blend}'. Use ${OK(BLENDS).map(k => `'${k}'`).join(', ')} or a GPUBlendState object.` : 4);
+    if (!b) err(4, MSG && `Unknown blend preset '${blend}'. Use ${OK(BLENDS).map(k => `'${k}'`).join(', ')} or a GPUBlendState object.`);
     return b;
   };
 
@@ -1112,7 +1132,7 @@ ${main}
         }
         (hasError ? console.error : console.warn)(log);
       }
-      if (hasError) throw Error(MSG ? 'WGSL compilation failed.' : 3);
+      if (hasError) err(3, MSG && 'WGSL compilation failed.');
     }
     return module;
   };
@@ -1159,7 +1179,7 @@ ${main}
         let cols = +m[1], rows = +m[2], stride = rows === 3 ? 4 : rows;
         return [cols * stride, stride, cols * rows, rows === 3 ? 3 : 0];
       }
-      throw Error(MSG ? `Unknown uniform type size for: ${t}` : 12);
+      err(12, MSG && `Unknown uniform type size for: ${t}`);
     };
     let alignTo = (n, a) => Math.ceil(n / a) * a;
 
@@ -1170,7 +1190,8 @@ ${main}
       let structFields = uniformEntries.map(([name, wgslType]) => {
         let [size, al, comps, packRows] = typeInfo(wgslType);
         offset = alignTo(offset, al);
-        layout[name] = { offset, size, comps, packRows, wgslType };
+        // `_`-prefixed: internal fields the minified build renames (see build-min.mjs).
+        layout[name] = { _offset: offset, _comps: comps, _packRows: packRows, _wgslType: wgslType };
         offset += size;
         return `  ${name}: ${wgslType},`;
       });
@@ -1178,15 +1199,15 @@ ${main}
       offset = alignTo(offset, 4);                 // struct size must be 16-byte aligned
       let byteSize = offset * 4;
       uniformBuffer = S.createUniformBuffer(byteSize);
-      let buffer = new ArrayBuffer(byteSize);
+      let buffer = new AB(byteSize);
       let F32 = new Float32Array(buffer), I32 = new Int32Array(buffer), U32 = new Uint32Array(buffer);
 
       // Resolve the destination view and the integer coercion once, here — this used to be two
       // regexes per field on every setUniforms() call, i.e. in the middle of the animation loop.
       for (let f of OV(layout)) {
-        f.isU = /u32/.test(f.wgslType);
-        f.isI = /i32/.test(f.wgslType);
-        f.view = f.isU ? U32 : f.isI ? I32 : F32;
+        f._isU = /u32/.test(f._wgslType);
+        f._isI = /i32/.test(f._wgslType);
+        f._view = f._isU ? U32 : f._isI ? I32 : F32;
       }
 
       uniformWrite = values => {
@@ -1194,25 +1215,25 @@ ${main}
           let f = layout[name];
           // A name that is not in the schema used to be dropped in silence — the single most
           // expensive typo in the toolkit, since nothing at all happened. Say so instead.
-          if (!f) throw Error(MSG ? `Unknown uniform '${name}'. Declared: ${OK(layout).join(', ') || '(none)'}.` : 13);
+          if (!f) err(13, MSG && `Unknown uniform '${name}'. Declared: ${OK(layout).join(', ') || '(none)'}.`);
           // TypedArrays count as vectors/matrices too: a Float32Array mat4 out of a maths library
           // used to fall into the scalar branch and write a single NaN.
-          let array = Array.isArray(value) || ArrayBuffer.isView(value) ? value : [value];
-          if (DIAG && S.debug && array.length > f.comps)
-            console.warn(`Uniform '${name}' provided ${array.length} values but type ${f.wgslType} fits ${f.comps}. Extra values will be ignored.`);
-          for (let i = 0; i < f.comps && i < array.length; i++) {
+          let array = Array.isArray(value) || AB.isView(value) ? value : [value];
+          if (DIAG && S.debug && array.length > f._comps)
+            console.warn(`Uniform '${name}' provided ${array.length} values but type ${f._wgslType} fits ${f._comps}. Extra values will be ignored.`);
+          for (let i = 0; i < f._comps && i < array.length; i++) {
             let x = array[i] ?? 0;
-            if (DIAG && S.debug && (f.isI || f.isU) && !Number.isInteger(x))
-              console.warn(`Uniform '${name}' expects integer for ${f.wgslType} at index ${i}, got ${x}. It will be truncated.`);
-            x = f.isU ? x >>> 0 : f.isI ? x | 0 : x;
+            if (DIAG && S.debug && (f._isI || f._isU) && !Number.isInteger(x))
+              console.warn(`Uniform '${name}' expects integer for ${f._wgslType} at index ${i}, got ${x}. It will be truncated.`);
+            x = f._isU ? x >>> 0 : f._isI ? x | 0 : x;
             // Straight through, except for a 3-row matrix: the caller hands over tightly packed
             // columns and the buffer wants them on a 4-unit stride.
-            f.view[f.offset + (f.packRows ? ((i / 3 | 0) * 4 + i % 3) : i)] = x;
+            f._view[f._offset + (f._packRows ? ((i / 3 | 0) * 4 + i % 3) : i)] = x;
           }
         }
         // Inside an open frame, stage so each dispatch sees the values set before it; otherwise a
         // plain queue write (ordered against the next submit) is enough.
-        if (fEnc) stageCopy(uniformBuffer, 0, buffer, buffer.byteLength);
+        if (F_STAGING && fEnc) stageCopy(uniformBuffer, 0, buffer, len(buffer));
         else S.writeUniforms(uniformBuffer, buffer);
       };
 
@@ -1245,7 +1266,7 @@ ${structFields.join('\n')}
         }
       }
 
-      resourceLayout[name] = { binding: currentBinding, wgslType, isBuf, isTex, isSampler };
+      resourceLayout[name] = { _binding: currentBinding, _wgslType: wgslType, _isBuf: isBuf, _isTex: isTex, _isSampler: isSampler };
       let addrSpace = isBuf ? (readOnly.includes(name) ? '<storage, read>' : '<storage, read_write>') : '';
       let varLine = `@group(${group}) @binding(${currentBinding}) var${addrSpace} ${name}: ${typeForBinding};`;
       return decls ? `${decls}\n${varLine}` : varLine;
@@ -1260,9 +1281,9 @@ ${structFields.join('\n')}
       _entries: values => OE(resourceLayout).map(([name, info]) => {
         let resource = values[name];
         if (!resource) return null;
-        if (info.isTex) resource = asView(resource);
-        else if (info.isBuf) resource = { buffer: resource };
-        return { binding: info.binding, resource };
+        if (info._isTex) resource = asView(resource);
+        else if (info._isBuf) resource = { buffer: resource };
+        return { binding: info._binding, resource };
       }).filter(Boolean),
       _uniformFields: OK(uniforms),
       _resourceFields: OK(resources),
@@ -1346,8 +1367,8 @@ ${structFields.join('\n')}
     // of driver validation text into one line naming the resource and the missing flag. Diagnostics
     // only — WebGPU validates the bind group itself, so the minified build folds this away.
     let usageNeed = !DIAG ? null : info => {
-      if (info.isBuf) return [BUF_STORAGE, 'GPUBufferUsage.STORAGE'];
-      if (info.isTex) return /^texture_storage_/.test(info.wgslType)
+      if (info._isBuf) return [BUF_STORAGE, 'GPUBufferUsage.STORAGE'];
+      if (info._isTex) return /^texture_storage_/.test(info._wgslType)
         ? [TEX_STORAGE_BINDING, 'GPUTextureUsage.STORAGE_BINDING (use createStorageTexture)']
         : [TEX_BINDING, 'GPUTextureUsage.TEXTURE_BINDING'];
       return [0, ''];
@@ -1358,13 +1379,13 @@ ${structFields.join('\n')}
         let info = rLayout?.[name];
         if (!(name in vals) || vals[name] == null) { missing.push(name); continue; }
         let v = vals[name];
-        let expected = info?.wgslType ?? resources[name];
+        let expected = info?._wgslType ?? resources[name];
         // Heuristics: catch the obvious mismatches without producing false positives. A sampler is
         // opaque, so it gets no kind check at all.
         let bad = null;
-        if (info?.isBuf) {
+        if (info?._isBuf) {
           if (!(typeof v.mapAsync === 'function' || typeof v.getMappedRange === 'function' || typeof v.buffer?.mapAsync === 'function')) bad = typeof v;
-        } else if (info?.isTex) {
+        } else if (info?._isTex) {
           // A GPUTextureView is opaque (no marker properties at all), so instanceof is the test.
           if (!(typeof GPUTextureView !== 'undefined' && v instanceof GPUTextureView)
             && !(typeof v.createView === 'function' || 'dimension' in v || 'mipLevelCount' in v)) bad = typeof v;
@@ -1372,16 +1393,16 @@ ${structFields.join('\n')}
         // Right kind of object, wrong usage flags: catch it here rather than in the driver.
         if (!bad && info && v.usage != null) {
           let [need, label] = usageNeed(info);
-          if (need && !(v.usage & need)) bad = `a ${info.isBuf ? 'buffer' : 'texture'} created without ${label}`;
+          if (need && !(v.usage & need)) bad = `a ${info._isBuf ? 'buffer' : 'texture'} created without ${label}`;
         }
         if (bad) mismatched.push({ name, expected, got: bad });
       }
       if (!missing.length && !mismatched.length) return;
-      let at = n => rLayout?.[n]?.binding != null ? ` (binding ${rLayout[n].binding})` : '';
+      let at = n => rLayout?.[n]?._binding != null ? ` (binding ${rLayout[n]._binding})` : '';
       let msg = 'BindGroup(0) resource validation failed.';
       if (missing.length) msg += '\nMissing:' + missing.map(n => `\n  - ${n}${at(n)}`).join('');
       if (mismatched.length) msg += '\nMismatched:' + mismatched.map(m => `\n  - ${m.name}${at(m.name)}: expected ${m.expected}, got ${m.got}`).join('');
-      throw Error(MSG ? msg : 14);
+      err(14, MSG && msg);
     };
 
     // Resources merge into what is already bound and are compared by value, so a partial update
@@ -1395,9 +1416,9 @@ ${structFields.join('\n')}
       for (let [name, v] of OE(resourceValues ?? {})) {
         // A typo'd name used to vanish in silence — the resource twin of the unknown-uniform trap.
         if (!(name in resources))
-          throw Error(MSG ? `Unknown resource '${name}'. Declared: ${OK(resources).join(', ') || '(none)'}.` : 22);
+          err(22, MSG && `Unknown resource '${name}'. Declared: ${OK(resources).join(', ') || '(none)'}.`);
         if (!(name in rLayout)) continue;   // declared but unused by the shader — warned at build
-        next[name] = rLayout[name].isBuf && typeof v?.b?.mapAsync === 'function' ? v.b : v;
+        next[name] = rLayout[name]._isBuf && typeof v?.b?.mapAsync === 'function' ? v.b : v;
       }
       if (bindGroup && bound && rFields.every(n => next[n] === bound[n])) return;
       bound = next;
@@ -1429,7 +1450,7 @@ ${structFields.join('\n')}
 
     let bind = pass => {
       if (!bindGroup && needsBindGroup)
-        throw Error(MSG ? `No resources bound. Call setResources({ ${rFields.join(', ')} }) before dispatching/drawing.` : 15);
+        err(15, MSG && `No resources bound. Call setResources({ ${rFields.join(', ')} }) before dispatching/drawing.`);
       pass.setPipeline(pipeline);
       if (bindGroup) pass.setBindGroup(0, bindGroup);
     };
@@ -1458,8 +1479,10 @@ ${structFields.join('\n')}
       setUniforms: values => uWrite(values),
       set resources(values) { rebindResources(values); },
       setResources: values => rebindResources(values),
-      get uniformFields() { return schema._uniformFields; },
-      get resourceFields() { return rFields; },
+      ...(F_ALIASES ? {
+        get uniformFields() { return schema._uniformFields; },
+        get resourceFields() { return rFields; },
+      } : {}),
       // Vertices per instance, and instance count. Plain properties rather than drawTo arguments
       // because a particle count that changes every frame should not need a new pipeline —
       // `p.instances = alive` and draw again.
@@ -1478,7 +1501,7 @@ ${structFields.join('\n')}
       // Escape hatch: bind this pipeline to a pass you opened yourself, then dispatch on it with
       // the raw WebGPU calls. Not needed for beginCompute() chains — dispatch() handles those.
       bindTo: (pass = fPass) => {
-        if (!pass) throw Error(MSG ? 'No active compute pass. Call G.beginCompute() first, or pass one.' : 17);
+        if (!pass) err(17, MSG && 'No active compute pass. Call G.beginCompute() first, or pass one.');
         bind(pass);
         // Remember it: a staged write mid-chain has to close and reopen the pass, and the reopened
         // one starts with no pipeline bound.
@@ -1494,7 +1517,7 @@ ${structFields.join('\n')}
         let views = targetNames
           ? targetNames.map(n => {
             let v = view?.[n];
-            if (!v) throw Error(MSG ? `drawTo: no target for '${n}'. Pass { ${targetNames.join(', ')} }.` : 18);
+            if (!v) err(18, MSG && `drawTo: no target for '${n}'. Pass { ${targetNames.join(', ')} }.`);
             return asView(v);
           })
           : [view ? asView(view) : targetView()];

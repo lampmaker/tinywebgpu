@@ -55,6 +55,8 @@ const FEATURES = {
   blend: 'F_BLEND',
   depth: 'F_DEPTH',
   mips: 'F_MIPS',
+  staging: 'F_STAGING',
+  aliases: 'F_ALIASES',
 };
 
 // A feature that cannot stand on its own. Asking for the key implies the values.
@@ -171,6 +173,8 @@ const guards = [
   ['blend presets', /one-minus-src-alpha/, !switches.F_BLEND],
   ['depth support', /depthStencil/, !switches.F_DEPTH],
   ['mipmaps', /baseMipLevel/, !switches.F_MIPS],
+  ['staging ring', /262144|1<<18/, !switches.F_STAGING],
+  ['long aliases', /uniformFields/, !switches.F_ALIASES],
 ];
 for (const [what, re, shouldBeGone] of guards) {
   if (shouldBeGone && re.test(code)) {
@@ -180,7 +184,7 @@ for (const [what, re, shouldBeGone] of guards) {
 }
 
 // Every numbered throw must have an entry in ERRORS, and no number may be used twice.
-const used = [...source.matchAll(/MSG \?[\s\S]*?: (\d+)\)/g)].map(m => +m[1]);
+const used = [...source.matchAll(/\berr\((\d+), MSG &&/g)].map(m => +m[1]);
 const dupes = used.filter((n, i) => used.indexOf(n) !== i);
 const undocumented = used.filter(n => !(n in ERRORS));
 if (dupes.length || undocumented.length) {
@@ -189,10 +193,60 @@ if (dupes.length || undocumented.length) {
   process.exit(1);
 }
 
+// ── name-table compression (tiny builds by default; --pack / --no-pack override) ──────────────
+// Rewrites repeated long WebGPU member names to bracket reads from one packed string table:
+// `.beginComputePass(` becomes `[k0](` with `beginComputePass` spelled once. Raw bytes only —
+// gzip would deduplicate the names anyway, but the inline/on-chain builds this exists for never
+// gzip, which is why the stock (HTTP-delivered) build skips it. A name is rewritten only when
+// *every* occurrence in the output is a member access — one appearance as an object key or
+// inside a string disqualifies it, so the rewrite can never change an API contract.
+const pack = tiny ? !args.includes('--no-pack') : args.includes('--pack');
+let packed = code;
+if (pack) {
+  const CANDIDATES = [
+    'beginComputePass', 'beginRenderPass', 'createShaderModule', 'getCompilationInfo',
+    'dispatchWorkgroups', 'dispatchWorkgroupsIndirect', 'createCommandEncoder', 'createBindGroup',
+    'createRenderPipeline', 'createComputePipeline', 'getBindGroupLayout', 'setBindGroup',
+    'setPipeline', 'writeBuffer', 'copyBufferToBuffer', 'copyTextureToBuffer', 'getMappedRange',
+    'mapAsync', 'createView', 'createTexture', 'requestAdapter', 'requestDevice', 'writeTexture',
+    'createSampler', 'getCurrentTexture', 'clearBuffer', 'destroy', 'configure',
+    'getPreferredCanvasFormat', 'pushErrorScope', 'popErrorScope',
+  ];
+  // Short identifiers guaranteed absent from the minified output.
+  const ids = [];
+  for (const c of 'abcdefghijklmnopqrstuvwxyz') {
+    const id = '$' + c;
+    if (!new RegExp(`\\$${c}\\b`).test(packed)) ids.push(id);
+  }
+  const table = [];
+  for (const name of CANDIDATES) {
+    if (!ids.length) break;
+    const total = packed.split(name).length - 1;
+    const uses = [...packed.matchAll(new RegExp(`(\\?\\.|\\.)${name}\\b`, 'g'))];
+    if (total === 0 || uses.length !== total) continue;   // key/string appearance → unsafe, skip
+    const id = ids[0];
+    // profit: each `.name` (1+len) → `[id]` (2+id.len); `?.name` → `?.[id]` costs 2 more.
+    const saved = uses.reduce((a, m) => a + name.length + 1 - (2 + id.length) - (m[1] === '?.' ? 2 : 0), 0);
+    const cost = name.length + 1 + id.length + 1;         // table string entry + destructure slot
+    if (saved <= cost) continue;
+    ids.shift();
+    table.push([name, id]);
+    packed = packed.replace(new RegExp(`(\\?\\.|\\.)${name}\\b`, 'g'),
+      (m, d) => (d === '?.' ? '?.[' : '[') + id + ']');
+  }
+  if (table.length) {
+    const decl = `let[${table.map(t => t[1]).join(',')}]=${JSON.stringify(table.map(t => t[0]).join(','))}.split(",");`;
+    // keep the /*! banner */ first if present
+    const m = packed.match(/^\/\*![^]*?\*\/\n?/);
+    packed = m ? m[0] + decl + packed.slice(m[0].length) : decl + packed;
+    console.log(`  name-table: ${table.length} names packed (${code.length - packed.length >= 0 ? '-' : '+'}${Math.abs(code.length - packed.length)}B)`);
+  }
+}
+
 await mkdir(dirname(OUT), { recursive: true }).catch(() => { });
-await writeFile(OUT, code);
+await writeFile(OUT, packed);
 
 const kb = n => (n / 1024).toFixed(1) + ' KB';
 const dropped = Object.keys(FEATURES).filter(f => !on.has(f));
-console.log(`${OUT}  ${kb(Buffer.byteLength(code))}  (from ${kb(Buffer.byteLength(await readFile(SRC, 'utf8')))})`
+console.log(`${OUT}  ${kb(Buffer.byteLength(packed))}  (from ${kb(Buffer.byteLength(await readFile(SRC, 'utf8')))})`
   + (dropped.length ? `\n  without: ${dropped.join(', ')}` : ''));

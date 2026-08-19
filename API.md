@@ -255,7 +255,8 @@ G.endCompute();    // one pass, two setPipeline calls, one submit
 While a frame is open, uniform writes, storage `w()` and `clear()` are **frame-ordered**: the
 toolkit stages the bytes and encodes a buffer-to-buffer copy at that point in the frame, so
 consecutive dispatches see the values set just before them — per-dispatch uniforms work in a
-single submit. Outside a frame, writes are plain queue writes as
+single submit. (Builds without the `staging` switch trade this away: in-frame writes become
+plain queue writes and the last value set before `endFrame()` wins for the whole frame.) Outside a frame, writes are plain queue writes as
 before. `createStorageBuffer().r()` during an open frame reads *pre-frame* data and warns —
 `endFrame()` first. `w(data, byteOffset)` needs a 4-byte-aligned `byteOffset` inside a frame and
 out (it throws saying so — WebGPU demands it on both write paths). A `data` whose byte length is
@@ -333,12 +334,12 @@ that reason.
 
 | File | Size | What it is |
 |---|---|---|
-| `tinywebgpu.js` | 89 KB | the source, with comments and every diagnostic. `main`/`exports` point here. |
-| `tinywebgpu.min.js` | 18.3 KB (8.2 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
-| `tinywebgpu.tiny.js` | 11.4 KB (5.4 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
+| `tinywebgpu.js` | 91 KB | the source, with comments and every diagnostic. `main`/`exports` point here. |
+| `tinywebgpu.min.js` | 17.8 KB (8.2 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
+| `tinywebgpu.tiny.js` | 10.4 KB (5.2 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
 
 `build:tiny` drops `writeTexture`, `loadTexture`, `readTexture`, buffer `.r()`, `save`, `show`,
-the ping-pong helpers, `resizeCanvas`, depth support, mipmaps and the named blend presets. Keep any of them with
+the ping-pong helpers, `resizeCanvas`, depth support, mipmaps, the staging ring (in-frame writes become plain queue writes — last value per frame wins), the long aliases, and the named blend presets. Tiny builds also pack repeated WebGPU member names into a string table (`--no-pack` to skip). Keep any of them with
 `node build-min.mjs --tiny --with=show,read`, or start from the full build and remove a few with
 `--without=save,texio`. `--iife` emits a classic `<script>` assigning `globalThis.WEBGPU`.
 Full table of what each switch costs: README → *Tiny build*.

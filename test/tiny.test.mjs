@@ -24,6 +24,7 @@ const cpass = { setPipeline() { }, setBindGroup() { }, dispatchWorkgroups: (...a
 const rpass = { setPipeline() { }, setBindGroup() { }, draw: () => { draws++; }, end() { } };
 
 const G = WEBGPU();
+let writes = 0;
 G.device = {
   createBuffer: ({ size }) => ({ size }),
   createTexture: () => ({ createView: () => ({}) }),
@@ -32,7 +33,7 @@ G.device = {
   createRenderPipeline: () => ({ getBindGroupLayout: () => ({}) }),
   createBindGroup: () => ({}),
   createCommandEncoder: () => ({ beginComputePass: () => cpass, beginRenderPass: () => rpass, finish() { } }),
-  queue: { submit() { }, writeBuffer() { } },
+  queue: { submit() { }, writeBuffer() { writes++; } },
 };
 G.format = 'bgra8unorm';
 
@@ -46,8 +47,8 @@ const buf = G.createStorageBuffer(Float32Array.from([1, 2, 3, 4]));
 check('createStorageBuffer still sizes and fills', buf.b.size, 16);
 check('the readback helper went with F_READ', [buf.r, buf.read], [undefined, undefined]);
 check('write and clear stayed', [typeof buf.w, typeof buf.clear], ['function', 'function']);
-check('the readable aliases point at the same things',
-  [buf.buffer === buf.b, buf.write === buf.w], [true, true]);
+check('the long aliases went with F_ALIASES',
+  [buf.buffer, buf.write, buf.read], [undefined, undefined, undefined]);
 
 buf.b.usage = 128;                    // GPUBufferUsage.STORAGE
 buf.b.mapAsync = () => { };
@@ -66,6 +67,13 @@ check('render draws the fullscreen triangle', [draws, /fn vs_main/.test(code)], 
 
 G.beginFrame(); c.run(64); G.endFrame();
 check('the frame API records and submits', dispatched, [1, 1, 1]);
+
+// Without F_STAGING an in-frame uniform write falls back to a plain queue write (last value
+// set before endFrame wins for the whole frame) instead of a staged copy.
+writes = 0;
+G.beginFrame(); c.setUniforms({ n: 9 }); c.run(64); G.endFrame();
+check('without staging, an in-frame uniform write is a queue write', writes, 1);
+check('field getters went with F_ALIASES', [c.uniformFields, c.resourceFields], [undefined, undefined]);
 
 // --- error text folded to numbers ----------------------------------------------------------
 // drawTo with no view and no canvas context is error 7; see the ERRORS table in build-min.mjs.
