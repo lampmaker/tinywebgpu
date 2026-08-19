@@ -1105,7 +1105,7 @@ ${main}
         }
       }
       (msgs.some(m => m.type === 'error') ? console.error : console.warn)(log);
-    }),
+    }).catch(() => { }),   // the info request rejects if the device is lost meanwhile
     module);
 
   // `layout: 'auto'` derives the bind group layout from what the shader actually references.

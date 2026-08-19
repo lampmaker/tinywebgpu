@@ -103,7 +103,7 @@
     // ---- 1. fade: decay the whole grid -----------------------------------------------------
     // Bound as a plain array<u32>: only this pass writes it here, so there is nothing to make
     // atomic. Integer maths keeps it exact — `keep/256` is the per-frame survival fraction.
-    const fade = await G.makeCompute('', `
+    const fade = G.makeCompute('', `
         let i = gid.x;
         if (i >= UB.cells) { return; }
         grid[i] = grid[i] * UB.keep / 256u;
@@ -114,7 +114,7 @@
     // World space is x in [-aspect, aspect], y in [-1, 1], so the field keeps its shape when the
     // canvas does not. The struct is declared here and referenced by the resource schema below;
     // WGSL lets module-scope declarations appear in any order.
-    const sim = await G.makeCompute(`
+    const sim = G.makeCompute(`
         struct Particle {
           pos: vec2<f32>,
           vel: vec2<f32>,
@@ -156,7 +156,7 @@
       { wg: [WG, 1, 1] });
 
     // ---- 3. draw: colour the grid ------------------------------------------------------------
-    const draw = await G.makeFrag(`
+    const draw = G.makeFrag(`
         fn pal(t: f32) -> vec3<f32> {
           let a = vec3<f32>(0.03, 0.02, 0.09);
           let b = vec3<f32>(0.30, 0.09, 0.72);

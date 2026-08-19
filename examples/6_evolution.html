@@ -221,7 +221,7 @@
       }`;
 
     // ---- seed: a uniform random population, scored ------------------------------------------
-    const seed = await G.makeCompute(OBJECTIVE, `
+    const seed = G.makeCompute(OBJECTIVE, `
         let i = gid.x;
         if (i >= UB.pop) { return; }
         var s = (i * 747796405u) ^ (UB.gen * 2891336453u) ^ 0x85EBCA6Bu;
@@ -242,7 +242,7 @@
     // Thread i owns individual i and nothing else. It reads three other individuals from the
     // source half of the buffer and writes only its own slot in the destination half, so there
     // is no race and no barrier — the entire population advances in one dispatch.
-    const step = await G.makeCompute(OBJECTIVE, `
+    const step = G.makeCompute(OBJECTIVE, `
         let i = gid.x;
         if (i >= UB.pop) { return; }
         var s = (i * 2654435761u) ^ (UB.gen * 2246822519u) ^ 0x9E3779B9u;
@@ -291,7 +291,7 @@
       { pop: 'array<f32>', fit: 'array<f32>' }, { wg: [WG, 1, 1] });
 
     // ---- scatter: the population's first two coordinates, splatted ----------------------------
-    const scatter = await G.makeCompute('', `
+    const scatter = G.makeCompute('', `
         let i = gid.x;
         if (i >= UB.pop) { return; }
         let x = (pop[UB.srcOff + i] - UB.lo) / (UB.hi - UB.lo);
@@ -308,7 +308,7 @@
     // This is the textbook answer instead: one workgroup strides the whole population keeping a
     // private minimum, then the 256 partial answers are folded pairwise through workgroup memory.
     // One dispatch, and it hands back the value, the index and the genome together.
-    const reduce = await G.makeCompute(`
+    const reduce = G.makeCompute(`
         var<workgroup> sFit: array<f32, ${RED_WG}>;
         var<workgroup> sIdx: array<u32, ${RED_WG}>;`, `
         let t = lid.x;
@@ -346,7 +346,7 @@
     // ---- show: the landscape slice, the population, the markers --------------------------------
     // The slice is recomputed per pixel every frame, because it genuinely changes: it is the
     // plane through the current best individual, and that individual keeps moving.
-    const show = await G.makeFrag(OBJECTIVE + `
+    const show = G.makeFrag(OBJECTIVE + `
         fn ramp(t: f32) -> vec3<f32> {
           let a = vec3<f32>(0.82, 0.97, 1.00);         // low fitness — where you want to end up
           let b = vec3<f32>(0.16, 0.42, 0.74);

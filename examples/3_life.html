@@ -33,7 +33,7 @@
     const W = 256, H = 256;
     const G = await WEBGPU().init(document.getElementById('c').getContext('webgpu'));
 
-    const step = await G.makeCompute(`
+    const step = G.makeCompute(`
         fn idx(x: i32, y: i32) -> u32 {
           return u32(((y + ${H}) % ${H}) * ${W} + ((x + ${W}) % ${W}));
         }`, `
@@ -50,7 +50,7 @@
       `,
       {}, { src: 'array<u32>', dst: 'array<u32>' }, { wg: [8, 8, 1] });
 
-    const show = await G.makeFrag(`
+    const show = G.makeFrag(`
         fn frag(uv: vec2<f32>) -> vec4<f32> {
           let x = u32(uv.x * ${W}.0);
           let y = u32((1.0 - uv.y) * ${H}.0);

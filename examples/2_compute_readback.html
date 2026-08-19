@@ -27,7 +27,7 @@
     const G = await WEBGPU().init();          // compute-only: no canvas
     const N = 16;
 
-    const p = await G.makeCompute('', `
+    const p = G.makeCompute('', `
         let i = gid.x;
         if (i < UB.n) { data[i] = f32(i) * f32(i); }
       `,
