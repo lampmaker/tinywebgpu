@@ -207,7 +207,7 @@ export let WEBGPU = () => {
     // `f` the canvas format. OA returns S, so the chain's last value is the documented return.
     init: async (ctx = 0, opts = {}, gpu = navigator.gpu, a, w, d, f) => (
       gpu || err(1, MSG && 'WebGPU not supported'),
-      typeof ctx === 'string' &&
+      typeof ctx === STR &&
         (ctx = document.querySelector(a = ctx) || err(23, MSG && `init: nothing matches '${a}'.`)),
       ctx?.getContext && (ctx = ctx.getContext('webgpu')),   // a canvas rather than a context
       (a = await gpu.requestAdapter()) || err(2, MSG && 'No GPU adapter'),
@@ -281,13 +281,13 @@ export let WEBGPU = () => {
       // makePipeline, once, instead of being restated at every layer.
       S.makeDraw({
         ...opts, uniforms, resources,
-        code: `struct VSOut {@builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>};
-@vertex fn vs_main(@builtin(vertex_index) i: u32) -> VSOut {
-var ndc = array<vec2<f32>,3>(vec2<f32>(-1.,-3.),vec2<f32>(-1.,1.),vec2<f32>(3.,1.))[i];
-var o: VSOut; o.pos = vec4<f32>(ndc, 0.0, 1.0); o.uv = ndc * 0.5 + vec2<f32>(0.5); return o;
+        code: `struct VSOut {${BI}position) pos: ${V4}, @location(0) uv: ${V2}};
+@vertex fn vs_main(${BI}vertex_index) i: u32) -> VSOut {
+var ndc = array<${V2},3>(${V2}(-1.,-3.),${V2}(-1.,1.),${V2}(3.,1.))[i];
+var o: VSOut; o.pos = ${V4}(ndc, 0.0, 1.0); o.uv = ndc * 0.5 + ${V2}(0.5); return o;
 }
 ${frag}
-@fragment fn fs_main(vs: VSOut) -> ${opts.targets ? 'FSOut' : '@location(0) vec4<f32>'} { return frag(vs.uv); }
+@fragment fn fs_main(vs: VSOut) -> ${opts.targets ? 'FSOut' : `@location(0) ${V4}`} { return frag(vs.uv); }
 `.trim(),
       }),
 
@@ -319,7 +319,7 @@ ${frag}
       makePipeline({
         ...opts,
         isCompute: false, targetNames: names,
-        code: names ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: vec4<f32>`).join(', ')}};\n${opts.code}` : opts.code,
+        code: names ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: ${V4}`).join(', ')}};\n${opts.code}` : opts.code,
         format: names ? OV(opts.targets) : opts.format,
       })),
 
@@ -339,7 +339,7 @@ ${frag}
       // compiled, and line-numbered in compile errors. `${wg}` renders as `x,y,z`.
       code: `${body}
 @compute @workgroup_size(${wg})
-fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+fn main(${BI}global_invocation_id) gid: ${V3U}, ${BI}local_invocation_id) lid: ${V3U}, ${BI}workgroup_id) wid: ${V3U}) {
 ${main}
 }
 `.trim(), uniforms, resources, isCompute: true, wg
@@ -506,7 +506,7 @@ ${main}
     // Everything else (mipmapFilter, wrapW → addressModeW, compare, maxAnisotropy, lod clamps)
     // passes straight through to createSampler.
     createSampler: ({ magFilter = 'nearest', minFilter = 'nearest',
-      wrapU = 'clamp-to-edge', wrapV = 'clamp-to-edge', wrapW, ...rest } = {}) => D.createSampler({
+      wrapU = CE, wrapV = CE, wrapW, ...rest } = {}) => D.createSampler({
         magFilter, minFilter, addressModeU: wrapU, addressModeV: wrapV,
         ...(wrapW && { addressModeW: wrapW }), ...rest
       }),
@@ -539,7 +539,7 @@ ${main}
       // `bmp` is whatever needs decoding into an ImageBitmap first; everything else (canvas,
       // video, an ImageBitmap already) is used as the copy source directly.
       loadTexture: async (src, opts = {}, source = src, bmp = 0, w, h, tex) => (
-        typeof src === 'string'
+        typeof src === STR
           // Without the .ok check, a 404 surfaces as an opaque createImageBitmap decode error.
           ? (bmp = await fetch(src),
             bmp.ok || err(20, MSG && `loadTexture: HTTP ${bmp.status} for '${src}'.`),
@@ -608,7 +608,7 @@ ${main}
        */
       generateMipmaps: async tex => {
         let p = await S.makeFrag(
-          `fn frag(uv: vec2<f32>) -> vec4<f32> { return textureSample(src, samp, vec2<f32>(uv.x, 1.0 - uv.y)); }`,
+          `fn frag(uv: ${V2}) -> ${V4} { return textureSample(src, samp, ${V2}(uv.x, 1.0 - uv.y)); }`,
           {}, { src: 'texture_2d<f32>', samp: 'sampler' }, { format: tex.format });
         mipSamp ||= S.createSampler({ magFilter: 'linear', minFilter: 'linear' });
         // One frame → one submit for the whole chain, unless the caller already has one open.
@@ -728,11 +728,11 @@ ${main}
         // must not outlive the hook it was compiled under. The promise is cached, like
         // shaderCache, so two concurrent first calls share a compile.
         (!entry || entry.pre !== S.pre) && (
-          p = S.makeFrag(`fn frag(uv: vec2<f32>) -> vec4<f32> {
-    let d = vec2<f32>(textureDimensions(src));
-    let c = vec2<i32>(clamp(vec2<f32>(uv.x, ${opts.flipY ? 'uv.y' : '1.0 - uv.y'}) * d, vec2<f32>(0.0), d - 1.0));
-    return vec4<f32>(textureLoad(src, c, 0)) * UB.scale + UB.offset;
-  }`, { scale: 'vec4<f32>', offset: 'vec4<f32>' }, { src: `texture_2d<${sample}>` }, { format }),
+          p = S.makeFrag(`fn frag(uv: ${V2}) -> ${V4} {
+    let d = ${V2}(textureDimensions(src));
+    let c = vec2<i32>(clamp(${V2}(uv.x, ${opts.flipY ? 'uv.y' : '1.0 - uv.y'}) * d, ${V2}(0.0), d - 1.0));
+    return ${V4}(textureLoad(src, c, 0)) * UB.scale + UB.offset;
+  }`, { scale: V4, offset: V4 }, { src: `texture_2d<${sample}>` }, { format }),
           p.catch(() => blitCache.delete(key)),
           blitCache.set(key, entry = { pre: S.pre, p })),
         p = await entry.p,
@@ -855,6 +855,13 @@ ${main}
   // A minifier cannot shorten a property access on a global, and these are spelled out about twenty
   // times between them. Aliasing is worth ~200 bytes minified.
   let OE = Object.entries, OK = Object.keys, OA = Object.assign, OV = Object.values;
+
+  // WGSL fragments and enum strings the file repeats, spelled once and interpolated. The
+  // interpolated result is byte-identical WGSL, so shader hashes and the compile-log windows
+  // are unaffected; only the JS shrinks. (The `shorthand` build option compresses *user*
+  // tokens at compile time; these are unconditional and cost nothing at runtime.)
+  let V2 = 'vec2<f32>', V4 = 'vec4<f32>', V3U = 'vec3<u32>', BI = '@builtin(';
+  let STR = 'string', CE = 'clamp-to-edge';
 
   // 'alpha' expects straight (un-premultiplied) alpha out of frag(); 'premultiplied' expects rgb
   // already scaled by a; 'additive' ignores destination alpha. All three add and all three leave
@@ -1075,7 +1082,7 @@ ${main}
 
   // Accepts a preset name or a raw GPUBlendState; falsy = no blending (opaque).
   let resolveBlend = blend =>
-    !blend || typeof blend !== 'string' ? blend || 0
+    !blend || typeof blend !== STR ? blend || 0
       : BLENDS[blend] ?? err(4, MSG && `Unknown blend preset '${blend}'. Use ${OK(BLENDS).map(k => `'${k}'`).join(', ')} or a GPUBlendState object.`);
 
   let compileShader = async (code, label, module, msgs, hasError) => (
@@ -1231,7 +1238,7 @@ ${structFields.join('\n')}
             decls = `struct ${typeForBinding} {\n  value: ${wgslType},\n}`)),
       resourceLayout[name] = { _binding: b, _wgslType: wgslType, _isBuf: isBuf, _isTex: isTex, _isSampler: isSampler },
       (decls && `${decls}\n`) +
-        `${gb(b)}${isBuf ? (readOnly.includes(name) ? '<storage, read>' : '<storage, read_write>') : ''} ${name}: ${typeForBinding};`));
+        `${gb(b)}${isBuf ? `<storage, read${readOnly.includes(name) ? '' : '_write'}>` : ''} ${name}: ${typeForBinding};`));
 
     // `wgsl` / `uniformBuffer` / `uniformWrite` are the documented shape and keep their names. The
     // rest is internal, so it is `_`-prefixed and the minified build renames it.
@@ -1296,7 +1303,7 @@ ${structFields.join('\n')}
     // Blend and depth are part of the render key: identical WGSL with a different blend or depth
     // state is a different pipeline, and omitting them here would hand back the wrong one.
     // (`dep.texture` is an attachment, not pipeline state, so it stays out of the key.)
-    let blendKey = isCompute || !blend ? '' : (typeof blend === 'string' ? blend : JSON.stringify(blend)) + '|';
+    let blendKey = isCompute || !blend ? '' : (typeof blend === STR ? blend : JSON.stringify(blend)) + '|';
     let depthKey = F_DEPTH && dep ? `D${dep.format},${dep.compare},${dep.write}|` : '';
     let cacheKey = (isCompute ? `C|` : `R|${[format].flat().join(',')}|${blendKey}${depthKey}${topology}|`) + ckey(finalCode);
     // The *promise* is cached, like shaderCache — two concurrent builds of the same source share

@@ -106,6 +106,8 @@ const CANDIDATES = [
 // refuse loudly instead. Not exhaustive; it guards the obvious traps.
 const RESERVED = new Set([
   ...CANDIDATES,
+  // Platform members the library calls that are not pack candidates (aliased or single-use).
+  'createBuffer', 'copyExternalImageToTexture',
   'gpu', 'queue', 'limits', 'features', 'lost', 'reason', 'message', 'device', 'format',
   'buffer', 'texture', 'view', 'sampler', 'usage', 'size', 'label', 'code', 'entries',
   'binding', 'resource', 'layout', 'module', 'entryPoint', 'targets', 'blend', 'primitive',
