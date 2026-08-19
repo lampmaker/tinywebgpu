@@ -34,13 +34,14 @@ const makePass = kind => ({
   setPipeline: () => log.push(`${kind}:setPipeline`),
   setBindGroup: () => log.push(`${kind}:setBindGroup`),
   dispatchWorkgroups: (...a) => log.push(`dispatch(${a})`),
-  dispatchWorkgroupsIndirect: () => log.push('dispatchIndirect'),
+  dispatchWorkgroupsIndirect: b => log.push(b?.b ? 'dispatchIndirect:handle-not-unwrapped' : 'dispatchIndirect'),
   draw: () => log.push('draw'),
   end: () => log.push(`${kind}:end`),
 });
 
 G.device = {
-  createBuffer: ({ size }) => ({ size, usage: 128, mapAsync: () => { } }),
+  destroy: () => log.push('deviceDestroy'),
+  createBuffer: ({ size }) => ({ size, usage: 128, mapAsync: () => { }, destroy: () => log.push('bufDestroy') }),
   createTexture: () => ({ createView: () => ({}) }),
   createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
   createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }),
@@ -50,7 +51,7 @@ G.device = {
     const id = ++encoders;
     log.push(`encoder${id}`);
     return {
-      beginComputePass: () => { log.push('cpass'); return makePass('cpass'); },
+      beginComputePass: (o = {}) => { log.push('cpass' + (o.tag ? `[${o.tag}]` : '')); return makePass('cpass'); },
       beginRenderPass: () => { log.push('rpass'); return makePass('rpass'); },
       copyBufferToBuffer: () => log.push('copyB2B'),
       clearBuffer: () => log.push('clearBuffer'),
@@ -195,6 +196,24 @@ check('bindTo binds the pipeline to the given pass',
   log, ['encoder1', 'cpass', 'cpass:setPipeline', 'cpass:setBindGroup']);
 G.endCompute();
 
+// --- beginCompute options survive a mid-chain reopen ------------------------------------------
+// A staged write closes and reopens the chained pass; the reopened pass must carry the same
+// descriptor (think timestampWrites), not a bare {}.
+reset();
+G.beginCompute({ tag: 'q' });
+sim.setUniforms({ step: 2 });          // staged: closes the pass, copies, reopens it
+sim.dispatch(1);
+G.endCompute();
+check('a mid-chain reopen keeps the beginCompute descriptor',
+  log.filter(l => l === 'cpass[q]').length, 2);
+
+// --- dispatchIndirect accepts the handle, not just the raw buffer ----------------------------
+reset();
+G.beginFrame();
+sim.dispatchIndirect(indirect, 0);     // the {b, w} handle itself
+G.endFrame();
+check('dispatchIndirect unwraps a buffer handle', log.includes('dispatchIndirect'), true);
+
 // --- beginFrame twice: the dangling frame is submitted, not leaked ---------------------------
 reset();
 G.beginFrame();
@@ -203,6 +222,24 @@ G.beginFrame();                       // no endFrame — the first one must stil
 G.endFrame();
 check('a second beginFrame submits the first frame instead of dropping it',
   [log.filter(l => l.startsWith('encoder')).length, log.filter(l => l === 'submit').length], [2, 2]);
+
+// --- G.frame(): begin/endFrame around a callback, exception-safe -----------------------------
+reset();
+G.frame(() => sim.dispatch(1));
+check('frame() wraps one encoder and one submit around the callback',
+  [log.filter(l => l.startsWith('encoder')).length, log.filter(l => l === 'submit').length], [1, 1]);
+
+reset();
+let threw = '';
+try { G.frame(() => { sim.dispatch(1); throw Error('boom'); }); } catch (e) { threw = e.message; }
+check('frame() still submits when the callback throws',
+  [threw, log.filter(l => l === 'submit')], ['boom', ['submit']]);
+
+// --- destroy(): pooled resources and the device go; must stay the LAST test ------------------
+reset();
+G.destroy();
+check('destroy() releases the staging ring and the device, and clears G.device',
+  [log.includes('bufDestroy'), log.includes('deviceDestroy'), G.device], [true, true, null]);
 
 if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nall frame-lifecycle tests passed');

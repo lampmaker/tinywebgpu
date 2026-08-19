@@ -37,9 +37,9 @@ G.device = {
 G.format = 'bgra8unorm';
 
 // --- the optional groups are gone --------------------------------------------------------
-check('texio / read / save / show / pingpong / resize are absent',
+check('texio / read / save / show / pingpong / resize / mips are absent',
   ['writeTexture', 'loadTexture', 'readTexture', 'save', 'show', 'pingPong', 'createPingPong',
-    'createPingPongTexture', 'resizeCanvas'].filter(k => G[k] !== undefined), []);
+    'createPingPongTexture', 'resizeCanvas', 'generateMipmaps'].filter(k => G[k] !== undefined), []);
 
 // --- ...and the core is not ---------------------------------------------------------------
 const buf = G.createStorageBuffer(Float32Array.from([1, 2, 3, 4]));

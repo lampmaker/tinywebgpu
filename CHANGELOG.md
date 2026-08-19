@@ -4,6 +4,114 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Added — ease of use, from the user's chair**
+
+- **TypeScript declarations.** `tinywebgpu.d.ts` ships with the package and is wired through
+  `types`/`exports`, so editors autocomplete the whole surface with inline docs — in TypeScript
+  and plain-JS projects alike. Zero runtime bytes. The `GPU*` names come from TypeScript's own
+  `lib.dom` (recent versions ship WebGPU); older TS setups add `@webgpu/types`.
+- **Mipmaps** (`F_MIPS`, 0.5 KB; `--tiny` drops it). `createTexture(w, h, fmt, { usage, mips })`
+  allocates a mip chain (`true` = full, a number = that many levels), `generateMipmaps(tex)`
+  fills it from level 0 by successive linear-filtered blits in one submit, and
+  `loadTexture(src, { mips: true })` does both. Verified on-device: the 1×1 tail of a
+  red/green/blue/white 2×2 comes back as the exact average grey.
+- **`init()` takes a canvas, an OffscreenCanvas, or a CSS selector** as well as a ready
+  `'webgpu'` context — `init('#c')` replaces the `getContext` boilerplate in every first line.
+  A selector that matches nothing throws saying so (error 23).
+- **`buf.r(Float32Array)`** — pass the constructor as the only argument to read the whole
+  buffer typed, instead of spelling out `r(nbytes, 0, Float32Array)`.
+- **`G.frame(fn, opts?)`** — `beginFrame`/`endFrame` around a callback, exception-safe: the
+  frame is submitted even if `fn` throws, so one bad frame cannot leave a dangling encoder.
+- **`G.destroy()`** — tears the instance down: destroys the device, the staging ring, the
+  readback pool and the depth textures, and empties the caches. SPAs, hot-reload dev servers
+  and live-coding pages stop leaking a device per reload. Intentional destruction no longer
+  logs a device-lost error or fires `onDeviceLost`.
+- **`show()` infers the target format** from a `GPUTexture` target, so
+  `show(hdr, floatTarget)` works without an explicit `format`.
+- **`makeQuad` forwards every `makeFrag` option** — `targets` and `depth` included, not just
+  `format` and `blend`.
+
+**Fixed**
+
+- **`setResources` with a `GPUTextureView` threw in DIAG builds.** The resource validator's
+  heuristics only recognized textures; a view — explicitly documented as accepted — has no
+  marker properties at all and was reported as a mismatch. Views are now recognized by
+  `instanceof`. (Found because `generateMipmaps` binds per-level views.)
+
+**Added — depth testing**
+
+- **`makeDraw({ depth })` / `makeFrag(…, { depth })`.** `depth: true` adds a `depth24plus`
+  buffer with `less` compare and depth writes on; the depth texture is created lazily, sized to
+  the render target, pooled by size, and shared by every depth-enabled pipeline drawing into the
+  same target, so multi-pipeline scenes depth-test against each other with nothing to wire up.
+  `drawTo(view, 'load')` keeps the depth buffer along with the colour. Overridable field by
+  field: `{format?, compare?, write?, texture?}` — `texture` hands over your own attachment.
+  Depth state is part of the pipeline cache key. New build switch `depth` (0.6 KB); `--tiny`
+  drops it. Because the auto-managed texture needs the target's size, draw to the canvas or pass
+  a `GPUTexture` (not a raw view) to `drawTo`, or supply `depth.texture` — a view the library
+  has never measured throws asking for one of those.
+
+**Fixed**
+
+- **Byte-alignment failures on real devices that the stubbed tests could not see.** WebGPU
+  requires 4-byte-multiple sizes and offsets on `writeBuffer` and `copyBufferToBuffer`; four
+  paths passed unaligned values straight through: `w(data)` outside a frame with an unaligned
+  `byteLength` (inside a frame it already worked — the beginner path and the fast path
+  disagreed), `createStorageBuffer(data)` create-and-fill with unaligned data, `w(data, offset)`
+  outside a frame with an unaligned offset (staged writes already threw a clear error; the queue
+  path let the driver reject it), and `.r(nbytes)` with an unaligned count. Writes and readback
+  copies are now padded to 4 bytes (readbacks trimmed back to what was asked); an unaligned
+  *offset* throws the same named error on both paths.
+- **`makeCompute` with a partial `wg` array generated invalid WGSL** — `{wg: [64]}` interpolated
+  `@workgroup_size(64, undefined, undefined)`. Missing axes now default to 1, matching what
+  `run()` already assumed.
+- **A schema name mentioned only in a WGSL comment counted as referenced.** `layout:'auto'`
+  parses real WGSL, so the binding was emitted, stripped by the driver, and the bind group
+  rejected with a validation error. Comments are stripped before the reference test, so the
+  case is now impossible rather than diagnosed after the fact.
+- **`setResources` with a name that is not in the schema vanished in silence** — the resource
+  twin of the unknown-uniform trap fixed earlier. It now throws and lists the declared names.
+  (A name that is declared but unused by the shader is still accepted silently, as before.)
+- **Two concurrent builds of identical pipeline source each created a GPU pipeline.** The
+  pipeline cache now stores the promise, as the shader cache always did, so they share one.
+- **`show()`'s blit cache ignored `G.pre`** — swapping the preprocessing hook between calls
+  could return a pipeline compiled under the previous hook. The cache entry now remembers which
+  `pre` built it.
+- **A mid-chain staged write reopened the `beginCompute()` pass with a bare descriptor**,
+  dropping e.g. `timestampWrites`. The reopen now reuses the descriptor `beginCompute` was given.
+- **`loadTexture(url)` on a failed fetch threw an opaque `createImageBitmap` decode error.** It
+  now reports the HTTP status and the URL.
+- **`makeCompute2D`'s `run()` dropped its `encoder` argument**, so it could not record onto a
+  caller's encoder the way every other dispatch call can.
+- The README's texture example sampled with the raw generated uv, which displays an image
+  upside down (uv.y is 0 at the *bottom* of the screen; an image's first row is texture v = 0).
+  The example flips v, and the sharp-edges list, `loadTexture` docs and example 5 now spell the
+  convention out.
+
+**Changed — performance**
+
+- **Bind groups are cached per resource combination** (up to 8 per pipeline, keyed on resource
+  identity). A ping-pong simulation used to build a fresh `GPUBindGroup` every swap, every
+  frame, forever; it now builds two, total, and swaps between them.
+- **`dispatchIndirect` accepts the `createIndirectBuffer()` handle** as well as a raw
+  `GPUBuffer`, matching `setResources`.
+- **`createSampler` forwards the full descriptor** — `mipmapFilter`, `wrapW` (→ `addressModeW`),
+  `compare`, `maxAnisotropy` and the lod clamps pass through instead of being dropped, so
+  comparison and anisotropic samplers no longer need `G.device.createSampler`.
+- **`readTexture` types `*16float` readbacks as `Float16Array`** where the platform has it
+  (raw `Uint16Array` half bits otherwise).
+
+**Changed — source**
+
+- **`let` everywhere** (the eight build switches stay `const` — esbuild constant-folds a
+  `const` literal and not a `let`, and the dead-code elimination behind the tiny build depends
+  on that fold).
+- Deduplicated: one `tex2d` helper behind `createTexture`, `createStorageTexture` and the depth
+  pool; one `readBack` helper behind buffer `.r()` and `readTexture`; one `oneShot`/`onEncoder`
+  pair behind every self-submitting dispatch, draw, clear and readback; `asView` hoisted next to
+  `viewOf` and shared by `drawTo` and the bind-group builder; `createStorageBuffer` builds on
+  `createBuffer` instead of repeating it.
+
 **Reorganized — `tinywebgpu.js` reads top-down now**
 
 The file was one 630-line object literal with the public API, the `_`-prefixed internals and the

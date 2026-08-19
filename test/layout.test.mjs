@@ -355,6 +355,291 @@ const layoutOf = uniforms => {
   check('makeFrag still draws the 3-vertex triangle', drew, [3, 1, 0, 0]);
 }
 
+// --- workgroup sizes: missing axes default to 1 ------------------------------
+{
+  let lastCode = null;
+  Object.assign(S.device, {
+    createShaderModule: ({ code }) => { lastCode = code; return { getCompilationInfo: async () => ({ messages: [] }) }; },
+    createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }),
+  });
+  // wg: [64] used to interpolate `undefined` straight into the WGSL
+  await S.makeCompute('', 'let i = gid.x;', {}, {}, { wg: [64] });
+  check('a partial wg array fills missing axes with 1',
+    /@workgroup_size\(64, 1, 1\)/.test(lastCode), true);
+  check('no undefined leaks into the generated WGSL', /undefined/.test(lastCode), false);
+}
+
+// --- write alignment: unaligned sizes are padded, unaligned offsets throw ----
+{
+  let lastWriteSize = null, lastCopy = null;
+  S.device.queue.writeBuffer = (buf, off, data, dataOff, size) => { lastWriteSize = size; };
+  S.device.createCommandEncoder = () => ({
+    copyBufferToBuffer: (...a) => { lastCopy = a; }, finish: () => ({}),
+  });
+  S.device.queue.submit = () => { };
+
+  const buf = S.createStorageBuffer(64);
+  buf.w(new Uint8Array(6));              // writeBuffer demands size % 4 == 0
+  check('an unaligned write outside a frame is padded to 4 bytes', lastWriteSize, 8);
+
+  // create-and-fill with unaligned data goes through the same padding
+  lastWriteSize = null;
+  S.createStorageBuffer(new Uint8Array(6));
+  check('createStorageBuffer pads an unaligned init write', lastWriteSize, 8);
+
+  let threw = '';
+  try { buf.w(new Uint32Array(1), 2); } catch (e) { threw = e.message; }
+  check('an unaligned byteOffset throws outside a frame too', /multiple of 4/.test(threw), true);
+
+  // r() with an unaligned byte count: the copy is padded, the result trimmed back
+  S._acquireStaging = () => ({ mapAsync: async () => { }, getMappedRange: () => new ArrayBuffer(8), unmap: () => { } });
+  S._releaseStaging = () => { };
+  const px = await buf.r(6);
+  check('r() pads the copy to 4 bytes', lastCopy[4], 8);
+  check('r() trims the result back to what was asked', px.length, 6);
+}
+
+// --- schema filtering ignores comments ---------------------------------------
+{
+  let lastCode = null;
+  Object.assign(S.device, {
+    createShaderModule: ({ code }) => { lastCode = code; return { getCompilationInfo: async () => ({ messages: [] }) }; },
+    createRenderPipeline: () => ({ getBindGroupLayout: () => ({}) }),
+  });
+  // `ghost` appears only in comments. layout:'auto' parses real WGSL, so emitting a binding for
+  // it used to produce a bind group the driver rejects.
+  await S.makeFrag(`// ghost is not used here
+    /* neither is ghost here */
+    fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(kept[0], 0., 0., 1.); }`,
+    {}, { ghost: 'array<f32>', kept: 'array<f32>' });
+  check('a name only mentioned in comments is not declared', /binding\(\d+\) var<storage[^;]*ghost/.test(lastCode), false);
+  check('the used resource still is', /var<storage, read_write> kept/.test(lastCode), true);
+}
+
+// --- setResources: unknown names throw, declared-but-unused names are ignored -
+{
+  let bindGroups = 0;
+  Object.assign(S.device, {
+    createShaderModule: ({ code }) => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }),
+    createBindGroup: () => { bindGroups++; return {}; },
+  });
+  const p = await S.makeCompute('', 'a[gid.x] = 1.0; // b is unused', {}, { a: 'array<f32>', b: 'array<f32>' }, { wg: [64, 1, 1] });
+  const A = S.createStorageBuffer(16);
+  A.b.usage = GPUBufferUsage.STORAGE; A.b.mapAsync = () => { };
+
+  let threw = '';
+  try { p.setResources({ tpyo: A }); } catch (e) { threw = e.message; }
+  check('setResources rejects an unknown name like setUniforms does',
+    /Unknown resource 'tpyo'.*a, b/s.test(threw), true);
+
+  p.setResources({ a: A, b: A });        // b is declared but unused — ignored, not an error
+  check('a declared-but-unused resource is accepted silently', bindGroups, 1);
+}
+
+// --- bind groups are cached: a ping-pong swap does not rebuild forever --------
+{
+  let bindGroups = 0;
+  Object.assign(S.device, {
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }),
+    createBindGroup: () => { bindGroups++; return {}; },
+  });
+  const p = await S.makeCompute('', 'dst[gid.x] = src[gid.x]; // v2', {}, { src: 'array<f32>', dst: 'array<f32>' }, { wg: [64, 1, 1] });
+  const g = S.createPingPong(16);
+  for (const h of [g.read, g.write]) { h.b.usage = GPUBufferUsage.STORAGE; h.b.mapAsync = () => { }; }
+
+  for (let i = 0; i < 6; i++) {          // three full swap cycles
+    p.setResources({ src: g.read, dst: g.write });
+    g.swap();
+  }
+  check('a swapping ping-pong builds exactly two bind groups, not one per frame', bindGroups, 2);
+}
+
+// --- pipeline cache dedupes concurrent builds ---------------------------------
+{
+  let pipelines = 0;
+  Object.assign(S.device, {
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createRenderPipeline: () => { pipelines++; return { getBindGroupLayout: () => ({}) }; },
+  });
+  const frag = 'fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(0.123); }';
+  const [p1, p2] = await Promise.all([S.makeFrag(frag), S.makeFrag(frag)]);
+  check('two concurrent builds of the same source share one pipeline',
+    [pipelines, p1.pipeline === p2.pipeline], [1, true]);
+}
+
+// --- createSampler passes the rest of the descriptor through ------------------
+{
+  S.device.createSampler = d => d;
+  const d = S.createSampler({ magFilter: 'linear', wrapU: 'repeat', wrapW: 'repeat', mipmapFilter: 'linear', maxAnisotropy: 4 });
+  check('createSampler maps wrapU/V/W and forwards the rest',
+    [d.magFilter, d.minFilter, d.addressModeU, d.addressModeW, d.mipmapFilter, d.maxAnisotropy],
+    ['linear', 'nearest', 'repeat', 'repeat', 'linear', 4]);
+}
+
+// --- loadTexture: a failed fetch names the status, not a decode error ---------
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false, status: 404 });
+  let threw = '';
+  try { await S.loadTexture('missing.png'); } catch (e) { threw = e.message; }
+  globalThis.fetch = realFetch;
+  check('loadTexture reports the HTTP status of a failed fetch', /HTTP 404.*missing\.png/.test(threw), true);
+}
+
+// --- makeCompute2D forwards an explicit encoder --------------------------------
+{
+  let dispatched = null, submits = 0;
+  const pass = { setPipeline: () => { }, setBindGroup: () => { }, dispatchWorkgroups: (...a) => { dispatched = a; }, end: () => { } };
+  Object.assign(S.device, {
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }),
+    createCommandEncoder: () => ({ beginComputePass: () => pass, finish: () => ({}) }),
+  });
+  S.device.queue.submit = () => { submits++; };
+  const p = await S.makeCompute2D({ body: 'let j = gid.x; // enc passthrough', wg: [8, 1, 1], size: [32, 1] });
+  const myEnc = { beginComputePass: () => pass };
+  p.run(32, 1, 1, myEnc);                // used to drop the encoder argument on the floor
+  check('makeCompute2D run() forwards the encoder and does not self-submit',
+    [dispatched, submits], [[4, 1, 1], 0]);
+}
+
+// --- depth: pipeline state, cache key, and the auto-managed attachment --------
+{
+  let lastDesc = null, lastPass = null, made = [];
+  const rp = { setPipeline: () => { }, setBindGroup: () => { }, draw: () => { }, end: () => { } };
+  Object.assign(S.device, {
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createRenderPipeline: d => { lastDesc = d; return { getBindGroupLayout: () => ({}) }; },
+    createTexture: d => { made.push(d); return { ...d.size, format: d.format, createView: () => ({ depthOf: d.size }) }; },
+    createCommandEncoder: () => ({ beginRenderPass: d => { lastPass = d; return rp; }, finish: () => ({}) }),
+  });
+  S.device.queue.submit = () => { };
+
+  const code = `@vertex fn vs_main(@builtin(vertex_index) v: u32) -> @builtin(position) vec4<f32> { return vec4<f32>(0.); }
+@fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.); }`;
+  const flat = await S.makeDraw({ code, format: 'rgba8unorm' });
+  const deep = await S.makeDraw({ code, format: 'rgba8unorm', depth: true });
+  check('depth is part of the pipeline cache key', flat.pipeline === deep.pipeline, false);
+  check('depth: true sets the depthStencil state',
+    lastDesc.depthStencil, { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' });
+
+  const target = { width: 32, height: 16, format: 'rgba8unorm', createView: () => ({}) };
+  deep.drawTo(target);
+  check('drawTo creates a depth texture sized to the target',
+    made.some(d => d.size.width === 32 && d.size.height === 16 && d.format === 'depth24plus'), true);
+  check('the pass carries the depth attachment',
+    [!!lastPass.depthStencilAttachment, lastPass.depthStencilAttachment?.depthLoadOp], [true, 'clear']);
+
+  const before = made.length;
+  deep.drawTo(target, 'load');
+  check('the depth pool reuses the texture for the same size', made.length, before);
+  check("'load' keeps the depth buffer too", lastPass.depthStencilAttachment.depthLoadOp, 'load');
+
+  let threw = '';
+  try { deep.drawTo({ label: 'a raw view the library never measured' }); } catch (e) { threw = e.message; }
+  check('a raw view of unknown size asks for a texture or depth.texture', /size unknown/.test(threw), true);
+
+  // compare/write/format overrides reach the descriptor
+  await S.makeDraw({ code: code + '// v2', format: 'rgba8unorm', depth: { compare: 'less-equal', write: false } });
+  check('depth overrides reach the descriptor',
+    lastDesc.depthStencil, { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less-equal' });
+}
+
+// --- r(Ctor): typed readback of the whole buffer ------------------------------
+{
+  let lastCopy = null;
+  S.device.createCommandEncoder = () => ({ copyBufferToBuffer: (...a) => { lastCopy = a; }, finish: () => ({}) });
+  S.device.queue.submit = () => { };
+  S._acquireStaging = () => ({ mapAsync: async () => { }, getMappedRange: () => new ArrayBuffer(64), unmap: () => { } });
+  S._releaseStaging = () => { };
+  const buf = S.createStorageBuffer(64);
+  const typed = await buf.r(Float32Array);
+  check('r(Ctor) as the only argument reads the whole buffer typed',
+    [typed instanceof Float32Array, typed.length, lastCopy[4]], [true, 16, 64]);
+}
+
+// --- makeQuad passes the makeFrag options through -----------------------------
+{
+  let lastDesc = null;
+  Object.assign(S.device, {
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createRenderPipeline: d => { lastDesc = d; return { getBindGroupLayout: () => ({}) }; },
+  });
+  await S.makeQuad({ frag: 'fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(0.51); }', depth: true });
+  check('makeQuad forwards depth (and the other makeFrag options)', !!lastDesc.depthStencil, true);
+}
+
+// --- show() infers the format from a texture target ---------------------------
+{
+  let lastDesc = null;
+  const rp = { setPipeline: () => { }, setBindGroup: () => { }, draw: () => { }, end: () => { } };
+  Object.assign(S.device, {
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createRenderPipeline: d => { lastDesc = d; return { getBindGroupLayout: () => ({}) }; },
+    createBindGroup: () => ({}),
+    createCommandEncoder: () => ({ beginRenderPass: () => rp, finish: () => ({}) }),
+  });
+  const src = { format: 'rgba8unorm', usage: 4, mipLevelCount: 1, createView: () => ({}) };
+  const dst = { format: 'rgba16float', createView: () => ({}), width: 8, height: 8 };
+  await S.show(src, dst);
+  check('show() picks the target texture format when none is given',
+    lastDesc.fragment.targets[0].format, 'rgba16float');
+}
+
+// --- mips: full-chain allocation and generateMipmaps blits --------------------
+{
+  let made = [], passes = 0;
+  const rp = { setPipeline: () => { }, setBindGroup: () => { }, draw: () => { }, end: () => { } };
+  Object.assign(S.device, {
+    createTexture: d => {
+      made.push(d);
+      return { ...d.size, format: d.format, mipLevelCount: d.mipLevelCount, usage: 0x1f,
+        createView: (o = {}) => ({ mipLevelCount: 1, level: o.baseMipLevel ?? 0 }) };
+    },
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createRenderPipeline: () => ({ getBindGroupLayout: () => ({}) }),
+    createBindGroup: () => ({}),
+    createSampler: d => d,
+    createCommandEncoder: () => ({ beginRenderPass: () => { passes++; return rp; }, finish: () => ({}) }),
+  });
+  S.device.queue.submit = () => { };
+  const t = S.createTexture(64, 32, 'rgba8unorm', { mips: true });
+  check('mips: true allocates the full chain (64x32 → 7 levels)', made.at(-1).mipLevelCount, 7);
+  check('a numeric usage 4th argument still works', S.createTexture(4, 4, 'rgba8unorm', 16) && made.at(-1).usage, 16);
+  await S.generateMipmaps(t);
+  check('generateMipmaps blits once per level below the top', passes, 6);
+}
+
+// --- init: a canvas element or a selector works as well as a context ----------
+{
+  let cfg = null;
+  const fakeCtx = { configure: d => { cfg = d; } };
+  const fakeCanvas = { getContext: k => k === 'webgpu' ? fakeCtx : null };
+  const dev = { lost: { then() { } }, features: [], queue: {}, limits: {} };
+  const realNav = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      gpu: {
+        requestAdapter: async () => ({ limits: {}, features: { has: () => false }, requestDevice: async () => dev }),
+        getPreferredCanvasFormat: () => 'bgra8unorm',
+      }
+    },
+  });
+  const G2 = await WEBGPU().init(fakeCanvas);
+  check('init(canvas) gets the webgpu context itself',
+    [cfg?.device === dev, G2.context === fakeCtx], [true, true]);
+
+  globalThis.document = { querySelector: () => null };
+  let threw = '';
+  try { await WEBGPU().init('#nope'); } catch (e) { threw = e.message; }
+  delete globalThis.document;
+  check('init(selector) that matches nothing says so', /nothing matches '#nope'|^23$/.test(threw), true);
+  if (realNav) Object.defineProperty(globalThis, 'navigator', realNav);
+}
+
 // --- wgsl_shorthand ---------------------------------------------------------
 {
   const full = shorthand(TOKENS, SHORT_TOKENS);

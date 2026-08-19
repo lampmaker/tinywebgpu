@@ -125,7 +125,9 @@
     const show = await G.makeQuad({
       frag: `
         fn frag(uv: vec2<f32>) -> vec4<f32> {
-          let pick = vec2<f32>(fract(uv.x * 2.), uv.y);
+          // uv.y is 0 at the BOTTOM of the screen, but an image's first row is texture v = 0 —
+          // flip v when sampling, or the picture comes out upside down.
+          let pick = vec2<f32>(fract(uv.x * 2.), 1.0 - uv.y);
           let a = textureSample(checker, samp, pick);
           let b = textureSample(solid, samp, pick);
           return select(a, b, uv.x > 0.5);
