@@ -318,14 +318,20 @@ every optional entry point, and adding `--iife --no-banner` gets a classic
 
 Tiny builds also run a **name-table pass**: repeated long WebGPU member names are rewritten to
 bracket reads from one packed string (`--no-pack` skips it; `--pack` applies it to the stock
-build too). It is raw-bytes-only by design — gzip would deduplicate the names anyway, but the
-inline builds this exists for never gzip.
+build too), and a `/*pack:$a=beginComputePass,…*/` legend at the end of the file says what maps
+to what. It is raw-bytes-only by design — gzip would deduplicate the names anyway, but the
+inline builds this exists for never gzip. Both artifacts come out as a **single line**: the
+newlines inside the WGSL template strings are escaped after minifying.
+
+Each build's settings live in a config file — `build.min.config.mjs` / `build.tiny.config.mjs` —
+picked by name; the CLI flags override them per run:
 
 ```
 npm run build:tiny                                  everything optional removed
-node build-min.mjs --tiny --with=show,blend         ...except these
-node build-min.mjs --without=save,read,texio        start from the full build instead
-node build-min.mjs --tiny --iife --no-banner --out=dist/twg.js
+node build-min.mjs tiny --with=show,blend           ...except these
+node build-min.mjs min --without=save,read,texio    start from the full build instead
+node build-min.mjs tiny --iife --no-banner --out=dist/twg.js
+node build-min.mjs --config=my.config.mjs           a config of your own
 ```
 
 What each switch is worth, measured against the 17.8 KB build:
@@ -351,10 +357,10 @@ dependency rather than producing something that throws at runtime.
 What is never optional: `init`, the dual-schema engine, `makeFrag`/`makeDraw`/`makeCompute`
 and their one-liners, buffers, textures, samplers, the frame API and frame-ordered writes.
 
-**Errors in a tiny build.** `--without=msg` (which `--tiny` implies) replaces every message with
-a number — `Error: 15` instead of `No resources bound. Call setResources({ … })`. The numbers are
-listed in the `ERRORS` table at the top of `build-min.mjs`. Debug against `tinywebgpu.js` and
-build tiny last; if you want the sentences back, `--tiny --with=msg`.
+**Errors in a tiny build.** Dropping `msg` (which the tiny config does) replaces every message
+with a number — `Error: 15` instead of `No resources bound. Call setResources({ … })`. The
+numbers are listed in the `ERRORS` table in `build-min.mjs`. Debug against `tinywebgpu.js` and
+build tiny last; if you want the sentences back, `node build-min.mjs tiny --with=msg`.
 
 **How it works, and why it is a build switch and not an option.** The library is one file with a
 row of `const NAME = true;` declarations at the top. `build-min.mjs` rewrites the ones you named

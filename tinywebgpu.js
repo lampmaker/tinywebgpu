@@ -101,6 +101,14 @@ const F_STAGING = true;
 // resourceFields on pipelines. The short forms (b/w/r) always exist.
 const F_ALIASES = true;
 
+// SHORTHAND is a build seam rather than a switch: it stays 0 here and in the stock builds.
+// A build config whose `shorthand` names a token table (see wgsl_shorthand.js) makes
+// build-min.mjs swap this line for an expander that compileShader runs on every shader — the
+// library's own WGSL then ships compressed (V for vec2<f32>, …) and the piece's WGSL may use
+// the same tokens without shipping wgsl_shorthand.js. Schema *type strings* are never
+// expanded; spell those out. Leave the line shape intact — build-min.mjs matches it literally.
+const SHORTHAND = 0;
+
 // The generated uniform variable's name; makePipeline tests the shader for it.
 const UNIFORM_VAR = 'UB';
 
@@ -1090,6 +1098,7 @@ ${main}
       : BLENDS[blend] ?? err(4, MSG && `Unknown blend preset '${blend}'. Use ${OK(BLENDS).map(k => `'${k}'`).join(', ')} or a GPUBlendState object.`);
 
   let compileShader = async (code, label) => {
+    if (SHORTHAND) code = SHORTHAND(code);   // builds with a token table expand it here
     let module = D.createShaderModule({ code, ...(DIAG && { label: `shader ${label ?? ''}` }) });
     let info = await module.getCompilationInfo();
     let msgs = info.messages.filter(m => m.message && m.type !== 'info');

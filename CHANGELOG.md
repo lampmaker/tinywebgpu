@@ -4,6 +4,28 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Changed — build settings moved into config files; single-line output; pack legend**
+
+- Each build's settings now live in a config file — `build.min.config.mjs` and
+  `build.tiny.config.mjs` — picked by name: `node build-min.mjs tiny` (default `min`;
+  `--config=path` for your own; `--tiny` still accepted). `build-min.mjs` keeps only the
+  machinery: the feature registry, the `ERRORS` table, and the transforms. CLI flags
+  (`--out=`, `--with=`, `--without=`, `--iife`, `--pack`/`--no-pack`, `--no-banner`)
+  override the config per run.
+- Both artifacts are now a **single line**: the raw newlines esbuild leaves inside template
+  literals (the embedded WGSL) are escaped to `\n` after minifying (`singleLine` in the
+  config). Semantics unchanged — the strings are identical at runtime.
+- The tiny build ends with a **pack legend** — `/*pack:$a=beginComputePass,…*/` — naming what
+  the name-table pass packed (`packComment` in the config), so the packed output reads without
+  the build script at hand.
+- New opt-in `shorthand` config: build a wgsl_shorthand token table into the library. Its own
+  WGSL then ships compressed (`V` for `vec2<f32>`, …) and the piece's WGSL may use the same
+  tokens without shipping `wgsl_shorthand.js` — a `const SHORTHAND = 0;` seam in the source is
+  swapped for an expander that runs on every shader at compile time. Off in both stock
+  configs: measured on the bare tiny build the expander costs ~145 B against 93 B of internal
+  string savings, so it pays only once your own WGSL uses ~7+ tokens. Schema type strings are
+  never expanded.
+
 **Changed — `0` is the library's empty value, not `null`** (breaking only if you compared with `===`)
 
 Every internal "nothing here" sentinel is now `0` instead of `null`: one byte instead of four in
