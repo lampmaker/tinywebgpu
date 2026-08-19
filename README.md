@@ -13,7 +13,7 @@ pass/submit plumbing) and stays out of the way of your WGSL.
   import { WEBGPU } from './tinywebgpu.js';
 
   const G = await WEBGPU().init(document.getElementById('c').getContext('webgpu'));
-  const quad = await G.drawQuad({
+  const quad = await G.makeQuad({
     frag: `fn frag(uv: vec2<f32>) -> vec4<f32> {
       return vec4<f32>(0.5 + 0.5 * cos(UB.time + uv.xyx * 4.0 + vec3<f32>(0.0, 2.0, 4.0)), 1.0);
     }`,
@@ -108,7 +108,7 @@ Get pixels in from raw bytes, or from anything the browser can decode:
 
 ```js
 // raw bytes — LUTs, generated data
-const tex = G.createTexture2D(2, 2);
+const tex = G.createTexture(2, 2);
 G.writeTexture(tex, new Uint8Array([255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255]));
 
 // or an image: URL, Blob, ImageBitmap, <img>, <canvas>, <video>
@@ -117,7 +117,7 @@ const photo = await G.loadTexture('image.png');
 // and back out again — rows tightly packed, typed from the format
 const pixels = await G.readTexture(photo);          // Uint8Array, 4 bytes per texel
 
-const quad = await G.drawQuad({
+const quad = await G.makeQuad({
   frag: `fn frag(uv: vec2<f32>) -> vec4<f32> { return textureSample(photo, samp, uv); }`,
   resources: { photo: 'texture_2d<f32>', samp: 'sampler' },
 });
@@ -129,7 +129,7 @@ Draw translucent passes over what's already there with `blend` — `'alpha'`,
 `'premultiplied'`, `'additive'`, or a raw `GPUBlendState`:
 
 ```js
-const glow = await G.makeRender(frag, {}, {}, { blend: 'additive' });
+const glow = await G.makeFrag(frag, {}, {}, { blend: 'additive' });
 glow.drawTo(view, 'load');           // 'load' keeps the existing contents
 ```
 
@@ -170,7 +170,7 @@ step.run(W, H);
 grid.swap();
 ```
 
-`createPingPongTexture2D(w, h, format?)` is the texture flavour, and `pingPong(make)` wraps any
+`createPingPongTexture(w, h, format?)` is the texture flavour, and `pingPong(make)` wraps any
 factory you like.
 
 ## Multiple render targets
@@ -179,7 +179,7 @@ Name your targets and the `FSOut` struct is generated for you, `@location` indic
 part that is easy to get silently wrong by hand:
 
 ```js
-const gbuf = await G.makeRender(`
+const gbuf = await G.makeFrag(`
     fn frag(uv: vec2<f32>) -> FSOut {
       var o: FSOut;
       o.colour = vec4<f32>(uv, 0.0, 1.0);
@@ -197,7 +197,7 @@ usually 8) and the total bytes per sample (`maxColorAttachmentBytesPerSample`, o
 
 ## Your own vertex stage
 
-`makeRender` generates a fullscreen triangle, which is the right answer for a shader-first
+`makeFrag` generates a fullscreen triangle, which is the right answer for a shader-first
 toolkit right up until you want *geometry*. `makeDraw` is the sibling of `makeCompute` for that:
 you write both stages, and the schema, `drawTo`, the frame API and the pipeline cache all still
 apply.
@@ -252,9 +252,9 @@ here. Resources only the *fragment* stage touches need nothing.
 `count` is vertices per instance (default 3), `instances` defaults to 1, and `topology` is any
 `GPUPrimitiveTopology` — `'triangle-list'`, `'triangle-strip'`, `'line-list'`, `'line-strip'`,
 `'point-list'`. Both counts are plain properties on the result, so changing them per frame does
-not rebuild anything. `targets` and `blend` work exactly as they do on `makeRender`.
+not rebuild anything. `targets` and `blend` work exactly as they do on `makeFrag`.
 
-`makeRender` is now literally `makeDraw` with the fullscreen vertex stage filled in.
+`makeFrag` is now literally `makeDraw` with the fullscreen vertex stage filled in.
 
 **There is no depth attachment yet.** Render passes carry colour targets only, so overlapping 3D
 geometry is not depth-sorted for you. For a height field that costs nothing — draw the cells
@@ -268,7 +268,7 @@ each facet derives its own normal so the shading is flat.
 
 ## Minified build
 
-`tinywebgpu.min.js` — **16.1 KB** (7.1 KB gzipped), versus 72 KB for the source. Rebuild it with
+`tinywebgpu.min.js` — **15.8 KB** (7.0 KB gzipped), versus 69 KB for the source. Rebuild it with
 `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
 
 It is a **production artifact and it is silent**: every `console` warning is stripped, and so are
@@ -284,10 +284,10 @@ accident.
 ## Tiny build (inline / on-chain embedding)
 
 When the library has to be *inlined* — a single self-contained HTML file, an on-chain generative
-artwork with a hard byte budget — 16.1 KB of it is still mostly features you are not using. A
+artwork with a hard byte budget — 15.8 KB of it is still mostly features you are not using. A
 procedural piece renders from a shader and never touches image loading, readback, or PNG export.
 
-`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 10.7 KB** (4.9 KB gzipped) by dropping
+`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 10.4 KB** (4.8 KB gzipped) by dropping
 every optional entry point, and adding `--iife --no-banner` gets it to **10.4 KB** as a classic
 `<script>` that assigns `globalThis.WEBGPU`.
 
@@ -298,23 +298,23 @@ node build-min.mjs --without=save,read,texio        start from the full build in
 node build-min.mjs --tiny --iife --no-banner --out=dist/twg.js
 ```
 
-What each switch is worth, measured against the 16.1 KB build:
+What each switch is worth, measured against the 15.8 KB build:
 
 | `--without=` | Removes | Saves |
 |---|---|---|
 | `texio` | `writeTexture`, `loadTexture` | 1.1 KB |
-| `msg` | error *text* — throws carry a number instead | 1.1 KB |
+| `msg` | error *text* — throws carry a number instead | 1.0 KB |
 | `save` | `save()` (PNG download) | 0.8 KB |
 | `show` | `show()`, the one-call texture blit | 0.7 KB |
-| `read` | `readTexture`, buffer `.r()`, the staging pool — **`save` needs it** | 1.2 KB¹ |
+| `read` | `readTexture`, buffer `.r()`, the staging pool — **`save` needs it** | 1.1 KB¹ |
 | `resize` | `resizeCanvas()` | 0.4 KB |
-| `pingpong` | `pingPong`, `createPingPong`, `createPingPongTexture2D` | 0.3 KB |
+| `pingpong` | `pingPong`, `createPingPong`, `createPingPongTexture` | 0.2 KB |
 | `blend` | the named presets; a raw `GPUBlendState` still works | 0.1 KB |
 
-¹ on top of `save`; `--without=read,save` is 2.0 KB together. The build warns and keeps a
+¹ on top of `save`; `--without=read,save` is 1.9 KB together. The build warns and keeps a
 dependency rather than producing something that throws at runtime.
 
-What is never optional: `init`, the dual-schema engine, `makeRender`/`makeDraw`/`makeCompute`
+What is never optional: `init`, the dual-schema engine, `makeFrag`/`makeDraw`/`makeCompute`
 and their one-liners, buffers, textures, samplers, the frame API and frame-ordered writes.
 
 **Errors in a tiny build.** `--without=msg` (which `--tiny` implies) replaces every message with
@@ -331,9 +331,9 @@ stay in the file to be read.
 **On raw versus gzipped.** Most classic minification tricks — aliasing `Object.entries`, moving
 `S.frame.encoder` into a closure variable the minifier can rename to one character — move *raw*
 bytes and barely touch the gzipped size, because gzip already deduplicates across the whole file.
-The aliasing pass in 0.5.0 took the stock build from 18.2 KB to 15.7 KB raw but only 7.4 KB to
-7.0 KB gzipped (`makeDraw` has since added 0.5 KB back). Chase raw size when you inline; if you are served over HTTP with compression,
-only dropping features moves the needle.
+The aliasing pass took the stock build from 18.2 KB to 15.8 KB raw but only 7.4 KB to 7.0 KB
+gzipped. Chase raw size when you inline; if you are served over HTTP with compression, only
+dropping features moves the needle.
 
 ## Optional WGSL shorthands
 
@@ -352,14 +352,14 @@ G.pre = shorthand({ RAY: 'MyRay', ...TOKENS });
 | | |
 |---|---|
 | Setup | `init(ctx?)` (no ctx = compute-only) · `resizeCanvas()` · `debug` · `pre` · `onDeviceLost` |
-| Pipelines | `makeRender(frag, uniforms?, resources?, {format?, blend?, targets?})` · `makeDraw({code, uniforms?, resources?, readOnly?, count?, instances?, topology?, …})` · `makeCompute(body, main, uniforms?, resources?, {wg?})` |
+| Pipelines | `makeFrag(frag, uniforms?, resources?, {format?, blend?, targets?})` · `makeDraw({code, uniforms?, resources?, readOnly?, count?, instances?, topology?, …})` · `makeCompute(body, main, uniforms?, resources?, {wg?})` |
 | Pipeline object | `p.uniforms = {…}` / `setUniform(s)` · `p.resources = {…}` / `setResources` · `run(w,h,d)` (items) · `dispatch(x,y,z)` (workgroups) · `dispatchIndirect(buf, off)` · `drawTo(view?, clear?)` |
-| One-liners | `drawQuad({frag, uniforms, …})` · `compute2D({body, size, wg, …})` · `show(tex, view?, opts?)` · `save(tex, filename?, opts?)` |
-| Frame API | `beginFrame()` / `endFrame()` · `beginCompute()` / `endCompute()` + `p.use()` / `p.dispatchOn()` for chained passes |
-| Buffers | `createUniformBuffer(bytes)` · `createStorageBuffer(bytes \| data)` → `{b, w, r, clear}` · `createBuffer(bytes, usage)` · `createDispatchIndirectBuffer()` |
-| Ping-pong | `createPingPong(bytes \| data)` · `createPingPongTexture2D(w, h, format?)` · `pingPong(make)` → `{read, write, swap()}` |
-| Textures | `createTexture2D(w, h, format?, usage?)` · `createStorageTexture2D(w, h, format?)` · `createSampler(opts)` · `writeTexture(tex, data)` · `loadTexture(src)` · `readTexture(tex, opts?)` |
-| Escape hatches | `makeShader` · `makeRenderPipeline` · `makeComputePipeline` · `bindGroup` · `makeUniformsAndResources` · `writeUniforms` |
+| One-liners | `makeQuad({frag, uniforms, …})` · `makeCompute2D({body, size, wg, …})` · `show(tex, view?, opts?)` · `save(tex, filename?, opts?)` |
+| Frame API | `beginFrame()` / `endFrame()` · `beginCompute()` / `endCompute()` — dispatches inside join the open pass automatically |
+| Buffers | `createUniformBuffer(bytes)` · `createStorageBuffer(bytes \| data)` → `{b, w, r, clear}` (aliases `buffer`/`write`/`read`) · `createBuffer(bytes, usage)` · `createIndirectBuffer()` |
+| Ping-pong | `createPingPong(bytes \| data)` · `createPingPongTexture(w, h, format?)` · `pingPong(make)` → `{read, write, swap()}` |
+| Textures | `createTexture(w, h, format?, usage?)` · `createStorageTexture(w, h, format?)` · `createSampler(opts)` · `writeTexture(tex, data)` · `loadTexture(src)` · `readTexture(tex, opts?)` |
+| Escape hatches | `makeShader` · `bindGroup` · `makeSchema` · `writeUniforms` · `device` (the raw `GPUDevice`) |
 
 Full reference: **[API.md](API.md)**. JSDoc types are included in the source for editor
 autocomplete — no TypeScript build needed.
@@ -376,8 +376,7 @@ autocomplete — no TypeScript build needed.
 - **Resources merge and compare by value** — `setResources({grid})` updates just that one and
   leaves the rest bound, and re-passing identical resources does not rebuild anything.
 - **A staged write inside a chained compute pass closes and reopens it** (copies can't be encoded
-  in a pass). The last `p.use()` is restored automatically — but if you interleave two pipelines,
-  call `use()` again after switching.
+  in a pass). Whatever was bound is restored, so writing uniforms between chained dispatches is fine.
 - **`p.uniforms = {…}` merges into a CPU staging struct and uploads the whole buffer.**
 - **Readback (`.r()`) is a debug tool**: it stalls the pipeline, and during an open frame it
   reads pre-frame data (and warns).

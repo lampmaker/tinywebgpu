@@ -39,13 +39,15 @@ G.format = 'bgra8unorm';
 // --- the optional groups are gone --------------------------------------------------------
 check('texio / read / save / show / pingpong / resize are absent',
   ['writeTexture', 'loadTexture', 'readTexture', 'save', 'show', 'pingPong', 'createPingPong',
-    'createPingPongTexture2D', 'resizeCanvas'].filter(k => G[k] !== undefined), []);
+    'createPingPongTexture', 'resizeCanvas'].filter(k => G[k] !== undefined), []);
 
 // --- ...and the core is not ---------------------------------------------------------------
 const buf = G.createStorageBuffer(Float32Array.from([1, 2, 3, 4]));
 check('createStorageBuffer still sizes and fills', buf.b.size, 16);
-check('the readback helper went with F_READ', buf.r, undefined);
+check('the readback helper went with F_READ', [buf.r, buf.read], [undefined, undefined]);
 check('write and clear stayed', [typeof buf.w, typeof buf.clear], ['function', 'function']);
+check('the readable aliases point at the same things',
+  [buf.buffer === buf.b, buf.write === buf.w], [true, true]);
 
 buf.b.usage = 128;                    // GPUBufferUsage.STORAGE
 buf.b.mapAsync = () => { };
@@ -58,7 +60,7 @@ c.run(1000);
 check('compute dispatches, item count divided by wg', dispatched, [16, 1, 1]);
 check('the uniform struct is still generated', /var<uniform> UB: Uniforms/.test(code), true);
 
-const r = await G.makeRender('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, 0., 1.); }');
+const r = await G.makeFrag('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, 0., 1.); }');
 r.drawTo({});
 check('render draws the fullscreen triangle', [draws, /fn vs_main/.test(code)], [1, true]);
 

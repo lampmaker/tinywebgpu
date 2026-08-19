@@ -26,7 +26,7 @@ S.device = {
 };
 
 const layoutOf = uniforms => {
-  const r = S.makeUniformsAndResources(uniforms);
+  const r = S.makeSchema(uniforms);
   return { byteSize: r.uniformBuffer.size, wgsl: r.wgsl, write: r.uniformWrite };
 };
 
@@ -118,14 +118,14 @@ const layoutOf = uniforms => {
   });
   S.device.queue.submit = () => { };
 
-  const p = await S.compute2D({
+  const p = await S.makeCompute2D({
     body: 'if (gid.x < UB.n) { a[gid.x] = b[gid.x]; }',
     uniforms: { n: 'u32' }, resources: { a: 'array<f32>', b: 'array<f32>' },
     wg: [64, 1, 1],
   });
-  // compute2D used to pass `body` as declarations and generate an empty main, so the shader
+  // makeCompute2D used to pass `body` as declarations and generate an empty main, so the shader
   // was invalid WGSL and the entry point did nothing
-  check('compute2D puts the body in the entry point',
+  check('makeCompute2D puts the body in the entry point',
     /\{\nif \(gid\.x < UB\.n\) \{ a\[gid\.x\] = b\[gid\.x\]; \}\n\}/.test(lastCode), true);
 
   const A = S.createStorageBuffer(16), B = S.createStorageBuffer(16);
@@ -242,20 +242,20 @@ const layoutOf = uniforms => {
 
   // A resource the shader never mentions is left out of the generated WGSL entirely, so
   // layout:'auto' has nothing to strip and the remaining bindings stay dense.
-  await S.makeRender('fn frag(uv: vec2<f32>) -> vec4<f32> { return textureLoad(kept, vec2<i32>(0), 0); }',
+  await S.makeFrag('fn frag(uv: vec2<f32>) -> vec4<f32> { return textureLoad(kept, vec2<i32>(0), 0); }',
     {}, { dropped: 'array<f32>', kept: 'texture_2d<f32>' });
   check('unused resource is not declared', /dropped/.test(lastCode), false);
   check('used resource keeps binding 0', /@binding\(0\) var kept/.test(lastCode), true);
 
   // Uniforms the shader ignores keep their buffer and setters, but not their binding.
-  const q = await S.makeRender('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, 0., 1.); }',
+  const q = await S.makeFrag('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, 0., 1.); }',
     { time: 'f32' }, {});
   check('unreferenced UB is not bound', /var<uniform>/.test(lastCode), false);
   q.setUniforms({ time: 1 });                       // must still work rather than throw
   check('unreferenced UB still accepts writes', true, true);
 
   // MRT: the FSOut struct and its @location order are generated from the targets schema.
-  await S.makeRender('fn frag(uv: vec2<f32>) -> FSOut { var o: FSOut; return o; }',
+  await S.makeFrag('fn frag(uv: vec2<f32>) -> FSOut { var o: FSOut; return o; }',
     {}, {}, { targets: { colour: 'rgba8unorm', normal: 'rgba16float' } });
   check('MRT generates FSOut',
     /struct FSOut \{@location\(0\) colour: vec4<f32>, @location\(1\) normal: vec4<f32>\};/.test(lastCode), true);
@@ -304,7 +304,7 @@ const layoutOf = uniforms => {
   // Captured now: every later makeDraw in this block overwrites lastCode/lastDesc.
   const pCode = lastCode, pDesc = lastDesc;
 
-  // The fullscreen prelude is makeRender's, not makePipeline's — makeDraw must not add one.
+  // The fullscreen prelude is makeFrag's, not makePipeline's — makeDraw must not add one.
   check('makeDraw does not prepend a vertex shader',
     (pCode.match(/@vertex/g) || []).length, 1);
   check('makeDraw still generates the uniform struct', /var<uniform> UB: Uniforms/.test(pCode), true);
@@ -345,14 +345,14 @@ const layoutOf = uniforms => {
   check('topology is part of the pipeline cache key', tri.pipeline === line.pipeline, false);
   check('and it reaches the descriptor', lastDesc.primitive.topology, 'line-strip');
 
-  // makeRender is makeDraw with the fullscreen stage filled in — it must still behave.
-  await S.makeRender('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, 0., 1.); }');
-  check('makeRender still generates its fullscreen vertex stage',
+  // makeFrag is makeDraw with the fullscreen stage filled in — it must still behave.
+  await S.makeFrag('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, 0., 1.); }');
+  check('makeFrag still generates its fullscreen vertex stage',
     /@vertex fn vs_main\(@builtin\(vertex_index\)/.test(lastCode), true);
   drew = null;
-  const q = await S.makeRender('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.); }');
+  const q = await S.makeFrag('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.); }');
   q.drawTo({});
-  check('makeRender still draws the 3-vertex triangle', drew, [3, 1, 0, 0]);
+  check('makeFrag still draws the 3-vertex triangle', drew, [3, 1, 0, 0]);
 }
 
 // --- wgsl_shorthand ---------------------------------------------------------

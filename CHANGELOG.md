@@ -4,7 +4,60 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Reorganized — `tinywebgpu.js` reads top-down now**
+
+The file was one 630-line object literal with the public API, the `_`-prefixed internals and the
+schema engine interleaved, and the headline pipeline builders bolted on underneath it. It is now
+split in two: a `PUBLIC API` literal holding everything a user calls, ordered roughly by how often
+you reach for it (device → pipelines → frames → buffers → textures → ping-pong → canvas → escape
+hatches), then an `INTERNALS` half with the plumbing, the schema engine and the pipeline factory.
+Internals that used to hang off the instance are closure consts, which also shaves the stock build
+from 16.1 KB to 15.8 KB — a closure variable minifies to one character, `S._foo` does not.
+
+**Renamed** (breaking; nothing is published yet)
+
+| Was | Now | Why |
+|---|---|---|
+| `makeRender` | `makeFrag` | `makeRender` and `makeDraw` both render; `makeFrag` names what you supply |
+| `drawQuad` | `makeQuad` | it is a factory returning `{…, run()}`, it does not draw |
+| `compute2D` | `makeCompute2D` | same, and it pairs with `makeQuad` |
+| `makeUniformsAndResources` | `makeSchema` | it builds the dual schema |
+| `createTexture2D` | `createTexture` | no 1D/3D sibling for the suffix to distinguish |
+| `createStorageTexture2D` | `createStorageTexture` | ditto |
+| `createPingPongTexture2D` | `createPingPongTexture` | ditto |
+| `createDispatchIndirectBuffer` | `createIndirectBuffer` | the only indirect buffer kind here |
+
+`makeRenderPipeline` and `makeComputePipeline` are gone from the instance. They collided with
+`makeFrag`/`makeCompute` by name and added nothing over `G.device.createRenderPipeline`, which is
+still reachable through `G.device`.
+
+**Changed — compute chaining is automatic**
+
+`p.dispatch()` / `p.run()` / `p.dispatchIndirect()` now join the pass `beginCompute()` opened
+instead of closing it and starting their own, and rebind only when the pass is holding a different
+pipeline. `p.use()`, `p.dispatchOn()` and `p.dispatchIndirectOn()` are removed — the chained form
+is just the ordinary call:
+
+```js
+G.beginCompute();
+a.dispatch(64); a.dispatch(64); b.dispatch(64);   // one pass, two setPipeline calls
+G.endCompute();
+```
+
+`p.bindTo(pass?)` replaces `use()` as the escape hatch for a compute pass you opened yourself.
+`drawTo()` still closes an open chained pass, since a render pass cannot nest inside one.
+
+**Fixed**
+
+- A staged write (`setUniforms`, `w()`, `clear()`) *before* the first dispatch of a chained
+  sequence left the compute pass closed for the rest of the chain: `fBound?.(fPass = …)`
+  short-circuited its own argument when nothing had been bound yet, so the reopen never ran.
+
 **Added**
+
+- Buffer handles carry readable aliases: `createStorageBuffer` returns `{ b, w, r, clear }` plus
+  `buffer`, `write` and `read` pointing at the same functions, and `createBuffer` returns `{ b, w,
+  buffer, write }`. Both spellings work; the short ones are unchanged.
 
 - **`G.show(tex, view?, opts?)`** — draw a texture onto a target. The shortest path from a compute
   result to pixels, and it reads with `textureLoad` rather than a sampler on purpose: `rgba32float`
@@ -15,10 +68,10 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 - **`G.save(tex, filename?, opts?)`** — download a texture as PNG/JPEG/WebP, or take the `Blob`
   with `download: false`. BGRA channels are swapped for you. No tiling: render as large as
   `maxTextureDimension2D` allows and save once.
-- **Ping-pong pairs** — `createPingPong(bytesOrData)`, `createPingPongTexture2D(w, h, format?)` and
+- **Ping-pong pairs** — `createPingPong(bytesOrData)`, `createPingPongTexture(w, h, format?)` and
   the general `pingPong(make)`, each returning `{read, write, swap()}`. Seeding from a TypedArray
   fills both halves, so a swap before the first step is harmless.
-- **Multiple render targets** — `makeRender(frag, u, r, { targets: { name: format, … } })` generates
+- **Multiple render targets** — `makeFrag(frag, u, r, { targets: { name: format, … } })` generates
   the `struct FSOut` with its `@location` indices in key order, and `drawTo({ name: view, … })`
   binds them by name. A single target keeps the plain `-> vec4<f32>` contract.
 - **Every `matCxR<f32>` uniform**, not just `mat4x4`. The type table became arithmetic on the type
@@ -33,7 +86,7 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
   instance), `instances` and `topology` are options and, for the first two, writable properties on
   the result — a per-frame particle count does not rebuild the pipeline. `topology` is part of the
   cache key, since two pipelines with byte-identical WGSL and different topologies are different
-  pipelines. `makeRender` is now literally this call with the fullscreen vertex stage filled in,
+  pipelines. `makeFrag` is now literally this call with the fullscreen vertex stage filled in,
   which is why adding the entry point cost −113 bytes: the duplicated `FSOut` generation went.
 - **`readOnly: string[]` on `makeDraw`** binds the named resources `var<storage, read>` instead of
   `read_write`. This is not a nicety: WebGPU forbids a read-write storage binding from being
@@ -93,7 +146,7 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 - **`beginFrame()` no longer returns the internal frame object**, and `G.frame` is gone with it —
   the frame state is closure variables now. Neither was documented or used; `beginFrame()` returns
   nothing.
-- **`makeUniformsAndResources()` keeps `wgsl`, `uniformBuffer` and `uniformWrite`** on its result
+- **`makeSchema()` keeps `wgsl`, `uniformBuffer` and `uniformWrite`** on its result
   and renames the rest to `_entries`, `_uniformFields`, `_resourceFields`, `_resourceLayout` and
   `_uniformBinding`, so the minified build can shorten them. The unused `uniformVar` is dropped.
   This is the schema-engine escape hatch; the three names anything realistically reads are the
@@ -142,7 +195,7 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 **Fixed**
 
-- **`compute2D` never ran anything.** It passed its `body` to `makeCompute` as *declarations* and
+- **`makeCompute2D` never ran anything.** It passed its `body` to `makeCompute` as *declarations* and
   generated an empty entry point, so the shader was invalid WGSL (statements at module scope) and
   `main` did nothing. `body` is now the entry-point statements, as documented; helper functions
   and structs go in the new `decls` field.
@@ -171,8 +224,8 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
   `beginFrame()`, so a compute-only frame no longer touches the canvas. This also unwedges a real
   hang: on a page with a canvas, `beginFrame(); dispatch(); endFrame(); await buf.r()` could never
   resolve, because the frame had acquired a swapchain texture it then never presented.
-- `createStorageTexture2D` takes a `usage` override and includes `COPY_DST` by default, so
-  `writeTexture` works on it — matching `createTexture2D`.
+- `createStorageTexture` takes a `usage` override and includes `COPY_DST` by default, so
+  `writeTexture` works on it — matching `createTexture`.
 
 **Added**
 

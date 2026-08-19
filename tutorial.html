@@ -236,7 +236,7 @@ const G = await WEBGPU().init();                             // compute only</co
     <section class="step" id="first-pixels">
       <h2><span class="num">02</span>Your first pixels</h2>
       <div class="body">
-        <p><code>makeRender</code> draws exactly one thing: a triangle big enough to cover the
+        <p><code>makeFrag</code> draws exactly one thing: a triangle big enough to cover the
           screen. You never see it. You write a function called <code>frag</code> that turns a
           coordinate into a colour, and the library generates the vertex shader and the plumbing
           around it. (When you want real geometry instead, <code>makeDraw</code> lets you write
@@ -246,7 +246,7 @@ const G = await WEBGPU().init();                             // compute only</co
         <div class="demo">
           <canvas></canvas>
           <script type="text/plain" class="code">
-            const quad = await G.drawQuad({
+            const quad = await G.makeQuad({
               frag: `
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   return vec4<f32>(uv.x, uv.y, 0.6, 1.0);
@@ -265,9 +265,9 @@ const G = await WEBGPU().init();                             // compute only</co
             the gradient flip. Or return <code>vec4&lt;f32&gt;(step(0.5, uv.x))</code> for a hard
             edge. Break the WGSL on purpose — the error tells you the line.</div>
         </div>
-        <p><code>drawQuad</code> is a convenience wrapper: it builds the pipeline and gives you
+        <p><code>makeQuad</code> is a convenience wrapper: it builds the pipeline and gives you
           <code>run()</code>, which uploads uniforms and draws in one call. The longer form,
-          <code>makeRender</code>, is the same thing without the wrapper.</p>
+          <code>makeFrag</code>, is the same thing without the wrapper.</p>
       </div>
     </section>
 
@@ -284,7 +284,7 @@ const G = await WEBGPU().init();                             // compute only</co
         <div class="demo">
           <canvas></canvas>
           <script type="text/plain" class="code">
-            const quad = await G.drawQuad({
+            const quad = await G.makeQuad({
               frag: `
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   let c = 0.5 + 0.5 * cos(UB.time + uv.xyx * 4.0
@@ -327,7 +327,7 @@ const G = await WEBGPU().init();                             // compute only</co
         <div class="demo">
           <canvas></canvas>
           <script type="text/plain" class="code">
-            const quad = await G.drawQuad({
+            const quad = await G.makeQuad({
               frag: `
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   // square up the coordinates, so a circle stays a circle
@@ -385,7 +385,7 @@ const G = await WEBGPU().init();                             // compute only</co
         <div class="demo">
           <canvas></canvas>
           <script type="text/plain" class="code">
-            const quad = await G.drawQuad({
+            const quad = await G.makeQuad({
               frag: `
                 fn sdBox(p: vec2<f32>, b: vec2<f32>) -> f32 {
                   let d = abs(p) - b;
@@ -576,7 +576,7 @@ const G = await WEBGPU().init();                             // compute only</co
               `,
               { time: 'f32' }, { heat: 'array<f32>' }, { wg: [8, 8, 1] });
 
-            const show = await G.makeRender(`
+            const show = await G.makeFrag(`
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   let x = min(u32(uv.x * ${W}.0), ${W}u - 1u);
                   let y = min(u32(uv.y * ${H}.0), ${H}u - 1u);
@@ -643,7 +643,7 @@ const G = await WEBGPU().init();                             // compute only</co
               `,
               {}, { src: 'array<u32>', dst: 'array<u32>' }, { wg: [8, 8, 1] });
 
-            const show = await G.makeRender(`
+            const show = await G.makeFrag(`
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   let x = min(u32(uv.x * ${W}.0), ${W}u - 1u);
                   let y = min(u32((1.0 - uv.y) * ${H}.0), ${H}u - 1u);
@@ -784,10 +784,9 @@ G.endFrame();</code></pre>
 
             const t0 = performance.now();
             G.beginCompute();                        // all rounds, one pass, one submit
-            darts.use();
             for (let r = 0; r < ROUNDS; r++) {
               darts.setUniforms({ threads: THREADS, round: r, k: K });
-              darts.dispatchOn(null, THREADS / WG);
+              darts.dispatch(THREADS / WG);
             }
             G.endCompute();
 
@@ -870,7 +869,7 @@ G.endFrame();</code></pre>
             const counters = G.createStorageBuffer(4);
             const survivors = G.createStorageBuffer(N * 4);
             const total = G.createStorageBuffer(4);
-            const indirect = G.createDispatchIndirectBuffer();
+            const indirect = G.createIndirectBuffer();
 
             filter.setResources({ counters: counters.b, survivors: survivors.b });
             prep.setResources({ counters: counters.b, args: indirect.b });
@@ -915,7 +914,7 @@ G.endFrame();</code></pre>
           <canvas></canvas>
           <script type="text/plain" class="code">
             // a 4x4 image, straight from bytes — row 0 is the bottom (v = 0)
-            const tex = G.createTexture2D(4, 4);
+            const tex = G.createTexture(4, 4);
             const px = new Uint8Array(4 * 4 * 4);
             for (let i = 0; i < 16; i++) {
               px[i * 4 + 0] = (i % 4) * 85;
@@ -925,7 +924,7 @@ G.endFrame();</code></pre>
             }
             G.writeTexture(tex, px);
 
-            const quad = await G.drawQuad({
+            const quad = await G.makeQuad({
               frag: `
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   let p = uv * 2.0 + vec2<f32>(UB.time * 0.06, 0.0);
@@ -1020,7 +1019,7 @@ G.endFrame();</code></pre>
               { wg: [WG, 1, 1] });
 
             // 3. colour the grid
-            const draw = await G.makeRender(`
+            const draw = await G.makeFrag(`
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   let cx = min(u32(uv.x * f32(UB.gw)), UB.gw - 1u);
                   let cy = min(u32(uv.y * f32(UB.gh)), UB.gh - 1u);
@@ -1103,7 +1102,7 @@ G.endFrame();</code></pre>
           frame they return pre-frame data and warn. Finish the frame first, and keep them out of
           your render loop.</p>
         <h3>Format has to match the target</h3>
-        <p><code>makeRender</code> defaults to the canvas format. Drawing to an offscreen texture
+        <p><code>makeFrag</code> defaults to the canvas format. Drawing to an offscreen texture
           in a different format needs <code>{ format: 'rgba8unorm' }</code> — or whatever you
           created — or the pipeline will not match the attachment.</p>
         <h3>Turn on the warnings while you build</h3>
