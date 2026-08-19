@@ -4,6 +4,31 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Changed — a repeat-hunting pass over the minified output** (min −775 B → 16.7 KB, tiny −552 B → 9.6 KB)
+
+`find-repeats.mjs` (suffix-array repeat finder, now in the repo) profiled the builds; every
+structural duplicate it surfaced is deduplicated *in the source*, so the readable file and the
+artifacts improved together:
+
+- The flipped `const F_X = false` switch declarations no longer ride along in the output —
+  esbuild's transform API skips top-level dead-code removal by default, so every *use* was
+  folded but the declaration row survived; `treeShaking: true` removes it (~0.1 KB).
+- `makeFrag`/`makeDraw` now spread their options through to makePipeline instead of restating
+  every default (`uniforms = {}`, `resources = {}`, `count = 3`, `topology`, …) at each layer —
+  the defaults are spelled once, in makePipeline. Same public API and behavior.
+- One spelling each for: the queue-write tail (buffer `w()` now funnels through
+  `writeUniforms`), the dispatch plumbing (`run()` calls `dispatch()` with the workgroup
+  division), the blend component shape and its shared `one-minus-src-alpha` factor, the
+  `{module, entryPoint}` stage descriptor, the texture-copy destination + width/height
+  defaults (`writeTexture`/`readTexture`/`save`), the `@group @binding var` prefix in
+  generated WGSL, the mip-level view in `generateMipmaps`, the hash cache key, and the
+  bytes-per-texel error text. `loadTexture`'s three decode paths converge on one
+  `createImageBitmap` call.
+- Small inlines: `GPUMapMode.READ` → its normative `1` (like the usage flags),
+  `navigator.gpu` read once in `init`, `drawTo`/`makeQuad` lean on the existing
+  `[0, 0, 0, 1]` clear fallback instead of restating it as a parameter default, and the
+  generated `@workgroup_size(${wg})` renders as `x,y,z`.
+
 **Changed — build settings moved into config files; single-line output; pack legend**
 
 - Each build's settings now live in a config file — `build.min.config.mjs` and

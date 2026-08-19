@@ -203,14 +203,15 @@ export let WEBGPU = () => {
      * @returns {Promise<Object>} this instance, with device/context/format/features populated
      */
     init: async (ctx = 0, opts = {}) => {
-      if (!navigator.gpu) err(1, MSG && 'WebGPU not supported');
+      let gpu = navigator.gpu;
+      if (!gpu) err(1, MSG && 'WebGPU not supported');
       if (typeof ctx === 'string') {
         let sel = ctx;
         ctx = document.querySelector(sel);
         if (!ctx) err(23, MSG && `init: nothing matches '${sel}'.`);
       }
       if (ctx?.getContext) ctx = ctx.getContext('webgpu');   // a canvas rather than a context
-      let a = await navigator.gpu.requestAdapter();
+      let a = await gpu.requestAdapter();
       if (!a) err(2, MSG && 'No GPU adapter');
 
       // Raise these to whatever the adapter allows; anything in opts.limits still wins.
@@ -231,7 +232,7 @@ export let WEBGPU = () => {
         S.onDeviceLost && S.onDeviceLost(info)));
       // The handler's whole body is the log, so without DIAG there is nothing left to install.
       if (DIAG) d.onuncapturederror = e => console.error('[TinyWebGPU] Uncaptured WebGPU error:', e.error?.message ?? e);
-      let f = navigator.gpu.getPreferredCanvasFormat();
+      let f = gpu.getPreferredCanvasFormat();
       // usage defaults to RENDER_ATTACHMENT, as the spec does; add COPY_SRC to it if you want to
       // G.save() the canvas texture itself rather than your own render target.
       if (ctx) ctx.configure({ device: d, format: f, alphaMode: opts.alphaMode ?? 'opaque', usage: opts.canvasUsage ?? TEX_RENDER_ATTACHMENT });
@@ -283,18 +284,21 @@ export let WEBGPU = () => {
          *   `targets`: {name: format} for multiple render targets, drawn with `drawTo({name: view})`.
          * @returns {Promise<RenderPipeline>}
          */
-    makeFrag: (frag, uniforms = {}, resources = {}, { format = S.format, blend, targets, depth } = {}) =>
+    makeFrag: (frag, uniforms, resources, opts = {}) =>
       // The fullscreen triangle and the wrapper that hands `frag` its uv. Everything else — the
-      // schema, the FSOut struct for `targets`, the pipeline — is makeDraw's job.
+      // schema, the FSOut struct for `targets`, the pipeline — is makeDraw's job, and the opts
+      // (format, blend, targets, depth) spread through untouched: their defaults live in
+      // makePipeline, once, instead of being restated at every layer.
       S.makeDraw({
+        ...opts, uniforms, resources,
         code: `struct VSOut {@builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>};
 @vertex fn vs_main(@builtin(vertex_index) i: u32) -> VSOut {
 var ndc = array<vec2<f32>,3>(vec2<f32>(-1.,-3.),vec2<f32>(-1.,1.),vec2<f32>(3.,1.))[i];
 var o: VSOut; o.pos = vec4<f32>(ndc, 0.0, 1.0); o.uv = ndc * 0.5 + vec2<f32>(0.5); return o;
 }
 ${frag}
-@fragment fn fs_main(vs: VSOut) -> ${targets ? 'FSOut' : '@location(0) vec4<f32>'} { return frag(vs.uv); }
-`.trim(), uniforms, resources, format, blend, targets, depth
+@fragment fn fs_main(vs: VSOut) -> ${opts.targets ? 'FSOut' : '@location(0) vec4<f32>'} { return frag(vs.uv); }
+`.trim(),
       }),
 
     /**
@@ -315,18 +319,18 @@ ${frag}
      *   depth?: boolean|Object}} opts
      * @returns {Promise<RenderPipeline>}
      */
-    makeDraw: ({ code, uniforms = {}, resources = {}, readOnly = [], count = 3, instances = 1,
-      topology = 'triangle-list', format = S.format, blend, targets, depth }) => {
+    makeDraw: opts => {
       // `targets` is {name: format}; the matching `struct FSOut { … }` is generated here so the
       // @location indices — the part that is easy to get wrong by hand — follow the key order.
       // WGSL module-scope declarations are order-independent, so the struct may land above the
-      // shader that returns it.
-      let names = targets ? OK(targets) : 0;
-      let outStruct = names ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: vec4<f32>`).join(', ')}};\n` : '';
+      // shader that returns it. Everything else spreads through to makePipeline, which owns the
+      // option defaults (uniforms, resources, readOnly, count, instances, topology, format).
+      let names = opts.targets ? OK(opts.targets) : 0;
       return makePipeline({
-        code: `${outStruct}${code}`, uniforms, resources, readOnly,
-        isCompute: false, blend, targetNames: names, count, instances, topology, depth,
-        format: names ? OV(targets) : format,
+        ...opts,
+        isCompute: false, targetNames: names,
+        code: names ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: vec4<f32>`).join(', ')}};\n${opts.code}` : opts.code,
+        format: names ? OV(opts.targets) : opts.format,
       });
     },
 
@@ -338,14 +342,14 @@ ${frag}
      * @param {{wg?: number[]}} [opts] workgroup size, default [8,8,1]
      * @returns {Promise<ComputePipeline>}
      */
-    makeCompute: (body, main, uniforms = {}, resources = {}, { wg = [8, 8, 1] } = {}) => (
+    makeCompute: (body, main, uniforms, resources, { wg = [8, 8, 1] } = {}) => (
       // Missing axes default to 1 — `wg: [64]` used to interpolate `undefined` into the WGSL.
       wg = [wg[0] ?? 1, wg[1] ?? 1, wg[2] ?? 1],
       makePipeline({
       // Kept flush-left: this text is prepended to every generated shader, so it is hashed,
-      // compiled, and line-numbered in compile errors.
+      // compiled, and line-numbered in compile errors. `${wg}` renders as `x,y,z`.
       code: `${body}
-@compute @workgroup_size(${wg[0]}, ${wg[1]}, ${wg[2]})
+@compute @workgroup_size(${wg})
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
 ${main}
 }
@@ -357,7 +361,7 @@ ${main}
      * Besides `clear`, every makeFrag option (format, blend, targets, depth) passes through.
      * @returns {Promise<RenderPipeline & {run: (u?: Object, view?: GPUTextureView) => void}>}
      */
-    makeQuad: ({ frag, uniforms = {}, resources = {}, clear = [0, 0, 0, 1], ...opts }) =>
+    makeQuad: ({ frag, uniforms, resources, clear, ...opts }) =>
       S.makeFrag(frag, uniforms, resources, opts).then(p =>
         OA(p, { run: (u = {}, view = targetView()) => (u && OK(u).length && (p.uniforms = u), p.drawTo(view, clear)) })),
 
@@ -368,7 +372,7 @@ ${main}
      * @returns {Promise<ComputePipeline & {run: (w?: number, h?: number, d?: number) => void}>}
      */
     // The .then callback's `run` parameter is a local capturing p.run before OA overwrites it.
-    makeCompute2D: ({ body, decls = '', uniforms = {}, resources = {}, size = [1, 1], wg = [8, 8, 1] }) =>
+    makeCompute2D: ({ body, decls = '', uniforms, resources, size = [1, 1], wg }) =>
       S.makeCompute(decls, body, uniforms, resources, { wg }).then((p, run = p.run) =>
         OA(p, { run: (w = size[0], h = size[1], d = 1, encoder) => run(w, h, d, encoder) })),
 
@@ -491,9 +495,10 @@ ${main}
     // 3×u32 of [x,y,z] workgroup counts, for dispatchIndirect.
     createIndirectBuffer: () => S.createBuffer(12, BUF_INDIRECT | BUF_STORAGE | BUF_COPY_DST),
 
-    // Raw uniform write (DataView or TypedArray).
-    writeUniforms: (buffer, dataViewOrTypedArray, byteOffset = 0) =>
-      D.queue.writeBuffer(buffer, byteOffset, dataViewOrTypedArray.buffer ?? dataViewOrTypedArray, dataViewOrTypedArray.byteOffset ?? 0, len(dataViewOrTypedArray)),
+    // Raw uniform write (DataView or TypedArray). Also the queue-write tail of every buffer
+    // handle's `w()` — writerFor funnels through here so the writeBuffer call is spelled once.
+    writeUniforms: (buffer, d, byteOffset = 0) =>
+      D.queue.writeBuffer(buffer, byteOffset, d.buffer ?? d, d.byteOffset ?? 0, len(d)),
 
     // ─── Textures & samplers ─────────────────────────────────────────────────────────────────
     // Read-only in shaders except as a render pass output — images, render targets, post-process
@@ -527,13 +532,12 @@ ${main}
        * @returns {GPUTexture} the same texture, for chaining
        */
       writeTexture: (tex, data, opts = {}) => {
-        let w = opts.width ?? tex.width, h = opts.height ?? tex.height;
+        let [w, h] = texWH(tex, opts);
         let bpt = texelBytes(tex.format);
         if (!(opts.bytesPerRow || bpt))
-          err(9, MSG && `writeTexture: unknown bytes-per-texel for format '${tex.format}'; pass bytesPerRow explicitly.`);
-        D.queue.writeTexture(
-          { texture: tex, mipLevel: opts.mipLevel ?? 0, origin: { x: opts.x ?? 0, y: opts.y ?? 0 } },
-          data, { bytesPerRow: opts.bytesPerRow ?? w * bpt, rowsPerImage: h }, { width: w, height: h });
+          err(9, MSG && `writeTexture: ${texelMsg(tex.format)}; pass bytesPerRow explicitly.`);
+        D.queue.writeTexture(texDst(tex, opts),
+          data, { bytesPerRow: opts.bytesPerRow ?? w * bpt, rowsPerImage: h }, sz(w, h));
         return tex;
       },
 
@@ -547,20 +551,20 @@ ${main}
        * @returns {Promise<GPUTexture>}
        */
       loadTexture: async (src, opts = {}) => {
-        let source = src;
-        if (typeof src === 'string' || src instanceof Blob) {
-          let blob = src;
-          if (typeof src === 'string') {
-            // Without this, a 404 surfaces as an opaque createImageBitmap decode error.
-            let resp = await fetch(src);
-            if (!resp.ok) err(20, MSG && `loadTexture: HTTP ${resp.status} for '${src}'.`);
-            blob = await resp.blob();
-          }
-          source = await createImageBitmap(blob);
-        } else if (typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement) {
+        // `bmp` is whatever needs decoding into an ImageBitmap first; everything else (canvas,
+        // video, an ImageBitmap already) is used as the copy source directly.
+        let source = src, bmp = 0;
+        if (typeof src === 'string') {
+          // Without this, a 404 surfaces as an opaque createImageBitmap decode error.
+          let resp = await fetch(src);
+          if (!resp.ok) err(20, MSG && `loadTexture: HTTP ${resp.status} for '${src}'.`);
+          bmp = await resp.blob();
+        } else if (src instanceof Blob) bmp = src;
+        else if (typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement) {
           if (!src.complete) await src.decode();
-          source = await createImageBitmap(src);
+          bmp = src;
         }
+        if (bmp) source = await createImageBitmap(bmp);
         // Every accepted source type reports its size under one of these pairs. `||`, not `??`:
         // a <video> always *has* a `width` property and it is 0 until the layout attribute is set,
         // so the nullish form picked the zero and never reached videoWidth.
@@ -568,7 +572,7 @@ ${main}
         let h = source.videoHeight || source.displayHeight || source.height;
         if (!w || !h) err(10, MSG && 'loadTexture: could not determine source dimensions.');
         // copyExternalImageToTexture requires RENDER_ATTACHMENT in addition to COPY_DST.
-        let tex = opts.texture ?? S.createTexture(w, h, opts.format ?? 'rgba8unorm',
+        let tex = opts.texture ?? S.createTexture(w, h, opts.format,   // createTexture defaults the format
           { usage: opts.usage, mips: F_MIPS && opts.mips });
         D.queue.copyExternalImageToTexture(
           { source, flipY: opts.flipY ?? false },
@@ -593,13 +597,13 @@ ${main}
        * @returns {Promise<*>}
        */
       readTexture: async (tex, opts = {}) => {
-        let w = opts.width ?? tex.width, h = opts.height ?? tex.height;
+        let [w, h] = texWH(tex, opts);
         let bpt = texelBytes(tex.format);
-        if (!bpt) err(11, MSG && `readTexture: unknown bytes-per-texel for format '${tex.format}'.`);
+        if (!bpt) err(11, MSG && `readTexture: ${texelMsg(tex.format)}.`);
         let tight = w * bpt, padded = (tight + 255) & ~255;   // copyTextureToBuffer wants 256-byte rows
         let src = new U8(await readBack(padded * h, (enc, rb) => enc.copyTextureToBuffer(
-          { texture: tex, mipLevel: opts.mipLevel ?? 0, origin: { x: opts.x ?? 0, y: opts.y ?? 0 } },
-          { buffer: rb, bytesPerRow: padded, rowsPerImage: h }, { width: w, height: h }),
+          texDst(tex, opts),
+          { buffer: rb, bytesPerRow: padded, rowsPerImage: h }, sz(w, h)),
           DIAG && 'readTexture'));
         let out = new U8(tight * h);
         for (let y = 0; y < h; y++) out.set(src.subarray(y * padded, y * padded + tight), y * tight);  // drop row padding
@@ -626,11 +630,11 @@ ${main}
           {}, { src: 'texture_2d<f32>', samp: 'sampler' }, { format: tex.format });
         mipSamp ||= S.createSampler({ magFilter: 'linear', minFilter: 'linear' });
         // One frame → one submit for the whole chain, unless the caller already has one open.
-        let own = !fEnc;
+        let own = !fEnc, mip = l => tex.createView({ baseMipLevel: l, mipLevelCount: 1 });
         if (own) S.beginFrame();
         for (let i = 1; i < tex.mipLevelCount; i++) {
-          p.setResources({ src: tex.createView({ baseMipLevel: i - 1, mipLevelCount: 1 }), samp: mipSamp });
-          p.drawTo(tex.createView({ baseMipLevel: i, mipLevelCount: 1 }));
+          p.setResources({ src: mip(i - 1), samp: mipSamp });
+          p.drawTo(mip(i));
         }
         if (own) S.endFrame();
         return tex;
@@ -775,7 +779,7 @@ ${main}
       save: async (tex, filename = 'capture.png', opts = {}) => {
         if (!/^(rgba|bgra)8unorm(-srgb)?$/.test(tex.format))
           err(19, MSG && `save: needs an 8-bit RGBA texture, got '${tex.format}'. Render it into an rgba8unorm target first.`);
-        let width = opts.width ?? tex.width, height = opts.height ?? tex.height;
+        let [width, height] = texWH(tex, opts);
         let px = await S.readTexture(tex, { x: opts.x, y: opts.y, width, height, mipLevel: opts.mipLevel, Ctor: U8 });
         // ImageData is RGBA; the canvas format is BGRA on most platforms, so swap the ends.
         if (tex.format.startsWith('bgra'))
@@ -824,7 +828,7 @@ ${main}
      */
     makeShader: (code, applyPre = true) => {
       if (applyPre && S.pre) code = S.pre(code);
-      let key = hash(code) + ':' + code.length;   // + length: guards against 32-bit hash collisions
+      let key = ckey(code);
       let promise = shaderCache.get(key);
       if (!promise) {
         // the promise (not the module) is cached, so concurrent calls share one compile
@@ -880,16 +884,16 @@ ${main}
 
   // 'alpha' expects straight (un-premultiplied) alpha out of frag(); 'premultiplied' expects rgb
   // already scaled by a; 'additive' ignores destination alpha. All three add and all three leave
-  // alpha's source at `one`, so only the colour factors differ — hence the two-argument builder.
-  let blendState = (srcFactor, dstFactor) => ({
-    color: { srcFactor, dstFactor, operation: 'add' },
-    alpha: { srcFactor: 'one', dstFactor, operation: 'add' },
-  });
-  let BLENDS = F_BLEND ? {
-    alpha: blendState('src-alpha', 'one-minus-src-alpha'),
-    premultiplied: blendState('one', 'one-minus-src-alpha'),
+  // alpha's source at `one`, so only the colour factors differ — hence the two-argument builder,
+  // whose trailing parameter `f` spells the component shape once for both halves.
+  let blendState = (srcFactor, dstFactor, f = s => ({ srcFactor: s, dstFactor, operation: 'add' })) =>
+    ({ color: f(srcFactor), alpha: f('one') });
+  // The IIFE parameter spells the shared dst factor once.
+  let BLENDS = F_BLEND ? (m => ({
+    alpha: blendState('src-alpha', m),
+    premultiplied: blendState('one', m),
     additive: blendState('one', 'one'),
-  } : {};
+  }))('one-minus-src-alpha') : {};
 
   // ─── Encoders & passes ─────────────────────────────────────────────────────────────────────
   // The two longest names in the WebGPU surface, spelled once each. Every encoder in the library
@@ -987,7 +991,7 @@ ${main}
     let need = (nbytes + 3) & ~3;
     let rb = S._acquireStaging(need);
     oneShot(enc => encode(enc, rb, need), label);
-    await rb.mapAsync(GPUMapMode.READ);
+    await rb.mapAsync(1);   // GPUMapMode.READ — normative value, like the usage flags above
     let ab = rb.getMappedRange(0, need).slice(0, nbytes);   // copy: stays valid after unmap
     rb.unmap();
     S._releaseStaging(rb);
@@ -997,7 +1001,7 @@ ${main}
   // ─── Small helpers ─────────────────────────────────────────────────────────────────────────
   // The one createTexture call behind createTexture, createStorageTexture and the depth pool.
   let tex2d = (width, height, format, usage, label, mips = 1) => D.createTexture({
-    size: { width, height }, format, mipLevelCount: mips, sampleCount: 1, usage,
+    size: sz(width, height), format, mipLevelCount: mips, sampleCount: 1, usage,
     ...(DIAG && { label: `${label} ${width}x${height} ${format}` })
   });
   // Levels in a full mip chain, and the linear sampler generateMipmaps reuses across calls.
@@ -1009,12 +1013,13 @@ ${main}
   let rids = new WeakMap(), ridN = 0;
   let idOf = o => rids.get(o) ?? (rids.set(o, ++ridN), ridN);
 
-  // FNV-1a, for cache keys.
+  // FNV-1a, for cache keys. ckey appends the length, which guards against 32-bit collisions.
   let hash = s => {
     let h = 2166136261 >>> 0;
     for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
     return (h >>> 0).toString(16);
   };
+  let ckey = s => hash(s) + ':' + s.length;
 
   // The default view of a texture, memoized — bind groups are rebuilt often and a fresh
   // createView() per rebind is pure garbage. The view's size is recorded on the way through, so
@@ -1057,6 +1062,16 @@ ${main}
     let m = /^(r|rg|rgba|bgra)(8|16|32)/.exec(f);
     return m ? m[1].length * (m[2] / 8) : { 'rgb10a2unorm': 4, 'rgb10a2uint': 4, 'rg11b10ufloat': 4 }[f];
   };
+  // The shared half of the two bytes-per-texel error messages. Gated explicitly: the references
+  // fold away with MSG, but esbuild does not remove an unused *local* declaration, so without
+  // the guard the string would ride along in builds that can never print it.
+  let texelMsg = MSG && (F_TEXIO || F_READ) ? f => `unknown bytes-per-texel for format '${f}'` : 0;
+  // The copy-destination descriptor and the width/height defaults writeTexture, readTexture and
+  // save share, each spelled once.
+  let texDst = !(F_TEXIO || F_READ) ? 0 : (tex, o) =>
+    ({ texture: tex, mipLevel: o.mipLevel ?? 0, origin: { x: o.x ?? 0, y: o.y ?? 0 } });
+  let texWH = !(F_TEXIO || F_READ) ? 0 : (tex, o) => [o.width ?? tex.width, o.height ?? tex.height];
+  let sz = (width, height) => ({ width, height });
 
   // Warns (doesn't throw) when a requested size exceeds the device limits — allocation is still
   // attempted, since limits vary wildly across GPUs. Diagnostics only.
@@ -1087,7 +1102,7 @@ ${main}
       p.set(AB.isView(d) ? new U8(d.buffer, d.byteOffset, len(d)) : new U8(d));
       d = p;
     }
-    return D.queue.writeBuffer(b, o, d.buffer ?? d, d.byteOffset ?? 0, len(d));
+    return S.writeUniforms(b, d, o);
   };
 
   let blitCache = F_SHOW ? new Map() : 0;
@@ -1129,16 +1144,18 @@ ${main}
   // `layout: 'auto'` derives the bind group layout from what the shader actually references.
   // `format` is one format string, or an array of them for multiple render targets in @location
   // order; a blend state, if given, applies to every target.
+  // The {module, entryPoint} stage descriptor, spelled once for all three stages.
+  let stage = (module, entryPoint) => ({ module, entryPoint });
   let rawRender = (module, format, topology, blend, dep) => (
     blend = resolveBlend(blend),
     D.createRenderPipeline({
       layout: 'auto',
-      vertex: { module, entryPoint: 'vs_main' },
-      fragment: { module, entryPoint: 'fs_main', targets: [format].flat().map(f => blend ? { format: f, blend } : { format: f }) },
+      vertex: stage(module, 'vs_main'),
+      fragment: OA(stage(module, 'fs_main'), { targets: [format].flat().map(f => blend ? { format: f, blend } : { format: f }) }),
       primitive: { topology },
       ...(F_DEPTH && dep ? { depthStencil: { format: dep.format, depthWriteEnabled: dep.write, depthCompare: dep.compare } } : {}),
     }));
-  let rawCompute = module => D.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+  let rawCompute = module => D.createComputePipeline({ layout: 'auto', compute: stage(module, 'main') });
 
   // ─── Schema engine ─────────────────────────────────────────────────────────────────────────
   // Turns the two schema objects into WGSL declarations, a CPU-side uniform struct with a writer,
@@ -1152,6 +1169,8 @@ ${main}
     // @binding is left out, so `p.uniforms = {…}` keeps working against a shader that ignores UB.
     let emit = opts.emitUniform ?? true;
     let binding = opts.startBinding ?? 0;
+    // The @group/@binding prefix of every generated var line, spelled once.
+    let gb = b => `@group(${group}) @binding(${b}) var`;
 
     // [size, align, components, packRows] in 4-byte units, derived from the type string rather than
     // tabulated. WGSL layout rules: scalars are 1/1; vecN is N wide and aligns to N, except vec3
@@ -1227,7 +1246,7 @@ ${main}
       if (emit) {
         uniformWGSL = `struct ${structName} {
 ${structFields.join('\n')}
-}\n@group(${group}) @binding(${binding}) var<uniform> ${varName}: ${structName};`;
+}\n${gb(binding)}<uniform> ${varName}: ${structName};`;
         binding++;
       }
     }
@@ -1239,7 +1258,7 @@ ${structFields.join('\n')}
     let resourceWGSL = OE(resources).map(([name, wgslType]) => {
       let currentBinding = binding++;
       let isTex = wgslType.startsWith('texture_');
-      let isSampler = wgslType === 'sampler' || wgslType === 'sampler_comparison';
+      let isSampler = wgslType.startsWith('sampler');   // 'sampler' | 'sampler_comparison'
       let isBuf = !(isTex || isSampler);
 
       let decls = '', typeForBinding = wgslType;
@@ -1255,7 +1274,7 @@ ${structFields.join('\n')}
 
       resourceLayout[name] = { _binding: currentBinding, _wgslType: wgslType, _isBuf: isBuf, _isTex: isTex, _isSampler: isSampler };
       let addrSpace = isBuf ? (readOnly.includes(name) ? '<storage, read>' : '<storage, read_write>') : '';
-      let varLine = `@group(${group}) @binding(${currentBinding}) var${addrSpace} ${name}: ${typeForBinding};`;
+      let varLine = `${gb(currentBinding)}${addrSpace} ${name}: ${typeForBinding};`;
       return decls ? `${decls}\n${varLine}` : varLine;
     });
 
@@ -1282,8 +1301,9 @@ ${structFields.join('\n')}
   // ─── Pipeline factory ──────────────────────────────────────────────────────────────────────
   // The engine behind makeFrag / makeDraw / makeCompute: generate the schema WGSL, compile and
   // cache the pipeline, and hand back the object those three return.
+  // `wg` has no default: makeCompute always normalizes and passes it, and render never reads it.
   let makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format,
-    isCompute = false, blend, wg = [8, 8, 1], targetNames,
+    isCompute = false, blend, wg, targetNames,
     topology = 'triangle-list', count = 3, instances = 1, readOnly = [], depth }) => {
     // The resolved depth config: defaults, overridable field by field. `texture` is the caller's
     // own depth attachment; without it drawTo manages one sized to the target.
@@ -1323,7 +1343,7 @@ ${structFields.join('\n')}
     // (`dep.texture` is an attachment, not pipeline state, so it stays out of the key.)
     let blendKey = isCompute || !blend ? '' : (typeof blend === 'string' ? blend : JSON.stringify(blend)) + '|';
     let depthKey = F_DEPTH && dep ? `D${dep.format},${dep.compare},${dep.write}|` : '';
-    let cacheKey = (isCompute ? `C|` : `R|${[format].flat().join(',')}|${blendKey}${depthKey}${topology}|`) + hash(finalCode) + ':' + finalCode.length;
+    let cacheKey = (isCompute ? `C|` : `R|${[format].flat().join(',')}|${blendKey}${depthKey}${topology}|`) + ckey(finalCode);
     // The *promise* is cached, like shaderCache — two concurrent builds of the same source share
     // one pipeline instead of both missing and creating duplicates.
     let pending = pipelineCache.get(cacheKey);
@@ -1467,12 +1487,15 @@ ${structFields.join('\n')}
       count, instances,
     };
 
+    // Hoisted out of the object literal so run() can reuse it instead of restating the
+    // computePass/dispatchWorkgroups plumbing.
+    let dispatch = (x = 1, y = 1, z = 1, encoder) => computePass(p => p.dispatchWorkgroups(x, y, z), encoder);
+
     return isCompute ? OA(base, {
-      dispatch: (x = 1, y = 1, z = 1, encoder) => computePass(p => p.dispatchWorkgroups(x, y, z), encoder),
+      dispatch,
       // dispatch() counts workgroups; run() counts the items you actually have and divides by the
       // workgroup size for you. Guard the tail with `if (gid.x >= n) { return; }` as usual.
-      run: (w = 1, h = 1, d = 1, encoder) => computePass(
-        p => p.dispatchWorkgroups(Math.ceil(w / wg[0]), Math.ceil(h / wg[1]), Math.ceil(d / wg[2])), encoder),
+      run: (w = 1, h = 1, d = 1, encoder) => dispatch(...[w, h, d].map((n, i) => Math.ceil(n / wg[i])), encoder),
       // Takes a raw GPUBuffer or a handle — `.b ??` unwraps, as setResources does.
       dispatchIndirect: (buffer, byteOffset = 0, encoder) =>
         computePass(p => p.dispatchWorkgroupsIndirect(buffer.b ?? buffer, byteOffset), encoder),
@@ -1488,7 +1511,9 @@ ${structFields.join('\n')}
       // Single target: a view or texture, defaulting to the canvas. Multiple targets: an object
       // keyed by the `targets` schema — `drawTo({ colour: a, normal: b })` — so the @location order
       // lives in one place and callers never restate it.
-      drawTo: (view, clear = [0, 0, 0, 1], encoder) => {
+      // `clear` has no parameter default: the Array.isArray fallback below already supplies
+      // [0,0,0,1] for anything that is not a colour, undefined included.
+      drawTo: (view, clear, encoder) => {
         let c = Array.isArray(clear) ? clear : [0, 0, 0, 1];
         let loadOp = clear === 'load' ? 'load' : 'clear', clearValue = { r: c[0], g: c[1], b: c[2], a: c[3] };
         let views = targetNames

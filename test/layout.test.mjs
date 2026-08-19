@@ -366,7 +366,7 @@ const layoutOf = uniforms => {
   // wg: [64] used to interpolate `undefined` straight into the WGSL
   await S.makeCompute('', 'let i = gid.x;', {}, {}, { wg: [64] });
   check('a partial wg array fills missing axes with 1',
-    /@workgroup_size\(64, 1, 1\)/.test(lastCode), true);
+    /@workgroup_size\(64,1,1\)/.test(lastCode), true);
   check('no undefined leaks into the generated WGSL', /undefined/.test(lastCode), false);
 }
 

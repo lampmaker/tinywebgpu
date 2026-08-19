@@ -303,6 +303,9 @@ const { code, warnings } = await transform(source, {
   loader: 'js',
   format: iife ? 'iife' : 'esm',
   minify: true,
+  // The transform API skips top-level dead-code removal by default, which left the flipped
+  // `const F_X = false` declarations in the output after every *use* had been folded away.
+  treeShaking: true,
   drop: ['console'],
   // The `_`-prefixed internals always mangle. A rename table widens the net to the listed API
   // names, and mangleCache pins each one to its chosen code — esbuild then rewrites the
