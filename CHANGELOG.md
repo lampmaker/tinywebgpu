@@ -17,6 +17,14 @@ opt-in `rename`/`pack` builds already shorten. Also added `createBuffer` and
 `copyExternalImageToTexture` to the rename blocklist: platform members that were not listed
 because they are not pack candidates, but that a rename table must still never touch.
 
+**Changed — the configs' `features` is a true/false map, one description line per feature**
+
+`build.min.config.mjs` / `build.tiny.config.mjs` now spell the feature switches as
+`{ msg: true, texio: true, … }` with a one-line comment on each entry saying what it guards —
+flipping a feature is editing a boolean, not editing a list. `--with`/`--without` still
+override per run, a plain array of names is still accepted in custom configs, and the built
+artifacts are byte-identical.
+
 **Changed — expression bodies everywhere a `return` could go** (min −266 B → 16.4 KB, tiny −143 B → 9.5 KB, on top of the repeat pass below)
 
 The minifier merges statements into sequences but never removes a `let`, never converts a
