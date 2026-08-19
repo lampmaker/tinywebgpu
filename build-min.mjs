@@ -444,19 +444,19 @@ if (config.singleLine !== false) {
   packed = parts.reduce((a, p) => a + (/\w$/.test(a) && /^\w/.test(p) ? ' ' : '') + p) + '\n';
 }
 
-// The legend for the packed names, as one inline comment at the end of the file — so the packed
-// output stays readable without this script at hand.
+// The legend for the packed names, on its own line below the code — so the packed output stays
+// readable without this script at hand, and the code itself stays a single line.
 if (packTable.length && (config.packComment || args.includes('--pack-comment'))) {
-  packed = packed.trimEnd() + `/*pack:${packTable.map(([n, id]) => `${id}=${n}`).join(',')}*/\n`;
+  packed = packed.trimEnd() + `\n/*pack:${packTable.map(([n, id]) => `${id}=${n}`).join(',')}*/\n`;
 }
 
 // The renamed build is a different API, so its legend is not optional: without this comment
 // nobody — including you, next month — knows what `sR` is. Only the pairs that survived into
 // this build are listed — a stripped build should not pay legend bytes for renames of entry
-// points it does not contain.
+// points it does not contain. Also on its own line, below the code.
 if (renameEntries.length) {
   const applied = renameEntries.filter(([, short]) => new RegExp(`\\b${escapeRe(short)}\\b`).test(packed));
-  packed = packed.trimEnd() + `/*renamed:${applied.map(([long, short]) => `${short}=${long}`).join(',')}*/\n`;
+  packed = packed.trimEnd() + `\n/*renamed:${applied.map(([long, short]) => `${short}=${long}`).join(',')}*/\n`;
   console.log(`  renamed: ${applied.length} API name(s) (of ${renameEntries.length} in the table); legend comment appended`);
 }
 

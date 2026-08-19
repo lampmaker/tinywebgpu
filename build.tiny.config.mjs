@@ -70,7 +70,8 @@ export default {
   rename: false,
   renames: RENAMES,
 
-  // One line out: newlines inside template literals become \n escapes after minifying.
+  // One line of code out: newlines inside template literals become \n escapes after minifying.
+  // The legend comments (pack/renamed) then sit on their own lines below it.
   singleLine: true,
 
   // Set to SHORT_TOKENS to build the one-letter WGSL tokens in: the library's own WGSL ships
