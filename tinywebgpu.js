@@ -276,9 +276,7 @@ ${frag}
       // WGSL module-scope declarations are order-independent, so the struct may land above the
       // shader that returns it.
       let names = targets ? OK(targets) : null;
-      let outStruct = names
-        ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: vec4<f32>`).join(', ')}};\n`
-        : '';
+      let outStruct = names ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: vec4<f32>`).join(', ')}};\n` : '';
       return makePipeline({
         code: `${outStruct}${code}`, uniforms, resources, readOnly,
         isCompute: false, blend, targetNames: names, count, instances, topology, depth,
@@ -314,12 +312,7 @@ ${main}
      */
     makeQuad: async ({ frag, uniforms = {}, resources = {}, clear = [0, 0, 0, 1], format = S.format, blend = null }) => {
       let p = await S.makeFrag(frag, uniforms, resources, { format, blend });
-      return OA(p, {
-        run: (u = {}, view = targetView()) => {
-          if (u && OK(u).length) p.uniforms = u;
-          p.drawTo(view, clear);
-        }
-      });
+      return OA(p, { run: (u = {}, view = targetView()) => (u && OK(u).length && (p.uniforms = u), p.drawTo(view, clear)) });
     },
 
     /**
@@ -329,8 +322,7 @@ ${main}
      * @returns {Promise<ComputePipeline & {run: (w?: number, h?: number, d?: number) => void}>}
      */
     makeCompute2D: async ({ body, decls = '', uniforms = {}, resources = {}, size = [1, 1], wg = [8, 8, 1] }) => {
-      let p = await S.makeCompute(decls, body, uniforms, resources, { wg });
-      let run = p.run;
+      let p = await S.makeCompute(decls, body, uniforms, resources, { wg }), run = p.run;
       return OA(p, { run: (w = size[0], h = size[1], d = 1, encoder) => run(w, h, d, encoder) });
     },
 
@@ -362,13 +354,9 @@ ${main}
         }
       }
       fEnc = mkEnc(DIAG && 'frame');
-      // Left null unless the caller named a target: the swapchain texture is acquired lazily by
-      // targetView(), so a compute-only frame never touches (and never presents) the canvas.
-      fView = opts.view ?? null;
-      fPass = null;
-      fPassOpts = null;
-      fOwned = false;
-      fBound = null;
+      // fView is left null unless the caller named a target: the swapchain texture is acquired
+      // lazily by targetView(), so a compute-only frame never touches (or presents) the canvas.
+      fReset(opts.view ?? null);
     },
     endFrame: () => {
       if (!fEnc) return;
@@ -376,10 +364,7 @@ ${main}
       flushRing();
       let enc = fEnc;
       fEnc = null;                         // cleared first: a throwing finish() must not leave it dangling
-      fView = null;
-      fPassOpts = null;
-      fOwned = false;
-      fBound = null;
+      fReset(null);
       submit(enc);
     },
     // Keeps one compute pass open so chained dispatches skip the per-dispatch pass overhead.
@@ -389,8 +374,7 @@ ${main}
       if (fPass) return fPass;
       if (!fEnc) { fEnc = mkEnc(DIAG && 'compute'); fOwned = true; }
       fBound = null;                       // fresh chain: nothing bound yet
-      fPassOpts = opts;
-      return (fPass = fEnc.beginComputePass(opts));
+      return (fPass = fEnc.beginComputePass(fPassOpts = opts));
     },
     endCompute: () => {
       endPass();
@@ -427,15 +411,13 @@ ${main}
      */
     createStorageBuffer: sizeOrData => {
       let init = typeof sizeOrData === 'number' ? null : sizeOrData;
-      let h = S.createBuffer(init ? init.byteLength : sizeOrData,
-        BUF_STORAGE | BUF_COPY_SRC | BUF_COPY_DST, 'storage');
+      let h = S.createBuffer(init ? init.byteLength : sizeOrData, BUF_STORAGE | BUF_COPY_SRC | BUF_COPY_DST, 'storage');
       let { b, w } = h, n = b.size;
       // `r` is a debug/export path, not a hot one: F_READ drops it (and the staging pool with it).
-      let r = !F_READ ? void 0 : async (nbytes = n, o = 0, C = Uint8Array) => {
-        let ab = await readBack(nbytes, (enc, rb, need) => enc.copyBufferToBuffer(b, o, rb, 0, need),
-          DIAG && 'readback');
-        return C ? new C(ab) : ab;                               // C e.g. Uint32Array, Float32Array
-      };
+      // C is the result view, e.g. Uint32Array or Float32Array.
+      let r = !F_READ ? void 0 : (nbytes = n, o = 0, C = Uint8Array) =>
+        readBack(nbytes, (enc, rb, need) => enc.copyBufferToBuffer(b, o, rb, 0, need), DIAG && 'readback')
+          .then(ab => C ? new C(ab) : ab);
       let clear = () => fEnc
         ? outsidePass(() => fEnc.clearBuffer(b, 0, n))
         : oneShot(enc => enc.clearBuffer(b, 0, n), DIAG && 'clear');
@@ -606,7 +588,7 @@ ${main}
        * @returns {{read: *, write: *, swap: () => void}}
        */
       pingPong: make => {
-        let pp = { read: make(), write: make(), swap: () => { let t = pp.read; pp.read = pp.write; pp.write = t; } };
+        let pp = { read: make(), write: make(), swap: () => { [pp.read, pp.write] = [pp.write, pp.read]; } };
         return pp;
       },
       // Two storage buffers. A TypedArray/ArrayBuffer seeds *both*, so the pair starts consistent.
@@ -765,9 +747,8 @@ ${main}
       let promise = shaderCache.get(key);
       if (!promise) {
         // the promise (not the module) is cached, so concurrent calls share one compile
-        promise = compileShader(code, key);
+        shaderCache.set(key, promise = compileShader(code, key));
         promise.catch(() => shaderCache.delete(key));
-        shaderCache.set(key, promise);
       }
       return promise;
     },
@@ -845,6 +826,8 @@ ${main}
   // Close the chained compute pass without submitting: callers below still need the encoder alive
   // to keep recording. Public endCompute() is the one that may submit.
   let endPass = () => { try { fPass?.end(); } catch { } fPass = null; };
+  // Reset the per-frame state; `view` is the next frame's target (or null for none).
+  let fReset = view => { fView = view; fPass = fPassOpts = fBound = null; fOwned = false; };
 
   // Buffer copies cannot be encoded inside a pass. Close the chained pass, encode, then reopen it
   // and restore the pipeline/bind group of whatever was last bound, so a mid-chain write is
@@ -875,9 +858,7 @@ ${main}
         _cpu: new Uint8Array(cap), _at: 0
       };
     }
-    let src = ArrayBuffer.isView(data)
-      ? new Uint8Array(data.buffer, data.byteOffset, size)
-      : new Uint8Array(data, 0, size);
+    let src = ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, size) : new Uint8Array(data, 0, size);
     c._cpu.set(src, c._at);
     // The copy is rounded up to 4 bytes; zero the tail so a short write cannot smear whatever the
     // previous frame left in the ring into the bytes past the caller's data.
@@ -932,13 +913,8 @@ ${main}
 
   // A stable small integer per GPU object, for building bind-group cache keys out of resource
   // identities. WeakMap-backed, so it holds nothing alive.
-  let rids = new WeakMap();
-  let ridN = 0;
-  let idOf = o => {
-    let i = rids.get(o);
-    if (!i) rids.set(o, i = ++ridN);
-    return i;
-  };
+  let rids = new WeakMap(), ridN = 0;
+  let idOf = o => rids.get(o) ?? (rids.set(o, ++ridN), ridN);
 
   // FNV-1a, for cache keys.
   let hash = s => {
@@ -950,8 +926,7 @@ ${main}
   // The default view of a texture, memoized — bind groups are rebuilt often and a fresh
   // createView() per rebind is pure garbage. The view's size is recorded on the way through, so
   // the auto depth attachment can size itself from any view this library created.
-  let viewCache = new WeakMap();
-  let viewSize = F_DEPTH ? new WeakMap() : null;
+  let viewCache = new WeakMap(), viewSize = F_DEPTH ? new WeakMap() : null;
   let viewOf = t => {
     let v = viewCache.get(t);
     if (!v) {
@@ -984,10 +959,7 @@ ${main}
     let t = depthCache.get(key);
     if (!t) {
       // Old sizes (a resized canvas leaves them behind) are destroyed, not merely dropped.
-      if (depthCache.size >= 4) {
-        let k = depthCache.keys().next().value;
-        depthCache.get(k).destroy(); depthCache.delete(k);
-      }
+      if (depthCache.size >= 4) { let k = depthCache.keys().next().value; depthCache.get(k).destroy(); depthCache.delete(k); }
       depthCache.set(key, t = tex2d(s[0], s[1], format, TEX_RENDER_ATTACHMENT, 'depth'));
     }
     return viewOf(t);
@@ -1039,8 +1011,7 @@ ${main}
 
   // Accepts a preset name or a raw GPUBlendState; null/undefined = no blending (opaque).
   let resolveBlend = blend => {
-    if (!blend) return null;
-    if (typeof blend !== 'string') return blend;
+    if (!blend || typeof blend !== 'string') return blend || null;
     let b = BLENDS[blend];
     if (!b) throw Error(MSG ? `Unknown blend preset '${blend}'. Use ${OK(BLENDS).map(k => `'${k}'`).join(', ')} or a GPUBlendState object.` : 4);
     return b;
@@ -1123,8 +1094,7 @@ ${main}
     let uniformBuffer = null, uniformWrite = () => { }, uniformWGSL = '';
     let uniformEntries = OE(uniforms);
     if (uniformEntries.length > 0) {
-      let offset = 0;
-      let layout = {};
+      let offset = 0, layout = {};
       let structFields = uniformEntries.map(([name, wgslType]) => {
         let [size, al, comps, packRows] = typeInfo(wgslType);
         offset = alignTo(offset, al);
@@ -1162,8 +1132,7 @@ ${main}
             let x = array[i] ?? 0;
             if (DIAG && S.debug && (f.isI || f.isU) && !Number.isInteger(x))
               console.warn(`Uniform '${name}' expects integer for ${f.wgslType} at index ${i}, got ${x}. It will be truncated.`);
-            if (f.isU) x = x >>> 0;
-            else if (f.isI) x = x | 0;
+            x = f.isU ? x >>> 0 : f.isI ? x | 0 : x;
             // Straight through, except for a 3-row matrix: the caller hands over tightly packed
             // columns and the buffer wants them on a 4-unit stride.
             f.view[f.offset + (f.packRows ? ((i / 3 | 0) * 4 + i % 3) : i)] = x;
@@ -1298,8 +1267,7 @@ ${structFields.join('\n')}
     }
     let pipeline = await pending;
 
-    let bindGroup = null;
-    let bound = null;              // the merged resource map the current bindGroup was built from
+    let bindGroup = null, bound = null;   // `bound` = the resource map the current group was built from
 
     // What a declared type needs the resource to have been created with. Checking it here turns
     // the commonest texture mistake (a plain createTexture behind a texture_storage_2d) from a wall
@@ -1361,7 +1329,7 @@ ${structFields.join('\n')}
       bound = next;
       let key = rFields.map(n => next[n] ? idOf(next[n]) : 0).join(',');
       let hit = bgCache.get(key);
-      if (hit) { bindGroup = hit; return; }
+      if (hit) return void (bindGroup = hit);
       if (DIAG && rFields.length > 0) validateResources(next);
       let entries = [
         ...(uBinding != null ? [{ binding: 0, resource: { buffer: schema.uniformBuffer } }] : []),
@@ -1448,8 +1416,7 @@ ${structFields.join('\n')}
       // lives in one place and callers never restate it.
       drawTo: (view, clear = [0, 0, 0, 1], encoder = null) => {
         let c = Array.isArray(clear) ? clear : [0, 0, 0, 1];
-        let loadOp = clear === 'load' ? 'load' : 'clear';
-        let clearValue = { r: c[0], g: c[1], b: c[2], a: c[3] };
+        let loadOp = clear === 'load' ? 'load' : 'clear', clearValue = { r: c[0], g: c[1], b: c[2], a: c[3] };
         let views = targetNames
           ? targetNames.map(n => {
             let v = view?.[n];
