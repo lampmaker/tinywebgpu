@@ -6,10 +6,23 @@
 export default {
   out: 'tinywebgpu.min.js',
 
-  // Every optional feature stays in. DIAG never ships — build-min.mjs forces it off.
-  // Names are the --with/--without vocabulary; see FEATURES in build-min.mjs.
-  features: ['msg', 'texio', 'read', 'save', 'show', 'pingpong', 'resize',
-    'blend', 'depth', 'mips', 'staging', 'aliases'],
+  // Feature switches: true = keep, false = strip the whole entry point from the build.
+  // Every optional feature stays in the stock build. DIAG never ships — build-min.mjs forces
+  // it off. The names double as the --with/--without vocabulary, which overrides this per run.
+  features: {
+    msg: true,       // human-readable error text; off, throws carry a number (see ERRORS in build-min.mjs)
+    texio: true,     // writeTexture, loadTexture — CPU pixels into a texture
+    read: true,      // GPU→CPU readback: buffer .r(), readTexture, and the staging pool behind them
+    save: true,      // save() — download a texture as an image file; needs `read`
+    show: true,      // show() — the one-call "let me look at that texture" blit
+    pingpong: true,  // pingPong, createPingPong, createPingPongTexture — double-buffer helpers
+    resize: true,    // resizeCanvas() — size the backing store to CSS box × devicePixelRatio
+    blend: true,     // the named blend presets ('alpha' | 'premultiplied' | 'additive')
+    depth: true,     // makeDraw({depth}) — depth testing with an auto-managed depth texture
+    mips: true,      // generateMipmaps, and the `mips` option on createTexture/loadTexture
+    staging: true,   // the staging ring: frame-ordered writes, so per-dispatch uniforms work in one frame
+    aliases: true,   // the long spellings — buffer/write/read on handles, …Fields on pipelines
+  },
 
   banner: true,        // the /*! version | MIT */ header
   iife: false,         // false = ESM export; true = classic <script> assigning globalThis.WEBGPU

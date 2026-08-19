@@ -27,8 +27,9 @@
 //      on its own, since something outside might read it by name; the regex is the promise that
 //      nothing does, and no `_`-prefixed property appears in API.md. A handful are reserved
 //      because the tests reach for them by name when run against this build.
-//   4. The F_* switches drop whole entry points — the config's `features` list (plus --with /
-//      --without) says which stay.
+//   4. The F_* switches drop whole entry points — the config's `features` true/false map
+//      (plus --with / --without per run) says which stay; each entry carries a one-line
+//      description of what it guards.
 //   5. `shorthand` (a token table, wgsl_shorthand.js format) swaps the `const SHORTHAND = 0;`
 //      seam in the source for an expander that runs on every shader at compile time, then
 //      compresses the library's own WGSL template literals to the same tokens.
@@ -65,8 +66,9 @@ import { transform } from 'esbuild';
 
 const SRC = 'tinywebgpu.js';
 
-// Switch name → what a config's `features` list (and --with/--without) calls it. `msg` is
+// Switch name → what a config's `features` map (and --with/--without) calls it. `msg` is
 // listed so a tiny build can keep its error text; DIAG is not, because no build ships with it.
+// The per-feature descriptions live next to the true/false entries in the config files.
 const FEATURES = {
   msg: 'MSG',
   texio: 'F_TEXIO',
@@ -156,17 +158,21 @@ const list = name => (flag(name) ?? '').split(',').map(s => s.trim().toLowerCase
 const name = args.find(a => !a.startsWith('--')) ?? (args.includes('--tiny') ? 'tiny' : 'min');
 const configPath = flag('config') ?? `build.${name}.config.mjs`;
 const config = (await import(pathToFileURL(resolve(configPath)).href)).default;
-const cfgFeatures = config.features ?? [];
+// `features` is a {name: true|false} map (the stock configs annotate each entry); a plain
+// array of names, meaning "these on, the rest off", is accepted too.
+const cfgFeatures = config.features ?? {};
+const cfgNames = Array.isArray(cfgFeatures) ? cfgFeatures : Object.keys(cfgFeatures);
+const cfgOn = Array.isArray(cfgFeatures) ? cfgFeatures : cfgNames.filter(f => cfgFeatures[f]);
 
-const unknown = [...cfgFeatures, ...list('with'), ...list('without')].filter(f => !(f in FEATURES));
+const unknown = [...cfgNames, ...list('with'), ...list('without')].filter(f => !(f in FEATURES));
 if (unknown.length) {
   console.error(`build-min: unknown feature ${unknown.map(f => `'${f}'`).join(', ')} (${configPath} / flags).`);
   console.error(`Known: ${Object.keys(FEATURES).join(', ')}.`);
   process.exit(1);
 }
 
-// The config's feature list, plus --with, minus --without. DIAG is off in every build.
-const on = new Set([...cfgFeatures, ...list('with')]);
+// The config's enabled features, plus --with, minus --without. DIAG is off in every build.
+const on = new Set([...cfgOn, ...list('with')]);
 for (const f of list('without')) on.delete(f);
 // Pulling a dependency back in silently would leave you wondering why the build did not shrink.
 for (const f of [...on]) for (const dep of REQUIRES[f] ?? []) {
@@ -438,19 +444,19 @@ if (config.singleLine !== false) {
   packed = parts.reduce((a, p) => a + (/\w$/.test(a) && /^\w/.test(p) ? ' ' : '') + p) + '\n';
 }
 
-// The legend for the packed names, as one inline comment at the end of the file — so the packed
-// output stays readable without this script at hand.
+// The legend for the packed names, on its own line below the code — so the packed output stays
+// readable without this script at hand, and the code itself stays a single line.
 if (packTable.length && (config.packComment || args.includes('--pack-comment'))) {
-  packed = packed.trimEnd() + `/*pack:${packTable.map(([n, id]) => `${id}=${n}`).join(',')}*/\n`;
+  packed = packed.trimEnd() + `\n/*pack:${packTable.map(([n, id]) => `${id}=${n}`).join(',')}*/\n`;
 }
 
 // The renamed build is a different API, so its legend is not optional: without this comment
 // nobody — including you, next month — knows what `sR` is. Only the pairs that survived into
 // this build are listed — a stripped build should not pay legend bytes for renames of entry
-// points it does not contain.
+// points it does not contain. Also on its own line, below the code.
 if (renameEntries.length) {
   const applied = renameEntries.filter(([, short]) => new RegExp(`\\b${escapeRe(short)}\\b`).test(packed));
-  packed = packed.trimEnd() + `/*renamed:${applied.map(([long, short]) => `${short}=${long}`).join(',')}*/\n`;
+  packed = packed.trimEnd() + `\n/*renamed:${applied.map(([long, short]) => `${short}=${long}`).join(',')}*/\n`;
   console.log(`  renamed: ${applied.length} API name(s) (of ${renameEntries.length} in the table); legend comment appended`);
 }
 

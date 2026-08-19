@@ -74,7 +74,8 @@ check('every legend pair comes from the RENAMES table',
   legend.split(',').filter(p => { const [short, long] = p.split('='); return RENAMES[long] !== short; }), []);
 check('the exercised codes are in the legend',
   ['mF', 'mC', 'cSB', 'sR', 'sU', 'uS', 'dT'].filter(s => !legend.includes(`${s}=`)), []);
-check('the output is still a single line', text.trimEnd().split('\n').length, 1);
+check('one line of code; only legend comments on the lines below',
+  text.trimEnd().split('\n').filter((l, i) => i > 0 && !/^\/\*.*\*\/$/.test(l)), []);
 
 if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nall renamed-build tests passed');
