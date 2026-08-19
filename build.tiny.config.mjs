@@ -35,8 +35,23 @@ export const RENAMES = {
 export default {
   out: 'tinywebgpu.tiny.js',
 
-  // Everything optional off; --with= names what a piece needs (see FEATURES in build-min.mjs).
-  features: [],
+  // Feature switches: true = keep, false = strip the whole entry point from the build.
+  // Everything optional is off here — flip a feature on for your piece, or per run with
+  // --with= (and back off with --without=). DIAG never ships; build-min.mjs forces it off.
+  features: {
+    msg: false,      // human-readable error text; off, throws carry a number (see ERRORS in build-min.mjs)
+    texio: false,    // writeTexture, loadTexture — CPU pixels into a texture
+    read: false,     // GPU→CPU readback: buffer .r(), readTexture, and the staging pool behind them
+    save: false,     // save() — download a texture as an image file; needs `read`
+    show: false,     // show() — the one-call "let me look at that texture" blit
+    pingpong: false, // pingPong, createPingPong, createPingPongTexture — double-buffer helpers
+    resize: false,   // resizeCanvas() — size the backing store to CSS box × devicePixelRatio
+    blend: false,    // the named blend presets ('alpha' | 'premultiplied' | 'additive')
+    depth: false,    // makeDraw({depth}) — depth testing with an auto-managed depth texture
+    mips: false,     // generateMipmaps, and the `mips` option on createTexture/loadTexture
+    staging: false,  // the staging ring: frame-ordered writes; without it, the last in-frame write wins
+    aliases: false,  // the long spellings — buffer/write/read on handles, …Fields on pipelines
+  },
 
   banner: true,
   iife: false,         // pass --iife for the classic-<script> flavour
