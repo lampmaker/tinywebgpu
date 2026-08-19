@@ -12,7 +12,7 @@ pass/submit plumbing) and stays out of the way of your WGSL.
 <script type="module">
   import { WEBGPU } from './tinywebgpu.js';
 
-  const G = await WEBGPU().init(document.getElementById('c').getContext('webgpu'));
+  const G = await WEBGPU().init('#c');    // a selector, a canvas, or a ready 'webgpu' context
   const quad = await G.makeQuad({
     frag: `fn frag(uv: vec2<f32>) -> vec4<f32> {
       return vec4<f32>(0.5 + 0.5 * cos(UB.time + uv.xyx * 4.0 + vec3<f32>(0.0, 2.0, 4.0)), 1.0);
@@ -112,7 +112,8 @@ const tex = G.createTexture(2, 2);
 G.writeTexture(tex, new Uint8Array([255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255]));
 
 // or an image: URL, Blob, ImageBitmap, <img>, <canvas>, <video>
-const photo = await G.loadTexture('image.png');
+// mips: true also builds the mip chain, so the photo minifies cleanly when drawn small
+const photo = await G.loadTexture('image.png', { mips: true });
 
 // and back out again — rows tightly packed, typed from the format
 const pixels = await G.readTexture(photo);          // Uint8Array, 4 bytes per texel
@@ -125,9 +126,13 @@ const quad = await G.makeQuad({
   }`,
   resources: { photo: 'texture_2d<f32>', samp: 'sampler' },
 });
-quad.setResources({ photo, samp: G.createSampler({ magFilter: 'linear' }) });
+quad.setResources({ photo, samp: G.createSampler({ magFilter: 'linear', mipmapFilter: 'linear' }) });
 quad.run();
 ```
+
+Mipmaps work on your own textures too: `createTexture(w, h, fmt, { mips: true })` allocates the
+full chain and `await G.generateMipmaps(tex)` fills it from level 0 with linear-filtered blits —
+after a `writeTexture`, or whenever you have re-rendered level 0.
 
 Draw translucent passes over what's already there with `blend` — `'alpha'`,
 `'premultiplied'`, `'additive'`, or a raw `GPUBlendState`:
@@ -278,7 +283,7 @@ each facet derives its own normal so the shading is flat.
 
 ## Minified build
 
-`tinywebgpu.min.js` — **17.2 KB** (7.8 KB gzipped), versus 85 KB for the source. Rebuild it with
+`tinywebgpu.min.js` — **18.3 KB** (8.2 KB gzipped), versus 89 KB for the source. Rebuild it with
 `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
 
 It is a **production artifact and it is silent**: every `console` warning is stripped, and so are
@@ -294,10 +299,10 @@ accident.
 ## Tiny build (inline / on-chain embedding)
 
 When the library has to be *inlined* — a single self-contained HTML file, an on-chain generative
-artwork with a hard byte budget — 17.2 KB of it is still mostly features you are not using. A
+artwork with a hard byte budget — 18.3 KB of it is still mostly features you are not using. A
 procedural piece renders from a shader and never touches image loading, readback, or PNG export.
 
-`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 11.0 KB** (5.2 KB gzipped) by dropping
+`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 11.4 KB** (5.4 KB gzipped) by dropping
 every optional entry point, and adding `--iife --no-banner` gets a classic
 `<script>` that assigns `globalThis.WEBGPU` for the same size.
 
@@ -308,21 +313,22 @@ node build-min.mjs --without=save,read,texio        start from the full build in
 node build-min.mjs --tiny --iife --no-banner --out=dist/twg.js
 ```
 
-What each switch is worth, measured against the 17.2 KB build:
+What each switch is worth, measured against the 18.3 KB build:
 
 | `--without=` | Removes | Saves |
 |---|---|---|
 | `msg` | error *text* — throws carry a number instead | 1.2 KB |
-| `texio` | `writeTexture`, `loadTexture` | 1.1 KB |
+| `texio` | `writeTexture`, `loadTexture` | 1.2 KB |
 | `save` | `save()` (PNG download) | 0.7 KB |
 | `show` | `show()`, the one-call texture blit | 0.7 KB |
-| `depth` | `makeDraw({depth})` and the depth-texture pool | 0.6 KB |
-| `read` | `readTexture`, buffer `.r()`, the staging pool — **`save` needs it** | 1.2 KB¹ |
+| `depth` | `makeDraw({depth})` and the depth-texture pool | 0.7 KB |
+| `mips` | `generateMipmaps` and the `mips` texture option | 0.5 KB |
+| `read` | `readTexture`, buffer `.r()`, the staging pool — **`save` needs it** | 1.3 KB¹ |
 | `resize` | `resizeCanvas()` | 0.4 KB |
 | `pingpong` | `pingPong`, `createPingPong`, `createPingPongTexture` | 0.2 KB |
 | `blend` | the named presets; a raw `GPUBlendState` still works | 0.1 KB |
 
-¹ on top of `save`; `--without=read,save` is 1.9 KB together. The build warns and keeps a
+¹ on top of `save`; `--without=read,save` is 2.0 KB together. The build warns and keeps a
 dependency rather than producing something that throws at runtime.
 
 What is never optional: `init`, the dual-schema engine, `makeFrag`/`makeDraw`/`makeCompute`
@@ -362,18 +368,19 @@ G.pre = shorthand({ RAY: 'MyRay', ...TOKENS });
 
 | | |
 |---|---|
-| Setup | `init(ctx?)` (no ctx = compute-only) · `resizeCanvas()` · `debug` · `pre` · `onDeviceLost` |
+| Setup | `init(canvas \| ctx \| selector?)` (nothing = compute-only) · `destroy()` · `resizeCanvas()` · `debug` · `pre` · `onDeviceLost` |
 | Pipelines | `makeFrag(frag, uniforms?, resources?, {format?, blend?, targets?, depth?})` · `makeDraw({code, uniforms?, resources?, readOnly?, count?, instances?, topology?, depth?, …})` · `makeCompute(body, main, uniforms?, resources?, {wg?})` |
 | Pipeline object | `p.uniforms = {…}` / `setUniform(s)` · `p.resources = {…}` / `setResources` · `run(w,h,d)` (items) · `dispatch(x,y,z)` (workgroups) · `dispatchIndirect(buf, off)` · `drawTo(view?, clear?)` |
 | One-liners | `makeQuad({frag, uniforms, …})` · `makeCompute2D({body, size, wg, …})` · `show(tex, view?, opts?)` · `save(tex, filename?, opts?)` |
-| Frame API | `beginFrame()` / `endFrame()` · `beginCompute()` / `endCompute()` — dispatches inside join the open pass automatically |
-| Buffers | `createUniformBuffer(bytes)` · `createStorageBuffer(bytes \| data)` → `{b, w, r, clear}` (aliases `buffer`/`write`/`read`) · `createBuffer(bytes, usage)` · `createIndirectBuffer()` |
+| Frame API | `beginFrame()` / `endFrame()` · `frame(fn)` (the pair, exception-safe) · `beginCompute()` / `endCompute()` — dispatches inside join the open pass automatically |
+| Buffers | `createUniformBuffer(bytes)` · `createStorageBuffer(bytes \| data)` → `{b, w, r, clear}` (aliases `buffer`/`write`/`read`; `r(Float32Array)` reads the whole buffer typed) · `createBuffer(bytes, usage)` · `createIndirectBuffer()` |
 | Ping-pong | `createPingPong(bytes \| data)` · `createPingPongTexture(w, h, format?)` · `pingPong(make)` → `{read, write, swap()}` |
-| Textures | `createTexture(w, h, format?, usage?)` · `createStorageTexture(w, h, format?)` · `createSampler(opts)` · `writeTexture(tex, data)` · `loadTexture(src)` · `readTexture(tex, opts?)` |
+| Textures | `createTexture(w, h, format?, usage \| {usage, mips}?)` · `createStorageTexture(w, h, format?)` · `generateMipmaps(tex)` · `createSampler(opts)` · `writeTexture(tex, data)` · `loadTexture(src, {mips?, …})` · `readTexture(tex, opts?)` |
 | Escape hatches | `makeShader` · `bindGroup` · `makeSchema` · `writeUniforms` · `device` (the raw `GPUDevice`) |
 
-Full reference: **[API.md](API.md)**. JSDoc types are included in the source for editor
-autocomplete — no TypeScript build needed.
+Full reference: **[API.md](API.md)**. TypeScript declarations ship as `tinywebgpu.d.ts`
+(wired via `types`/`exports`), so editors autocomplete the whole surface with inline docs —
+no TypeScript build needed, and plain-JS users get it too through their editor.
 
 ## Sharp edges (read once, save hours)
 

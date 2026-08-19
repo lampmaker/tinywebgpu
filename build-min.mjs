@@ -54,6 +54,7 @@ const FEATURES = {
   resize: 'F_RESIZE',
   blend: 'F_BLEND',
   depth: 'F_DEPTH',
+  mips: 'F_MIPS',
 };
 
 // A feature that cannot stand on its own. Asking for the key implies the values.
@@ -84,6 +85,7 @@ const ERRORS = {
   20: 'loadTexture: the fetch for a URL source failed (HTTP status in the message build)',
   21: 'depth: target size unknown — pass a GPUTexture to drawTo, or supply depth.texture',
   22: 'unknown resource name in setResources',
+  23: 'init: the CSS selector matched nothing',
 };
 
 // ── argv ──────────────────────────────────────────────────────────────────────────────────────
@@ -168,6 +170,7 @@ const guards = [
   ['resizeCanvas()', /devicePixelRatio/, !switches.F_RESIZE],
   ['blend presets', /one-minus-src-alpha/, !switches.F_BLEND],
   ['depth support', /depthStencil/, !switches.F_DEPTH],
+  ['mipmaps', /baseMipLevel/, !switches.F_MIPS],
 ];
 for (const [what, re, shouldBeGone] of guards) {
   if (shouldBeGone && re.test(code)) {

@@ -5,16 +5,17 @@ Complete surface of `tinywebgpu.js`. Pre-1.0: minor versions may still break API
 ```js
 import { WEBGPU } from './tinywebgpu.js';
 const G = WEBGPU();
-await G.init(canvas.getContext('webgpu'));
+await G.init(canvas);        // or a 'webgpu' context, or a CSS selector
 ```
 
 ## Setup
 
 ### `await G.init(ctx?, opts?)`
-Requests adapter + device (with the adapter's max buffer-size limits) and, if a canvas
-`'webgpu'` context is passed, configures it (`preferredCanvasFormat`, `alphaMode:'opaque'`).
-Omit `ctx` for compute-only use — render calls then need an explicit target view. Populates
-`G.device`, `G.context`, `G.format`, `G.features`. Throws if WebGPU is unavailable.
+Requests adapter + device (with the adapter's max buffer-size limits) and configures the canvas.
+`ctx` can be a canvas `'webgpu'` context, a canvas element / OffscreenCanvas, or a CSS selector
+for one — `init('#c')` works. Omit it for compute-only use — render calls then need an explicit
+target view. Populates `G.device`, `G.context`, `G.format`, `G.features`. Throws if WebGPU is
+unavailable.
 
 `opts` (all optional):
 
@@ -31,6 +32,17 @@ if (G.features.has('timestamp-query')) { /* ... */ }
 ```
 
 Requesting a feature makes it *available* — the library doesn't build anything on top of it.
+
+### `G.destroy()`
+Tears the instance down: destroys the device and every pooled GPU resource (staging ring,
+readback pool, depth textures) and empties the caches. For SPA teardown, hot-reload dev servers
+and live-coding pages — the environments that otherwise leak a device per reload. Intentional
+destruction does not fire `onDeviceLost`. The instance is not reusable afterwards.
+
+### TypeScript
+`tinywebgpu.d.ts` ships with the package and is wired through `types`/`exports`, so editors
+autocomplete the whole surface with inline docs — in TypeScript *and* plain JavaScript projects.
+The `GPU*` names come from TypeScript's own `lib.dom`; on an older TS add `@webgpu/types`.
 
 ### `G.debug = true|false` (default false)
 Enables uniform-write warnings (width overflow, non-integer into int fields). WGSL compile
@@ -92,7 +104,7 @@ attachments must share width/height/sampleCount, and the device caps both the nu
 (`maxColorAttachmentBytesPerSample`, often 32 — two `rgba32float` targets and you are at the
 ceiling).
 
-### `await G.makeDraw({ code, uniforms?, resources?, readOnly?, count?, instances?, topology?, format?, blend?, targets? })`
+### `await G.makeDraw({ code, uniforms?, resources?, readOnly?, count?, instances?, topology?, format?, blend?, targets?, depth? })`
 Render pipeline with **your own vertex stage**. `code` is complete WGSL — both
 `@vertex fn vs_main` and `@fragment fn fs_main` — and the only thing prepended is the schema
 (the `UB` struct and the `@group`/`@binding` declarations), exactly as for compute. You keep the
@@ -192,7 +204,8 @@ Render-only:
 | `p.count` / `p.instances` | Vertices per instance and instance count, writable. `3` / `1` for `makeFrag`. Change either per frame without rebuilding the pipeline. |
 
 ### One-liners
-- `await G.makeQuad({ frag, uniforms, resources, clear, format, blend })` → pipeline + `run(u?, view?)`
+- `await G.makeQuad({ frag, uniforms, resources, clear, ...makeFragOpts })` → pipeline + `run(u?, view?)`.
+  Every `makeFrag` option (`format`, `blend`, `targets`, `depth`) passes through.
 - `await G.makeCompute2D({ body, decls, uniforms, resources, size, wg })` → `makeCompute` with a default
   `size`, so `run()` with no arguments covers the whole grid. `body` is the entry-point statements;
   `decls` is for helper functions and structs.
@@ -200,8 +213,8 @@ Render-only:
   and accepts a `GPUTexture` or a view. Reads with `textureLoad`, **not** a sampler, so
   unfilterable formats (`rgba32float`, the integer formats) work — at the cost of no filtering.
   The source's first row lands on the target's first row, so images are the right way up and
-  `show(a, b)` round-trips through `readTexture(b)`. `opts`: `format` (target format, default the
-  canvas format), `scale`/`offset` (per-channel `value * scale + offset`, enough to look at an HDR
+  `show(a, b)` round-trips through `readTexture(b)`. `opts`: `format` (target format; inferred from a
+  `GPUTexture` target, else the canvas format), `scale`/`offset` (per-channel `value * scale + offset`, enough to look at an HDR
   or signed buffer without writing a shader), `clear`, and `flipY: true` for a bottom-up source.
   One pipeline is cached per (target format, sample type, flip). Returns the pipeline.
 - `await G.save(tex, filename?, opts?)` → downloads a texture as an image file and returns the
@@ -220,6 +233,10 @@ computeA.dispatch(...);  // recorded, not submitted
 quad.drawTo();           // recorded
 G.endFrame();            // single queue.submit
 ```
+
+`G.frame(fn, opts?)` is the same pair wrapped around a callback, exception-safe: the frame is
+submitted even if `fn` throws, so one bad frame cannot leave a dangling encoder behind. It
+returns `fn`'s result.
 
 `G.beginCompute()` / `G.endCompute()` keep one compute pass open so chained kernels skip
 per-dispatch pass overhead. There is nothing extra to call: while that pass is open,
@@ -267,19 +284,20 @@ holding someone else's pipeline.
 | Call | Returns | Notes |
 |---|---|---|
 | `G.createUniformBuffer(bytes)` | `GPUBuffer` | UNIFORM \| COPY_DST |
-| `G.createStorageBuffer(bytesOrData)` | `{ b, w, r, clear }` (aliases: `buffer`, `write`, `read`) | STORAGE \| COPY_SRC \| COPY_DST. Pass a byte length, or a TypedArray/ArrayBuffer to size **and** fill in one call. `r` is an async debug readback (stalls!; staging pooled). `w`/`clear` are frame-ordered inside `beginFrame()`. |
+| `G.createStorageBuffer(bytesOrData)` | `{ b, w, r, clear }` (aliases: `buffer`, `write`, `read`) | STORAGE \| COPY_SRC \| COPY_DST. Pass a byte length, or a TypedArray/ArrayBuffer to size **and** fill in one call. `r` is an async debug readback (stalls!; staging pooled) — `r(nbytes?, byteOffset?, Ctor?)`, or `r(Float32Array)` to read the whole buffer typed. `w`/`clear` are frame-ordered inside `beginFrame()`. |
 | `G.createBuffer(bytes, usage)` | `{ b, w }` (aliases: `buffer`, `write`) | explicit usage flags; size rounded up to 4 bytes |
 | `G.createIndirectBuffer()` | `{ b, w }` | 12 bytes, INDIRECT \| STORAGE \| COPY_DST |
 | `G.createPingPong(bytesOrData)` | `{ read, write, swap() }` | Two storage buffers for read-one/write-the-other simulation steps. A TypedArray/ArrayBuffer seeds **both** halves, so a swap before the first step is harmless. `read`/`write` are ordinary `createStorageBuffer` handles and can be passed straight to `setResources`. |
 | `G.createPingPongTexture(w, h, format='rgba16float', usage?)` | `{ read, write, swap() }` | The texture flavour; both halves come from `createStorageTexture`. Pass `usage` to add `RENDER_ATTACHMENT` for render-target ping-pong. |
 | `G.pingPong(make)` | `{ read, write, swap() }` | The general form — calls `make()` twice. |
-| `G.createTexture(w, h, format='rgba8unorm', usage?)` | `GPUTexture` | render target / sampled. Default usage is RENDER_ATTACHMENT \| TEXTURE_BINDING \| COPY_SRC \| COPY_DST, so uploads work without opting in. |
+| `G.createTexture(w, h, format='rgba8unorm', usage \| {usage, mips}?)` | `GPUTexture` | render target / sampled. Default usage is RENDER_ATTACHMENT \| TEXTURE_BINDING \| COPY_SRC \| COPY_DST, so uploads work without opting in. `mips: true` allocates the full mip chain (a number allocates that many levels) — fill it with `generateMipmaps`. |
+| `await G.generateMipmaps(tex)` | `Promise<GPUTexture>` | Fills the smaller mip levels from level 0 by successive linear-filtered blits. Needs TEXTURE_BINDING + RENDER_ATTACHMENT (the defaults) and a filterable, renderable format. Call after `writeTexture`, or whenever level 0 changed. |
 | `G.createStorageTexture(w, h, format='rgba32float', usage?)` | `GPUTexture` | `textureStore`/`textureLoad`. Default usage is TEXTURE_BINDING \| STORAGE_BINDING \| COPY_SRC \| COPY_DST. |
 | `G.createSampler({ magFilter, minFilter, wrapU, wrapV, wrapW, ...rest })` | `GPUSampler` | defaults nearest/clamp. `wrapU/V/W` map to `addressModeU/V/W`; anything else (`mipmapFilter`, `compare`, `maxAnisotropy`, lod clamps) passes straight through. |
 | `G.writeTexture(tex, data, { width?, height?, x?, y?, bytesPerRow?, mipLevel? })` | `GPUTexture` | Raw pixel bytes in (LUTs, generated data). `width`/`height` default to the whole texture; `bytesPerRow` is derived from the format unless you pass it. Needs COPY_DST. |
 | `await G.readTexture(tex, { x?, y?, width?, height?, mipLevel?, Ctor? })` | `Promise<TypedArray>` | Pixels back out. Rows come back **tightly packed** — the 256-byte `bytesPerRow` padding `copyTextureToBuffer` requires is stripped for you. `Ctor` defaults from the format (`*32float` → `Float32Array`, `*32uint`/`*32sint` → `Uint32Array`/`Int32Array`, `*16float` → `Float16Array` where the platform has it (raw `Uint16Array` half bits otherwise), `*16uint`/`*16sint` → `Uint16Array`/`Int16Array`, else `Uint8Array`). Needs COPY_SRC — both texture creators include it. Like `.r()`, it **stalls the pipeline**, and during an open frame it reads pre-frame data and warns. |
 | `G.resizeCanvas(canvas?, { dpr? })` | `{ width, height, changed }` | Sizes the canvas backing store to its CSS box × `devicePixelRatio`, clamped to `maxTextureDimension2D`. `canvas` defaults to the one `init()` configured. `changed` is false when it was already the right size, so you can gate reallocating render targets; the returned size drops straight into a `vec2<f32>` resolution uniform. |
-| `await G.loadTexture(src, { texture?, format?, usage?, flipY?, premultipliedAlpha?, colorSpace? })` | `Promise<GPUTexture>` | `src` = URL string, `Blob`, `ImageBitmap`, `<img>`, `<canvas>`, `OffscreenCanvas` or `<video>`. Creates a texture sized from the source unless you pass `texture` to reuse one. A URL fetch that fails throws with the HTTP status instead of an opaque decode error. To *display* a loaded image with the generated uv, sample `vec2(uv.x, 1.0 - uv.y)` — uv.y is 0 at the bottom of the screen and the image's first row is v = 0. |
+| `await G.loadTexture(src, { texture?, format?, usage?, flipY?, premultipliedAlpha?, colorSpace? })` | `Promise<GPUTexture>` | `src` = URL string, `Blob`, `ImageBitmap`, `<img>`, `<canvas>`, `OffscreenCanvas` or `<video>`. Creates a texture sized from the source unless you pass `texture` to reuse one. `mips: true` allocates and builds the mip chain in the same call. A URL fetch that fails throws with the HTTP status instead of an opaque decode error. To *display* a loaded image with the generated uv, sample `vec2(uv.x, 1.0 - uv.y)` — uv.y is 0 at the bottom of the screen and the image's first row is v = 0. |
 | `G.writeUniforms(buf, typedArrayOrDataView, byteOffset?)` | — | raw write |
 
 ## Lower-level escape hatches
@@ -315,12 +333,12 @@ that reason.
 
 | File | Size | What it is |
 |---|---|---|
-| `tinywebgpu.js` | 85 KB | the source, with comments and every diagnostic. `main`/`exports` point here. |
-| `tinywebgpu.min.js` | 17.2 KB (7.8 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
-| `tinywebgpu.tiny.js` | 11.0 KB (5.2 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
+| `tinywebgpu.js` | 89 KB | the source, with comments and every diagnostic. `main`/`exports` point here. |
+| `tinywebgpu.min.js` | 18.3 KB (8.2 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
+| `tinywebgpu.tiny.js` | 11.4 KB (5.4 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
 
 `build:tiny` drops `writeTexture`, `loadTexture`, `readTexture`, buffer `.r()`, `save`, `show`,
-the ping-pong helpers, `resizeCanvas`, depth support and the named blend presets. Keep any of them with
+the ping-pong helpers, `resizeCanvas`, depth support, mipmaps and the named blend presets. Keep any of them with
 `node build-min.mjs --tiny --with=show,read`, or start from the full build and remove a few with
 `--without=save,texio`. `--iife` emits a classic `<script>` assigning `globalThis.WEBGPU`.
 Full table of what each switch costs: README → *Tiny build*.

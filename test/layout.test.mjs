@@ -547,6 +547,99 @@ const layoutOf = uniforms => {
     lastDesc.depthStencil, { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less-equal' });
 }
 
+// --- r(Ctor): typed readback of the whole buffer ------------------------------
+{
+  let lastCopy = null;
+  S.device.createCommandEncoder = () => ({ copyBufferToBuffer: (...a) => { lastCopy = a; }, finish: () => ({}) });
+  S.device.queue.submit = () => { };
+  S._acquireStaging = () => ({ mapAsync: async () => { }, getMappedRange: () => new ArrayBuffer(64), unmap: () => { } });
+  S._releaseStaging = () => { };
+  const buf = S.createStorageBuffer(64);
+  const typed = await buf.r(Float32Array);
+  check('r(Ctor) as the only argument reads the whole buffer typed',
+    [typed instanceof Float32Array, typed.length, lastCopy[4]], [true, 16, 64]);
+}
+
+// --- makeQuad passes the makeFrag options through -----------------------------
+{
+  let lastDesc = null;
+  Object.assign(S.device, {
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createRenderPipeline: d => { lastDesc = d; return { getBindGroupLayout: () => ({}) }; },
+  });
+  await S.makeQuad({ frag: 'fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(0.51); }', depth: true });
+  check('makeQuad forwards depth (and the other makeFrag options)', !!lastDesc.depthStencil, true);
+}
+
+// --- show() infers the format from a texture target ---------------------------
+{
+  let lastDesc = null;
+  const rp = { setPipeline: () => { }, setBindGroup: () => { }, draw: () => { }, end: () => { } };
+  Object.assign(S.device, {
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createRenderPipeline: d => { lastDesc = d; return { getBindGroupLayout: () => ({}) }; },
+    createBindGroup: () => ({}),
+    createCommandEncoder: () => ({ beginRenderPass: () => rp, finish: () => ({}) }),
+  });
+  const src = { format: 'rgba8unorm', usage: 4, mipLevelCount: 1, createView: () => ({}) };
+  const dst = { format: 'rgba16float', createView: () => ({}), width: 8, height: 8 };
+  await S.show(src, dst);
+  check('show() picks the target texture format when none is given',
+    lastDesc.fragment.targets[0].format, 'rgba16float');
+}
+
+// --- mips: full-chain allocation and generateMipmaps blits --------------------
+{
+  let made = [], passes = 0;
+  const rp = { setPipeline: () => { }, setBindGroup: () => { }, draw: () => { }, end: () => { } };
+  Object.assign(S.device, {
+    createTexture: d => {
+      made.push(d);
+      return { ...d.size, format: d.format, mipLevelCount: d.mipLevelCount, usage: 0x1f,
+        createView: (o = {}) => ({ mipLevelCount: 1, level: o.baseMipLevel ?? 0 }) };
+    },
+    createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
+    createRenderPipeline: () => ({ getBindGroupLayout: () => ({}) }),
+    createBindGroup: () => ({}),
+    createSampler: d => d,
+    createCommandEncoder: () => ({ beginRenderPass: () => { passes++; return rp; }, finish: () => ({}) }),
+  });
+  S.device.queue.submit = () => { };
+  const t = S.createTexture(64, 32, 'rgba8unorm', { mips: true });
+  check('mips: true allocates the full chain (64x32 → 7 levels)', made.at(-1).mipLevelCount, 7);
+  check('a numeric usage 4th argument still works', S.createTexture(4, 4, 'rgba8unorm', 16) && made.at(-1).usage, 16);
+  await S.generateMipmaps(t);
+  check('generateMipmaps blits once per level below the top', passes, 6);
+}
+
+// --- init: a canvas element or a selector works as well as a context ----------
+{
+  let cfg = null;
+  const fakeCtx = { configure: d => { cfg = d; } };
+  const fakeCanvas = { getContext: k => k === 'webgpu' ? fakeCtx : null };
+  const dev = { lost: { then() { } }, features: [], queue: {}, limits: {} };
+  const realNav = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      gpu: {
+        requestAdapter: async () => ({ limits: {}, features: { has: () => false }, requestDevice: async () => dev }),
+        getPreferredCanvasFormat: () => 'bgra8unorm',
+      }
+    },
+  });
+  const G2 = await WEBGPU().init(fakeCanvas);
+  check('init(canvas) gets the webgpu context itself',
+    [cfg?.device === dev, G2.context === fakeCtx], [true, true]);
+
+  globalThis.document = { querySelector: () => null };
+  let threw = '';
+  try { await WEBGPU().init('#nope'); } catch (e) { threw = e.message; }
+  delete globalThis.document;
+  check('init(selector) that matches nothing says so', /nothing matches '#nope'|^23$/.test(threw), true);
+  if (realNav) Object.defineProperty(globalThis, 'navigator', realNav);
+}
+
 // --- wgsl_shorthand ---------------------------------------------------------
 {
   const full = shorthand(TOKENS, SHORT_TOKENS);

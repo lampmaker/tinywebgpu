@@ -90,6 +90,7 @@ const F_PINGPONG = true;  // pingPong, createPingPong, createPingPongTexture
 const F_RESIZE = true;    // resizeCanvas
 const F_BLEND = true;     // the named blend presets ('alpha' | 'premultiplied' | 'additive')
 const F_DEPTH = true;     // makeDraw({depth}) — depth testing with an auto-managed depth texture
+const F_MIPS = true;      // generateMipmaps, and the mips option on createTexture/loadTexture
 
 // The generated uniform variable's name; makePipeline tests the shader for it.
 const UNIFORM_VAR = 'UB';
@@ -170,10 +171,11 @@ export let WEBGPU = () => {
 88  88       88  88    "Y888  
                                     
                                         
-    * Initializes WebGPU. Pass a canvas 'webgpu' context to render, or nothing for compute-only
-     * use (render calls then need an explicit target view). Requests the adapter's max buffer-size
-     * limits. Throws if WebGPU is unavailable.
-     * @param {GPUCanvasContext|null} [ctx]
+    * Initializes WebGPU. Pass a canvas 'webgpu' context, a canvas element / OffscreenCanvas, or
+     * a CSS selector for one to render — or nothing for compute-only use (render calls then need
+     * an explicit target view). Requests the adapter's max buffer-size limits. Throws if WebGPU
+     * is unavailable.
+     * @param {GPUCanvasContext|HTMLCanvasElement|OffscreenCanvas|string|null} [ctx]
      * @param {{features?: string[], limits?: Object, alphaMode?: string, canvasUsage?: number}} [opts]
      *   `features` are best-effort: any the adapter lacks are dropped with a warning rather than
      *   throwing, so check `G.features` for what was granted.
@@ -181,6 +183,12 @@ export let WEBGPU = () => {
      */
     init: async (ctx = null, opts = {}) => {
       if (!navigator.gpu) throw Error(MSG ? 'WebGPU not supported' : 1);
+      if (typeof ctx === 'string') {
+        let sel = ctx;
+        ctx = document.querySelector(sel);
+        if (!ctx) throw Error(MSG ? `init: nothing matches '${sel}'.` : 23);
+      }
+      if (ctx?.getContext) ctx = ctx.getContext('webgpu');   // a canvas rather than a context
       let a = await navigator.gpu.requestAdapter();
       if (!a) throw Error(MSG ? 'No GPU adapter' : 2);
 
@@ -198,6 +206,7 @@ export let WEBGPU = () => {
 
       let d = await a.requestDevice({ requiredLimits, requiredFeatures });
       d.lost.then(info => {
+        if (info.reason === 'destroyed') return;   // G.destroy() — intentional, not a loss
         console.error(`[TinyWebGPU] GPU device lost (${info.reason || 'unknown'}): ${info.message}`);
         S.onDeviceLost?.(info);
       });
@@ -209,6 +218,25 @@ export let WEBGPU = () => {
       if (ctx) ctx.configure({ device: d, format: f, alphaMode: opts.alphaMode ?? 'opaque', usage: opts.canvasUsage ?? TEX_RENDER_ATTACHMENT });
       OA(S, { device: d, context: ctx, format: f, features: d.features });
       return S;
+    },
+
+    /**
+     * Tears the instance down: destroys the device and every pooled GPU resource, and empties
+     * the caches. For SPA teardown, hot-reload dev servers and live-coding pages — the leak
+     * those environments hit otherwise is real. The instance is not reusable afterwards.
+     */
+    destroy: () => {
+      endPass();
+      fEnc = null;
+      fReset(null);
+      for (let c of ring._chunks) c._buf.destroy();
+      ring._chunks = []; ring._i = 0;
+      if (F_READ) { for (let l of stagingPool.values()) for (let b of l) b.destroy(); stagingPool.clear(); }
+      if (F_DEPTH) { for (let t of depthCache.values()) t.destroy(); depthCache.clear(); }
+      if (F_SHOW) blitCache.clear();
+      shaderCache.clear(); pipelineCache.clear();
+      D?.destroy();
+      D = null;
     },
 
 
@@ -308,10 +336,11 @@ ${main}
 
     /**
      * `makeFrag` plus a `run(uniformValues?, view?)` that uploads and draws in one call.
+     * Besides `clear`, every makeFrag option (format, blend, targets, depth) passes through.
      * @returns {Promise<RenderPipeline & {run: (u?: Object, view?: GPUTextureView) => void}>}
      */
-    makeQuad: async ({ frag, uniforms = {}, resources = {}, clear = [0, 0, 0, 1], format = S.format, blend = null }) => {
-      let p = await S.makeFrag(frag, uniforms, resources, { format, blend });
+    makeQuad: async ({ frag, uniforms = {}, resources = {}, clear = [0, 0, 0, 1], ...opts }) => {
+      let p = await S.makeFrag(frag, uniforms, resources, opts);
       return OA(p, { run: (u = {}, view = targetView()) => (u && OK(u).length && (p.uniforms = u), p.drawTo(view, clear)) });
     },
 
@@ -367,6 +396,9 @@ ${main}
       fReset(null);
       submit(enc);
     },
+    // beginFrame/endFrame with exception safety: the frame goes out even if `fn` throws, so a
+    // bug in one frame's code cannot leave a dangling encoder behind. Returns fn's result.
+    frame: (fn, opts) => { S.beginFrame(opts); try { return fn(); } finally { S.endFrame(); } },
     // Keeps one compute pass open so chained dispatches skip the per-dispatch pass overhead.
     // Works with or without an enclosing frame: inside one the frame owns the submit, outside one
     // this encoder is ours and endCompute() submits it.
@@ -414,10 +446,13 @@ ${main}
       let h = S.createBuffer(init ? init.byteLength : sizeOrData, BUF_STORAGE | BUF_COPY_SRC | BUF_COPY_DST, 'storage');
       let { b, w } = h, n = b.size;
       // `r` is a debug/export path, not a hot one: F_READ drops it (and the staging pool with it).
-      // C is the result view, e.g. Uint32Array or Float32Array.
-      let r = !F_READ ? void 0 : (nbytes = n, o = 0, C = Uint8Array) =>
-        readBack(nbytes, (enc, rb, need) => enc.copyBufferToBuffer(b, o, rb, 0, need), DIAG && 'readback')
+      // C is the result view, e.g. Float32Array — passing it as the *only* argument
+      // (`buf.r(Float32Array)`) reads the whole buffer typed, no byte counting.
+      let r = !F_READ ? void 0 : (nbytes = n, o = 0, C = Uint8Array) => {
+        if (typeof nbytes === 'function') [C, nbytes] = [nbytes, n];
+        return readBack(nbytes, (enc, rb, need) => enc.copyBufferToBuffer(b, o, rb, 0, need), DIAG && 'readback')
           .then(ab => C ? new C(ab) : ab);
+      };
       let clear = () => fEnc
         ? outsidePass(() => fEnc.clearBuffer(b, 0, n))
         : oneShot(enc => enc.clearBuffer(b, 0, n), DIAG && 'clear');
@@ -450,8 +485,14 @@ ${main}
     // ─── Textures & samplers ─────────────────────────────────────────────────────────────────
     // Read-only in shaders except as a render pass output — images, render targets, post-process
     // buffers. COPY_DST is in the default usage set so writeTexture/loadTexture work unopted-in.
-    createTexture: (width, height, format = 'rgba8unorm', usage) =>
-      tex2d(width, height, format, usage ?? (TEX_RENDER_ATTACHMENT | TEX_BINDING | TEX_COPY_SRC | TEX_COPY_DST), 'texture'),
+    // The 4th argument is usage flags, or `{ usage, mips }` — `mips: true` allocates the full
+    // mip chain (fill it with generateMipmaps), a number allocates that many levels.
+    createTexture: (width, height, format = 'rgba8unorm', usageOrOpts) => {
+      let { usage, mips } = typeof usageOrOpts === 'number' ? { usage: usageOrOpts } : usageOrOpts ?? {};
+      return tex2d(width, height, format,
+        usage ?? (TEX_RENDER_ATTACHMENT | TEX_BINDING | TEX_COPY_SRC | TEX_COPY_DST), 'texture',
+        mips === true ? mipCount(width, height) : mips || 1);
+    },
     // Writable from WGSL via textureStore(), readable via textureLoad() — compute output,
     // accumulation buffers, GPGPU. Same COPY_DST default.
     createStorageTexture: (width, height, format = 'rgba32float', usage) =>
@@ -514,13 +555,15 @@ ${main}
         let h = source.videoHeight || source.displayHeight || source.height;
         if (!w || !h) throw Error(MSG ? 'loadTexture: could not determine source dimensions.' : 10);
         // copyExternalImageToTexture requires RENDER_ATTACHMENT in addition to COPY_DST.
-        let tex = opts.texture ?? S.createTexture(w, h, opts.format ?? 'rgba8unorm', opts.usage);
+        let tex = opts.texture ?? S.createTexture(w, h, opts.format ?? 'rgba8unorm',
+          { usage: opts.usage, mips: F_MIPS && opts.mips });
         D.queue.copyExternalImageToTexture(
           { source, flipY: opts.flipY ?? false },
           { texture: tex, premultipliedAlpha: opts.premultipliedAlpha ?? false, colorSpace: opts.colorSpace ?? 'srgb' },
           { width: w, height: h });
         // ImageBitmaps we created ourselves are ours to release; caller-owned sources are not.
         if (source !== src && typeof source.close === 'function') source.close();
+        if (F_MIPS && opts.mips) await S.generateMipmaps(tex);
         return tex;
       },
     } : {}),
@@ -553,6 +596,31 @@ ${main}
           : /32sint$/.test(f) ? Int32Array : /16float$/.test(f) ? (globalThis.Float16Array ?? Uint16Array)
             : /16uint$/.test(f) ? Uint16Array : /16sint$/.test(f) ? Int16Array : Uint8Array);
         return C === Uint8Array ? out : new C(out.buffer);
+      },
+    } : {}),
+
+    ...(F_MIPS ? {
+      /**
+       * Fills a texture's smaller mip levels from level 0 by successive linear-filtered blits.
+       * Needs TEXTURE_BINDING and RENDER_ATTACHMENT (createTexture's defaults) and a filterable,
+       * renderable format. `createTexture(w, h, fmt, { mips: true })` allocates the chain;
+       * `loadTexture(src, { mips: true })` does both steps in one call.
+       * @param {GPUTexture} tex @returns {Promise<GPUTexture>} the same texture
+       */
+      generateMipmaps: async tex => {
+        let p = await S.makeFrag(
+          `fn frag(uv: vec2<f32>) -> vec4<f32> { return textureSample(src, samp, vec2<f32>(uv.x, 1.0 - uv.y)); }`,
+          {}, { src: 'texture_2d<f32>', samp: 'sampler' }, { format: tex.format });
+        mipSamp ??= S.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+        // One frame → one submit for the whole chain, unless the caller already has one open.
+        let own = !fEnc;
+        if (own) S.beginFrame();
+        for (let i = 1; i < tex.mipLevelCount; i++) {
+          p.setResources({ src: tex.createView({ baseMipLevel: i - 1, mipLevelCount: 1 }), samp: mipSamp });
+          p.drawTo(tex.createView({ baseMipLevel: i, mipLevelCount: 1 }));
+        }
+        if (own) S.endFrame();
+        return tex;
       },
     } : {}),
 
@@ -652,7 +720,8 @@ ${main}
        * @returns {Promise<RenderPipeline>} the blit pipeline, in case you want to keep drawing with it
        */
       show: async (tex, view, opts = {}) => {
-        let format = opts.format ?? S.format;
+        // A GPUTexture target knows its own format; a raw view or the canvas default does not.
+        let format = opts.format ?? view?.format ?? S.format;
         let sample = /uint$/.test(tex.format) ? 'u32' : /sint$/.test(tex.format) ? 'i32' : 'f32';
         // The generated uv has 0 at the *bottom* of the target, so the default inverts y to put the
         // source's first row on the target's first row — images stay upright and show/readTexture
@@ -906,10 +975,13 @@ ${main}
 
   // ─── Small helpers ─────────────────────────────────────────────────────────────────────────
   // The one createTexture call behind createTexture, createStorageTexture and the depth pool.
-  let tex2d = (width, height, format, usage, label) => D.createTexture({
-    size: { width, height }, format, mipLevelCount: 1, sampleCount: 1, usage,
+  let tex2d = (width, height, format, usage, label, mips = 1) => D.createTexture({
+    size: { width, height }, format, mipLevelCount: mips, sampleCount: 1, usage,
     ...(DIAG && { label: `${label} ${width}x${height} ${format}` })
   });
+  // Levels in a full mip chain, and the linear sampler generateMipmaps reuses across calls.
+  let mipCount = (w, h) => 32 - Math.clz32(Math.max(w, h));
+  let mipSamp = null;
 
   // A stable small integer per GPU object, for building bind-group cache keys out of resource
   // identities. WeakMap-backed, so it holds nothing alive.
@@ -1293,7 +1365,9 @@ ${structFields.join('\n')}
         if (info?.isBuf) {
           if (!(typeof v.mapAsync === 'function' || typeof v.getMappedRange === 'function' || typeof v.buffer?.mapAsync === 'function')) bad = typeof v;
         } else if (info?.isTex) {
-          if (!(typeof v.createView === 'function' || 'dimension' in v || 'mipLevelCount' in v)) bad = typeof v;
+          // A GPUTextureView is opaque (no marker properties at all), so instanceof is the test.
+          if (!(typeof GPUTextureView !== 'undefined' && v instanceof GPUTextureView)
+            && !(typeof v.createView === 'function' || 'dimension' in v || 'mipLevelCount' in v)) bad = typeof v;
         }
         // Right kind of object, wrong usage flags: catch it here rather than in the driver.
         if (!bad && info && v.usage != null) {

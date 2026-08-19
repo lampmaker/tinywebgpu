@@ -40,7 +40,8 @@ const makePass = kind => ({
 });
 
 G.device = {
-  createBuffer: ({ size }) => ({ size, usage: 128, mapAsync: () => { } }),
+  destroy: () => log.push('deviceDestroy'),
+  createBuffer: ({ size }) => ({ size, usage: 128, mapAsync: () => { }, destroy: () => log.push('bufDestroy') }),
   createTexture: () => ({ createView: () => ({}) }),
   createShaderModule: () => ({ getCompilationInfo: async () => ({ messages: [] }) }),
   createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }),
@@ -221,6 +222,24 @@ G.beginFrame();                       // no endFrame — the first one must stil
 G.endFrame();
 check('a second beginFrame submits the first frame instead of dropping it',
   [log.filter(l => l.startsWith('encoder')).length, log.filter(l => l === 'submit').length], [2, 2]);
+
+// --- G.frame(): begin/endFrame around a callback, exception-safe -----------------------------
+reset();
+G.frame(() => sim.dispatch(1));
+check('frame() wraps one encoder and one submit around the callback',
+  [log.filter(l => l.startsWith('encoder')).length, log.filter(l => l === 'submit').length], [1, 1]);
+
+reset();
+let threw = '';
+try { G.frame(() => { sim.dispatch(1); throw Error('boom'); }); } catch (e) { threw = e.message; }
+check('frame() still submits when the callback throws',
+  [threw, log.filter(l => l === 'submit')], ['boom', ['submit']]);
+
+// --- destroy(): pooled resources and the device go; must stay the LAST test ------------------
+reset();
+G.destroy();
+check('destroy() releases the staging ring and the device, and clears G.device',
+  [log.includes('bufDestroy'), log.includes('deviceDestroy'), G.device], [true, true, null]);
 
 if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nall frame-lifecycle tests passed');

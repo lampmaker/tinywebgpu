@@ -4,6 +4,40 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Added — ease of use, from the user's chair**
+
+- **TypeScript declarations.** `tinywebgpu.d.ts` ships with the package and is wired through
+  `types`/`exports`, so editors autocomplete the whole surface with inline docs — in TypeScript
+  and plain-JS projects alike. Zero runtime bytes. The `GPU*` names come from TypeScript's own
+  `lib.dom` (recent versions ship WebGPU); older TS setups add `@webgpu/types`.
+- **Mipmaps** (`F_MIPS`, 0.5 KB; `--tiny` drops it). `createTexture(w, h, fmt, { usage, mips })`
+  allocates a mip chain (`true` = full, a number = that many levels), `generateMipmaps(tex)`
+  fills it from level 0 by successive linear-filtered blits in one submit, and
+  `loadTexture(src, { mips: true })` does both. Verified on-device: the 1×1 tail of a
+  red/green/blue/white 2×2 comes back as the exact average grey.
+- **`init()` takes a canvas, an OffscreenCanvas, or a CSS selector** as well as a ready
+  `'webgpu'` context — `init('#c')` replaces the `getContext` boilerplate in every first line.
+  A selector that matches nothing throws saying so (error 23).
+- **`buf.r(Float32Array)`** — pass the constructor as the only argument to read the whole
+  buffer typed, instead of spelling out `r(nbytes, 0, Float32Array)`.
+- **`G.frame(fn, opts?)`** — `beginFrame`/`endFrame` around a callback, exception-safe: the
+  frame is submitted even if `fn` throws, so one bad frame cannot leave a dangling encoder.
+- **`G.destroy()`** — tears the instance down: destroys the device, the staging ring, the
+  readback pool and the depth textures, and empties the caches. SPAs, hot-reload dev servers
+  and live-coding pages stop leaking a device per reload. Intentional destruction no longer
+  logs a device-lost error or fires `onDeviceLost`.
+- **`show()` infers the target format** from a `GPUTexture` target, so
+  `show(hdr, floatTarget)` works without an explicit `format`.
+- **`makeQuad` forwards every `makeFrag` option** — `targets` and `depth` included, not just
+  `format` and `blend`.
+
+**Fixed**
+
+- **`setResources` with a `GPUTextureView` threw in DIAG builds.** The resource validator's
+  heuristics only recognized textures; a view — explicitly documented as accepted — has no
+  marker properties at all and was reported as a mismatch. Views are now recognized by
+  `instanceof`. (Found because `generateMipmaps` binds per-level views.)
+
 **Added — depth testing**
 
 - **`makeDraw({ depth })` / `makeFrag(…, { depth })`.** `depth: true` adds a `depth24plus`
