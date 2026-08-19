@@ -49,7 +49,25 @@ Terminology cheatsheet:
  *   writable — a per-frame particle count does not need a new pipeline.
  */
 
-// ─── Build-time switches ──────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+/*
+                                                                                            
+                                88                      88                                  
+                                ""    ,d                88                                  
+                                      88                88                                  
+ ,adPPYba,  8b      db      d8  88  MM88MMM  ,adPPYba,  88,dPPYba,    ,adPPYba,  ,adPPYba,  
+ I8[    ""  `8b    d88b    d8'  88    88    a8"     ""  88P'    "8a  a8P_____88  I8[    ""  
+  `"Y8ba,    `8b  d8'`8b  d8'   88    88    8b          88       88  8PP"""""""   `"Y8ba,   
+ aa    ]8I    `8bd8'  `8bd8'    88    88,   "8a,   ,aa  88       88  "8b,   ,aa  aa    ]8I  
+ `"YbbdP"'      YP      YP      88    "Y888  `"Ybbd8"'  88       88   `"Ybbd8"'  `"YbbdP"'  
+                                                                                                                                                                                                  
+Build-time switches                                                                                                                                                                                                  
+*/
 // All true in the source you develop against, so nothing below is optional while you work.
 // build-min.mjs flips them by name and lets dead-code elimination remove whatever they guard,
 // which is how one file serves both the full library and a build small enough to inline into a
@@ -69,34 +87,29 @@ const F_PINGPONG = true;  // pingPong, createPingPong, createPingPongTexture
 const F_RESIZE = true;    // resizeCanvas
 const F_BLEND = true;     // the named blend presets ('alpha' | 'premultiplied' | 'additive')
 
-// WebGPU usage flags, named here rather than read off the GPUBufferUsage/GPUTextureUsage globals.
-// The values are normative in the spec, so this changes nothing at runtime — but it lets the
-// minifier fold each one to a literal, and it drops the `typeof … !== 'undefined'` guards the
-// globals needed in order to be touched outside a browser.
-const BUF_MAP_READ = 1, BUF_COPY_SRC = 4, BUF_COPY_DST = 8,
-  BUF_UNIFORM = 64, BUF_STORAGE = 128, BUF_INDIRECT = 256;
-const TEX_COPY_SRC = 1, TEX_COPY_DST = 2, TEX_BINDING = 4,
-  TEX_STORAGE_BINDING = 8, TEX_RENDER_ATTACHMENT = 16;
-
-// A minifier cannot shorten a property access on a global, and these are spelled out about twenty
-// times between them. Aliasing is worth ~200 bytes minified.
-const OE = Object.entries, OK = Object.keys, OA = Object.assign, OV = Object.values;
-
-// 'alpha' expects straight (un-premultiplied) alpha out of frag(); 'premultiplied' expects rgb
-// already scaled by a; 'additive' ignores destination alpha. All three add and all three leave
-// alpha's source at `one`, so only the colour factors differ — hence the two-argument builder.
-const blendState = (srcFactor, dstFactor) => ({
-  color: { srcFactor, dstFactor, operation: 'add' },
-  alpha: { srcFactor: 'one', dstFactor, operation: 'add' },
-});
-const BLENDS = F_BLEND ? {
-  alpha: blendState('src-alpha', 'one-minus-src-alpha'),
-  premultiplied: blendState('one', 'one-minus-src-alpha'),
-  additive: blendState('one', 'one'),
-} : {};
-
 // The generated uniform variable's name; makePipeline tests the shader for it.
 const UNIFORM_VAR = 'UB';
+
+
+
+
+
+
+
+
+/*
+                                                                                             
+I8,        8        ,8I  88888888888  88888888ba     ,ad8888ba,   88888888ba   88        88  
+`8b       d8b       d8'  88           88      "8b   d8"'    `"8b  88      "8b  88        88  
+ "8,     ,8"8,     ,8"   88           88      ,8P  d8'            88      ,8P  88        88  
+  Y8     8P Y8     8P    88aaaaa      88aaaaaa8P'  88             88aaaaaa8P'  88        88  
+  `8b   d8' `8b   d8'    88"""""      88""""""8b,  88      88888  88""""""'    88        88  
+   `8a a8'   `8a a8'     88           88      `8b  Y8,        88  88           88        88  
+    `8a8'     `8a8'      88           88      a8P   Y8a.    .a88  88           Y8a.    .a8P  
+     `8'       `8'       88888888888  88888888P"     `"Y88888P"   88            `"Y8888Y"'   
+                                                                                             
+                                                                                             
+*/
 
 /**
  * Creates an independent toolkit instance. Call `await G.init(ctx?)` before anything else.
@@ -107,13 +120,14 @@ export const WEBGPU = () => {
   // `S.frame.encoder` survives verbatim. `device` keeps its public name through an accessor pair
   // for the same reason: the getter/setter costs ~40 bytes once and saves seven at each of its
   // thirty-odd uses.
-  let D = null;                  // the GPUDevice, behind S.device
-  let fEnc = null;               // the open frame's command encoder, null outside a frame
-  let fView = null;              // that frame's render target, acquired lazily by targetView()
-  let fPass = null;              // the open chained compute pass, if beginCompute() opened one
-  let fOwned = false;            // the encoder came from beginCompute(), so endCompute() submits it
-  let fBound = null;             // the bind fn of the pipeline currently bound to fPass
-  const shaderCache = new Map(), pipelineCache = new Map();
+  let
+    D = null,                  // the GPUDevice, behind S.device
+    fEnc = null,               // the open frame's command encoder, null outside a frame
+    fView = null,              // that frame's render target, acquired lazily by targetView()
+    fPass = null,              // the open chained compute pass, if beginCompute() opened one
+    fOwned = false,            // the encoder came from beginCompute(), so endCompute() submits it
+    fBound = null,             // the bind fn of the pipeline currently bound to fPass
+    shaderCache = new Map(), pipelineCache = new Map();
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   // PUBLIC API
@@ -133,8 +147,25 @@ export const WEBGPU = () => {
     // The library logs regardless; set this to rebuild.
     onDeviceLost: null,
 
+
+
+
+
+
+
     /**
-     * Initializes WebGPU. Pass a canvas 'webgpu' context to render, or nothing for compute-only
+                              
+88               88           
+""               ""    ,d     
+                       88     
+88  8b,dPPYba,   88  MM88MMM  
+88  88P'   `"8a  88    88     
+88  88       88  88    88     
+88  88       88  88    88,    
+88  88       88  88    "Y888  
+                                    
+                                        
+    * Initializes WebGPU. Pass a canvas 'webgpu' context to render, or nothing for compute-only
      * use (render calls then need an explicit target view). Requests the adapter's max buffer-size
      * limits. Throws if WebGPU is unavailable.
      * @param {GPUCanvasContext|null} [ctx]
@@ -175,17 +206,32 @@ export const WEBGPU = () => {
       return S;
     },
 
-    // ─── Pipelines ───────────────────────────────────────────────────────────────────────────
-    /**
-     * A fullscreen-triangle render pipeline: you write `fn frag(uv: vec2<f32>) -> vec4<f32>`,
-     * the vertex shader and the fs_main wrapper are generated.
-     * @param {string} frag WGSL containing the frag function, plus any helpers
-     * @param {UniformSchema} [uniforms] @param {ResourceSchema} [resources]
-     * @param {{format?: string|string[], blend?: string|GPUBlendState, targets?: Object}} [opts]
-     *   `blend`: 'alpha' | 'premultiplied' | 'additive' or a raw GPUBlendState; omitted = opaque.
-     *   `targets`: {name: format} for multiple render targets, drawn with `drawTo({name: view})`.
-     * @returns {Promise<RenderPipeline>}
-     */
+
+
+
+
+    /*
+                                                                                          
+    88888888ba   88                           88  88                                      
+    88      "8b  ""                           88  ""                                      
+    88      ,8P                               88                                          
+    88aaaaaa8P'  88  8b,dPPYba,    ,adPPYba,  88  88  8b,dPPYba,    ,adPPYba,  ,adPPYba,  
+    88""""""'    88  88P'    "8a  a8P_____88  88  88  88P'   `"8a  a8P_____88  I8[    ""  
+    88           88  88       d8  8PP"""""""  88  88  88       88  8PP"""""""   `"Y8ba,   
+    88           88  88b,   ,a8"  "8b,   ,aa  88  88  88       88  "8b,   ,aa  aa    ]8I  
+    88           88  88`YbbdP"'    `"Ybbd8"'  88  88  88       88   `"Ybbd8"'  `"YbbdP"'  
+                     88                                                                   
+                     88                                                                   
+    /*  /**
+         * A fullscreen-triangle render pipeline: you write `fn frag(uv: vec2<f32>) -> vec4<f32>`,
+         * the vertex shader and the fs_main wrapper are generated.
+         * @param {string} frag WGSL containing the frag function, plus any helpers
+         * @param {UniformSchema} [uniforms] @param {ResourceSchema} [resources]
+         * @param {{format?: string|string[], blend?: string|GPUBlendState, targets?: Object}} [opts]
+         *   `blend`: 'alpha' | 'premultiplied' | 'additive' or a raw GPUBlendState; omitted = opaque.
+         *   `targets`: {name: format} for multiple render targets, drawn with `drawTo({name: view})`.
+         * @returns {Promise<RenderPipeline>}
+         */
     makeFrag: (frag, uniforms = {}, resources = {}, { format = S.format, blend = null, targets = null } = {}) =>
       // The fullscreen triangle and the wrapper that hands `frag` its uv. Everything else — the
       // schema, the FSOut struct for `targets`, the pipeline — is makeDraw's job.
@@ -276,7 +322,23 @@ ${main}
       return OA(p, { run: (w = size[0], h = size[1], d = 1) => run(w, h, d) });
     },
 
-    // ─── Frame batching ──────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+    /*
+                                                                                                                                                             
+    88888888888                                                         88                                           88           88                            
+    88                                                                  88                         ,d                88           ""                            
+    88                                                                  88                         88                88                                         
+    88aaaaa  8b,dPPYba,  ,adPPYYba,  88,dPYba,,adPYba,    ,adPPYba,     88,dPPYba,   ,adPPYYba,  MM88MMM  ,adPPYba,  88,dPPYba,   88  8b,dPPYba,    ,adPPYb,d8  
+    88"""""  88P'   "Y8  ""     `Y8  88P'   "88"    "8a  a8P_____88     88P'    "8a  ""     `Y8    88    a8"     ""  88P'    "8a  88  88P'   `"8a  a8"    `Y88  
+    88       88          ,adPPPPP88  88      88      88  8PP"""""""     88       d8  ,adPPPPP88    88    8b          88       88  88  88       88  8b       88  
+    88       88          88,    ,88  88      88      88  "8b,   ,aa     88b,   ,a8"  88,    ,88    88,   "8a,   ,aa  88       88  88  88       88  "8a,   ,d88  
+    88       88          `"8bbdP"Y8  88      88      88   `"Ybbd8"'     8Y"Ybbd8"'   `"8bbdP"Y8    "Y888  `"Ybbd8"'  88       88  88  88       88   `"YbbdP"Y8  
+                                                                                                                                                                 */
     // One encoder and one swapchain view for a whole frame, so every pass lands in one submit.
     beginFrame: (opts = {}) => {
       endPass();                           // an open compute pass would make finish() throw
@@ -320,7 +382,28 @@ ${main}
       if (fOwned) S.endFrame();            // beginCompute() opened the encoder; nothing else submits it
     },
 
-    // ─── Buffers ─────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+
+    /*
+                                                                                  
+    88888888ba                   ad88     ad88                                    
+    88      "8b                 d8"      d8"                                      
+    88      ,8P                 88       88                                       
+    88aaaaaa8P'  88       88  MM88MMM  MM88MMM  ,adPPYba,  8b,dPPYba,  ,adPPYba,  
+    88""""""8b,  88       88    88       88    a8P_____88  88P'   "Y8  I8[    ""  
+    88      `8b  88       88    88       88    8PP"""""""  88           `"Y8ba,   
+    88      a8P  "8a,   ,a88    88       88    "8b,   ,aa  88          aa    ]8I  
+    88888888P"    `"YbbdP'Y8    88       88     `"Ybbd8"'  88          `"YbbdP"'  
+                                                                                  
+                                                                                  
+    */
     /**
      * A storage buffer (big, read+write in compute/fragment) with helpers.
      * @param {number|ArrayBuffer|ArrayBufferView} sizeOrData byte length, or initial contents
@@ -489,7 +572,25 @@ ${main}
       },
     } : {}),
 
-    // ─── Ping-pong ───────────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+    /*
+                                                                                                             
+    88888888ba   88                                                                                          
+    88      "8b  ""                                                                                          
+    88      ,8P                                                                                              
+    88aaaaaa8P'  88  8b,dPPYba,    ,adPPYb,d8            8b,dPPYba,    ,adPPYba,   8b,dPPYba,    ,adPPYb,d8  
+    88""""""'    88  88P'   `"8a  a8"    `Y88  aaaaaaaa  88P'    "8a  a8"     "8a  88P'   `"8a  a8"    `Y88  
+    88           88  88       88  8b       88  """"""""  88       d8  8b       d8  88       88  8b       88  
+    88           88  88       88  "8a,   ,d88            88b,   ,a8"  "8a,   ,a8"  88       88  "8a,   ,d88  
+    88           88  88       88   `"YbbdP"Y8            88`YbbdP"'    `"YbbdP"'   88       88   `"YbbdP"Y8  
+                                   aa,    ,88            88                                      aa,    ,88  
+                                    "Y8bbdP"             88                                       "Y8bbdP"   
+    */
     ...(F_PINGPONG ? {
       /**
        * A read/write pair with a swap — the double-buffer a simulation needs when each step reads
@@ -513,7 +614,27 @@ ${main}
         S.pingPong(() => S.createStorageTexture(width, height, format, usage)),
     } : {}),
 
-    // ─── Canvas & inspection ─────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+    /*
+                                                                                                                                                                                                            
+      ,ad8888ba,                                                                      ,adba,        88                                                                        88                            
+     d8"'    `"8b                                                                     8I  I8        ""                                                                 ,d     ""                            
+    d8'                                                                               "8bdP'                                                                           88                                   
+    88             ,adPPYYba,  8b,dPPYba,   8b       d8  ,adPPYYba,  ,adPPYba,       ,d8"8b  88     88  8b,dPPYba,   ,adPPYba,  8b,dPPYba,    ,adPPYba,   ,adPPYba,  MM88MMM  88   ,adPPYba,   8b,dPPYba,   
+    88             ""     `Y8  88P'   `"8a  `8b     d8'  ""     `Y8  I8[    ""     .dP'   Yb,8I     88  88P'   `"8a  I8[    ""  88P'    "8a  a8P_____88  a8"     ""    88     88  a8"     "8a  88P'   `"8a  
+    Y8,            ,adPPPPP88  88       88   `8b   d8'   ,adPPPPP88   `"Y8ba,      8P      888'     88  88       88   `"Y8ba,   88       d8  8PP"""""""  8b            88     88  8b       d8  88       88  
+     Y8a.    .a8P  88,    ,88  88       88    `8b,d8'    88,    ,88  aa    ]8I     8b,   ,dP8b      88  88       88  aa    ]8I  88b,   ,a8"  "8b,   ,aa  "8a,   ,aa    88,    88  "8a,   ,a8"  88       88  
+      `"Y8888Y"'   `"8bbdP"Y8  88       88      "8"      `"8bbdP"Y8  `"YbbdP"'     `Y8888P"  Yb     88  88       88  `"YbbdP"'  88`YbbdP"'    `"Ybbd8"'   `"Ybbd8"'    "Y888  88   `"YbbdP"'   88       88  
+                                                                                                                                88                                                                          
+                                                                                                                                88                                                                           
+    */
     ...(F_RESIZE ? {
       /**
        * Sizes the canvas backing store to its CSS box × devicePixelRatio, clamped to the device's
@@ -607,7 +728,27 @@ ${main}
       },
     } : {}),
 
-    // ─── Escape hatches ──────────────────────────────────────────────────────────────────────
+
+
+
+
+
+
+
+
+    /*
+                                                                                         
+88                                      88                                       88  
+88                                      88                                       88  
+88                                      88                                       88  
+88   ,adPPYba,   8b      db      d8     88   ,adPPYba,  8b       d8   ,adPPYba,  88  
+88  a8"     "8a  `8b    d88b    d8'     88  a8P_____88  `8b     d8'  a8P_____88  88  
+88  8b       d8   `8b  d8'`8b  d8'      88  8PP"""""""   `8b   d8'   8PP"""""""  88  
+88  "8a,   ,a8"    `8bd8'  `8bd8'       88  "8b,   ,aa    `8b,d8'    "8b,   ,aa  88  
+88   `"YbbdP"'       YP      YP         88   `"Ybbd8"'      "8"       `"Ybbd8"'  88  
+                                                                                     
+                                                                                     
+     */
     /**
      * Compiles a WGSL shader module, cached, applying `G.pre`. Compile errors throw with a pretty
      * source-window log; warnings are logged. `applyPre` is false when the caller already ran
@@ -631,10 +772,58 @@ ${main}
       D.createBindGroup({ layout: pipeline.getBindGroupLayout(groupIndex), entries }),
   };
 
+
+
+
+
+
+
+
+
+
+
+  /*
+                                                                                                                     
+88  888b      88  888888888888  88888888888  88888888ba   888b      88         db         88           ad88888ba   
+88  8888b     88       88       88           88      "8b  8888b     88        d88b        88          d8"     "8b  
+88  88 `8b    88       88       88           88      ,8P  88 `8b    88       d8'`8b       88          Y8,          
+88  88  `8b   88       88       88aaaaa      88aaaaaa8P'  88  `8b   88      d8'  `8b      88          `Y8aaaaa,    
+88  88   `8b  88       88       88"""""      88""""88'    88   `8b  88     d8YaaaaY8b     88            `"""""8b,  
+88  88    `8b 88       88       88           88    `8b    88    `8b 88    d8""""""""8b    88                  `8b  
+88  88     `8888       88       88           88     `8b   88     `8888   d8'        `8b   88          Y8a     a8P  
+88  88      `888       88       88888888888  88      `8b  88      `888  d8'          `8b  88888888888  "Y88888P"   
+                                                                                                                   
+                                                                                                                   
+  */
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   // INTERNALS — nothing below is part of the public surface. These are closure consts rather than
   // properties on S because the minifier renames a closure variable to one character.
   // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // WebGPU usage flags, named here rather than read off the GPUBufferUsage/GPUTextureUsage globals.
+  // The values are normative in the spec, so this changes nothing at runtime — but it lets the
+  // minifier fold each one to a literal, and it drops the `typeof … !== 'undefined'` guards the
+  // globals needed in order to be touched outside a browser.
+  const BUF_MAP_READ = 1, BUF_COPY_SRC = 4, BUF_COPY_DST = 8,
+    BUF_UNIFORM = 64, BUF_STORAGE = 128, BUF_INDIRECT = 256;
+  const TEX_COPY_SRC = 1, TEX_COPY_DST = 2, TEX_BINDING = 4,
+    TEX_STORAGE_BINDING = 8, TEX_RENDER_ATTACHMENT = 16;
+
+  // A minifier cannot shorten a property access on a global, and these are spelled out about twenty
+  // times between them. Aliasing is worth ~200 bytes minified.
+  const OE = Object.entries, OK = Object.keys, OA = Object.assign, OV = Object.values;
+
+  // 'alpha' expects straight (un-premultiplied) alpha out of frag(); 'premultiplied' expects rgb
+  // already scaled by a; 'additive' ignores destination alpha. All three add and all three leave
+  // alpha's source at `one`, so only the colour factors differ — hence the two-argument builder.
+  const blendState = (srcFactor, dstFactor) => ({
+    color: { srcFactor, dstFactor, operation: 'add' },
+    alpha: { srcFactor: 'one', dstFactor, operation: 'add' },
+  });
+  const BLENDS = F_BLEND ? {
+    alpha: blendState('src-alpha', 'one-minus-src-alpha'),
+    premultiplied: blendState('one', 'one-minus-src-alpha'),
+    additive: blendState('one', 'one'),
+  } : {};
 
   // ─── Encoders & passes ─────────────────────────────────────────────────────────────────────
   // The two longest names in the WebGPU surface, spelled once each. Every encoder in the library
