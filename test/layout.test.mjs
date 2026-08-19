@@ -335,16 +335,13 @@ const layoutOf = uniforms => {
   p.drawTo({});
   check('instances is settable per frame', drew, [4, 12, 0, 0]);
 
-  // Two pipelines whose WGSL is byte-identical but whose topology differs are different
-  // pipelines. The cache keys on the source, so without topology in the key the second call
-  // hands back the first one — silently drawing triangles where lines were asked for.
+  // Every makeDraw call builds its own pipeline — there is no cache to hand a topology-blind
+  // duplicate back — and the topology reaches the driver's descriptor.
   const args = { code: vsfs, uniforms: { size: 'f32' }, resources: { parts: 'array<vec4<f32>>' }, readOnly: ['parts'] };
   const tri = await S.makeDraw({ ...args, topology: 'triangle-list' });
-  const triAgain = await S.makeDraw({ ...args, topology: 'triangle-list' });
   const line = await S.makeDraw({ ...args, topology: 'line-strip' });
-  check('identical pipelines are still cached', tri.pipeline === triAgain.pipeline, true);
-  check('topology is part of the pipeline cache key', tri.pipeline === line.pipeline, false);
-  check('and it reaches the descriptor', lastDesc.primitive.topology, 'line-strip');
+  check('each makeDraw call builds an independent pipeline', tri.pipeline === line.pipeline, false);
+  check('topology reaches the descriptor', lastDesc.primitive.topology, 'line-strip');
 
   // makeFrag is makeDraw with the fullscreen stage filled in — it must still behave.
   await S.makeFrag('fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, 0., 1.); }');
@@ -457,7 +454,7 @@ const layoutOf = uniforms => {
   check('a swapping ping-pong builds exactly two bind groups, not one per frame', bindGroups, 2);
 }
 
-// --- pipeline cache dedupes concurrent builds ---------------------------------
+// --- pipeline creation is synchronous -----------------------------------------
 {
   let pipelines = 0;
   Object.assign(S.device, {
@@ -465,9 +462,9 @@ const layoutOf = uniforms => {
     createRenderPipeline: () => { pipelines++; return { getBindGroupLayout: () => ({}) }; },
   });
   const frag = 'fn frag(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(0.123); }';
-  const [p1, p2] = await Promise.all([S.makeFrag(frag), S.makeFrag(frag)]);
-  check('two concurrent builds of the same source share one pipeline',
-    [pipelines, p1.pipeline === p2.pipeline], [1, true]);
+  const p = S.makeFrag(frag);            // no await — the pipeline exists on the next line
+  check('makeFrag returns a usable pipeline synchronously, not a promise',
+    [typeof p.then, !!p.pipeline, pipelines], ['undefined', true, 1]);
 }
 
 // --- createSampler passes the rest of the descriptor through ------------------
@@ -522,7 +519,6 @@ const layoutOf = uniforms => {
 @fragment fn fs_main() -> @location(0) vec4<f32> { return vec4<f32>(1.); }`;
   const flat = await S.makeDraw({ code, format: 'rgba8unorm' });
   const deep = await S.makeDraw({ code, format: 'rgba8unorm', depth: true });
-  check('depth is part of the pipeline cache key', flat.pipeline === deep.pipeline, false);
   check('depth: true sets the depthStencil state',
     lastDesc.depthStencil, { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' });
 

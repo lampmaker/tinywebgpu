@@ -127,7 +127,7 @@ const RESERVED = new Set([
 const ERRORS = {
   1: 'WebGPU not supported',
   2: 'No GPU adapter',
-  3: 'WGSL compilation failed',
+  3: '(retired — a bad module now surfaces as a pipeline-creation validation error)',
   4: 'unknown blend preset',
   5: 'buffer write: not a TypedArray or ArrayBuffer',
   6: 'buffer write: byteOffset must be a multiple of 4',

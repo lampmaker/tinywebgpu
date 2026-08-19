@@ -249,7 +249,7 @@ const G = await WEBGPU().init();                             // compute only</co
         <div class="demo">
           <canvas></canvas>
           <script type="text/plain" class="code">
-            const quad = await G.makeQuad({
+            const quad = G.makeQuad({
               frag: `
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   return vec4<f32>(uv.x, uv.y, 0.6, 1.0);
@@ -287,7 +287,7 @@ const G = await WEBGPU().init();                             // compute only</co
         <div class="demo">
           <canvas></canvas>
           <script type="text/plain" class="code">
-            const quad = await G.makeQuad({
+            const quad = G.makeQuad({
               frag: `
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   let c = 0.5 + 0.5 * cos(UB.time + uv.xyx * 4.0
@@ -330,7 +330,7 @@ const G = await WEBGPU().init();                             // compute only</co
         <div class="demo">
           <canvas></canvas>
           <script type="text/plain" class="code">
-            const quad = await G.makeQuad({
+            const quad = G.makeQuad({
               frag: `
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   // square up the coordinates, so a circle stays a circle
@@ -388,7 +388,7 @@ const G = await WEBGPU().init();                             // compute only</co
         <div class="demo">
           <canvas></canvas>
           <script type="text/plain" class="code">
-            const quad = await G.makeQuad({
+            const quad = G.makeQuad({
               frag: `
                 fn sdBox(p: vec2<f32>, b: vec2<f32>) -> f32 {
                   let d = abs(p) - b;
@@ -447,7 +447,7 @@ const G = await WEBGPU().init();                             // compute only</co
           storage buffer binding, declared after the uniform block, in the order you wrote it.</p>
         <div class="demo">
           <script type="text/plain" class="code">
-            const p = await G.makeCompute('', `
+            const p = G.makeCompute('', `
                 let i = gid.x;
                 if (i >= UB.n) { return; }      // the last workgroup overhangs
                 data[i] = f32(i) * f32(i);
@@ -497,7 +497,7 @@ const G = await WEBGPU().init();                             // compute only</co
             const N = 200000;      // edit me, then press Run
             const WG = 64;
 
-            const primes = await G.makeCompute('', `
+            const primes = G.makeCompute('', `
                 let n = gid.x;
                 if (n >= UB.n || n < 2u) { return; }
                 var d = 2u;
@@ -568,7 +568,7 @@ const G = await WEBGPU().init();                             // compute only</co
           <script type="text/plain" class="code">
             const W = 192, H = 108;
 
-            const field = await G.makeCompute('', `
+            const field = G.makeCompute('', `
                 let x = gid.x;
                 let y = gid.y;
                 if (x >= ${W}u || y >= ${H}u) { return; }
@@ -579,7 +579,7 @@ const G = await WEBGPU().init();                             // compute only</co
               `,
               { time: 'f32' }, { heat: 'array<f32>' }, { wg: [8, 8, 1] });
 
-            const show = await G.makeFrag(`
+            const show = G.makeFrag(`
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   let x = min(u32(uv.x * ${W}.0), ${W}u - 1u);
                   let y = min(u32(uv.y * ${H}.0), ${H}u - 1u);
@@ -627,7 +627,7 @@ const G = await WEBGPU().init();                             // compute only</co
           <script type="text/plain" class="code">
             const W = 192, H = 108;
 
-            const step = await G.makeCompute(`
+            const step = G.makeCompute(`
                 fn idx(x: i32, y: i32) -> u32 {          // wraps at the edges
                   return u32(((y + ${H}) % ${H}) * ${W} + ((x + ${W}) % ${W}));
                 }`, `
@@ -646,7 +646,7 @@ const G = await WEBGPU().init();                             // compute only</co
               `,
               {}, { src: 'array<u32>', dst: 'array<u32>' }, { wg: [8, 8, 1] });
 
-            const show = await G.makeFrag(`
+            const show = G.makeFrag(`
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   let x = min(u32(uv.x * ${W}.0), ${W}u - 1u);
                   let y = min(u32((1.0 - uv.y) * ${H}.0), ${H}u - 1u);
@@ -697,7 +697,7 @@ const G = await WEBGPU().init();                             // compute only</co
           last. Here is the proof: three dispatches, three different values, one submit.</p>
         <div class="demo">
           <script type="text/plain" class="code">
-            const p = await G.makeCompute('', `
+            const p = G.makeCompute('', `
                 let i = gid.x;
                 if (i >= 4u) { return; }
                 out[UB.slot * 4u + i] = UB.value;   // each dispatch fills one row
@@ -758,7 +758,7 @@ G.endFrame();</code></pre>
           <script type="text/plain" class="code">
             const THREADS = 16384, K = 16, WG = 64, ROUNDS = 16;
 
-            const darts = await G.makeCompute(`
+            const darts = G.makeCompute(`
                 fn rnd(state: ptr<function, u32>) -> f32 {
                   let x = *state * 747796405u + 2891336453u;
                   *state = x;
@@ -835,7 +835,7 @@ G.endFrame();</code></pre>
             const N = 1000;
 
             // 1. keep the multiples of 7, compacted, and count them
-            const filter = await G.makeCompute('', `
+            const filter = G.makeCompute('', `
                 let i = gid.x;
                 if (i >= ${N}u) { return; }
                 if (i % 7u == 0u) {
@@ -848,7 +848,7 @@ G.endFrame();</code></pre>
               }, { wg: [64, 1, 1] });
 
             // 2. turn that count into dispatch arguments
-            const prep = await G.makeCompute('', `
+            const prep = G.makeCompute('', `
                 if (gid.x == 0u) {
                   args[0] = (counters.n + 63u) / 64u;      // workgroups of 64
                   args[1] = 1u;
@@ -860,7 +860,7 @@ G.endFrame();</code></pre>
               }, { wg: [1, 1, 1] });
 
             // 3. run over exactly the survivors, sized by the GPU
-            const sum = await G.makeCompute('', `
+            const sum = G.makeCompute('', `
                 let i = gid.x;
                 if (i < counters.n) { atomicAdd(&total.v, survivors[i]); }
               `, {}, {
@@ -927,7 +927,7 @@ G.endFrame();</code></pre>
             }
             G.writeTexture(tex, px);
 
-            const quad = await G.makeQuad({
+            const quad = G.makeQuad({
               frag: `
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   let p = uv * 2.0 + vec2<f32>(UB.time * 0.06, 0.0);
@@ -980,7 +980,7 @@ G.endFrame();</code></pre>
             const cells = gw * gh, aspect = width / height;
 
             // 1. fade — bound as plain u32: only this pass writes it
-            const fade = await G.makeCompute('', `
+            const fade = G.makeCompute('', `
                 let i = gid.x;
                 if (i >= UB.cells) { return; }
                 grid[i] = grid[i] * 232u / 256u;
@@ -988,7 +988,7 @@ G.endFrame();</code></pre>
               { cells: 'u32' }, { grid: 'array<u32>' }, { wg: [256, 1, 1] });
 
             // 2. simulate and splat — world space is x in [-aspect, aspect], y in [-1, 1]
-            const sim = await G.makeCompute(`
+            const sim = G.makeCompute(`
                 struct Particle {
                   pos: vec2<f32>,
                   vel: vec2<f32>,
@@ -1022,7 +1022,7 @@ G.endFrame();</code></pre>
               { wg: [WG, 1, 1] });
 
             // 3. colour the grid
-            const draw = await G.makeFrag(`
+            const draw = G.makeFrag(`
                 fn frag(uv: vec2<f32>) -> vec4<f32> {
                   let cx = min(u32(uv.x * f32(UB.gw)), UB.gw - 1u);
                   let cy = min(u32(uv.y * f32(UB.gh)), UB.gh - 1u);

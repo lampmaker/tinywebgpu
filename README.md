@@ -13,7 +13,7 @@ pass/submit plumbing) and stays out of the way of your WGSL.
   import { WEBGPU } from './tinywebgpu.js';
 
   const G = await WEBGPU().init('#c');    // a selector, a canvas, or a ready 'webgpu' context
-  const quad = await G.makeQuad({
+  const quad = G.makeQuad({
     frag: `fn frag(uv: vec2<f32>) -> vec4<f32> {
       return vec4<f32>(0.5 + 0.5 * cos(UB.time + uv.xyx * 4.0 + vec3<f32>(0.0, 2.0, 4.0)), 1.0);
     }`,
@@ -31,7 +31,7 @@ layout, binding indices, and JS ArrayBuffer offsets. TinyWebGPU makes one JS obj
 source of truth and generates the rest:
 
 ```js
-const p = await G.makeCompute(/* declarations */ '', /* main body */ `
+const p = G.makeCompute(/* declarations */ '', /* main body */ `
     let i = gid.x;
     if (i < UB.n) { data[i] = f32(i) * f32(i); }
   `,
@@ -120,7 +120,7 @@ const photo = await G.loadTexture('image.png', { mips: true });
 // and back out again — rows tightly packed, typed from the format
 const pixels = await G.readTexture(photo);          // Uint8Array, 4 bytes per texel
 
-const quad = await G.makeQuad({
+const quad = G.makeQuad({
   // uv.y is 0 at the BOTTOM of the screen and an image's first row is texture v = 0,
   // so flip v when sampling — without it the photo displays upside down.
   frag: `fn frag(uv: vec2<f32>) -> vec4<f32> {
@@ -133,14 +133,14 @@ quad.run();
 ```
 
 Mipmaps work on your own textures too: `createTexture(w, h, fmt, { mips: true })` allocates the
-full chain and `await G.generateMipmaps(tex)` fills it from level 0 with linear-filtered blits —
+full chain and `G.generateMipmaps(tex)` fills it from level 0 with linear-filtered blits —
 after a `writeTexture`, or whenever you have re-rendered level 0.
 
 Draw translucent passes over what's already there with `blend` — `'alpha'`,
 `'premultiplied'`, `'additive'`, or a raw `GPUBlendState`:
 
 ```js
-const glow = await G.makeFrag(frag, {}, {}, { blend: 'additive' });
+const glow = G.makeFrag(frag, {}, {}, { blend: 'additive' });
 glow.drawTo(view, 'load');           // 'load' keeps the existing contents
 ```
 
@@ -190,7 +190,7 @@ Name your targets and the `FSOut` struct is generated for you, `@location` indic
 part that is easy to get silently wrong by hand:
 
 ```js
-const gbuf = await G.makeFrag(`
+const gbuf = G.makeFrag(`
     fn frag(uv: vec2<f32>) -> FSOut {
       var o: FSOut;
       o.colour = vec4<f32>(uv, 0.0, 1.0);
@@ -210,14 +210,14 @@ usually 8) and the total bytes per sample (`maxColorAttachmentBytesPerSample`, o
 
 `makeFrag` generates a fullscreen triangle, which is the right answer for a shader-first
 toolkit right up until you want *geometry*. `makeDraw` is the sibling of `makeCompute` for that:
-you write both stages, and the schema, `drawTo`, the frame API and the pipeline cache all still
+you write both stages, and the schema, `drawTo` and the frame API all still
 apply.
 
 ```js
 const N = 100_000;
 const parts = G.createStorageBuffer(N * 16);          // xy = position, zw = colour
 
-const points = await G.makeDraw({
+const points = G.makeDraw({
   code: `
     struct VSOut { @builtin(position) pos: vec4<f32>, @location(0) col: vec3<f32> };
 
@@ -285,7 +285,7 @@ each facet derives its own normal so the shading is flat.
 
 ## Minified build
 
-`tinywebgpu.min.js` — **17.8 KB** (8.2 KB gzipped), versus 91 KB for the source. Rebuild it with
+`tinywebgpu.min.js` — **15.7 KB** (7.7 KB gzipped), versus 91 KB for the source. Rebuild it with
 `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
 
 It is a **production artifact and it is silent**: every `console` warning is stripped, and so are
@@ -301,10 +301,10 @@ accident.
 ## Tiny build (inline / on-chain embedding)
 
 When the library has to be *inlined* — a single self-contained HTML file, an on-chain generative
-artwork with a hard byte budget — 17.8 KB of it is still mostly features you are not using. A
+artwork with a hard byte budget — 15.7 KB of it is still mostly features you are not using. A
 procedural piece renders from a shader and never touches image loading, readback, or PNG export.
 
-`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 10.4 KB** (5.2 KB gzipped) by dropping
+`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 8.8 KB** (4.6 KB gzipped) by dropping
 every optional entry point, and adding `--iife --no-banner` gets a classic
 `<script>` that assigns `globalThis.WEBGPU` for the same size. Two of the dropped switches trade
 *behavior* rather than entry points, so know what you are giving up:
@@ -347,7 +347,7 @@ node build-min.mjs tiny --iife --no-banner --out=dist/twg.js
 node build-min.mjs --config=my.config.mjs           a config of your own
 ```
 
-What each switch is worth, measured against the 17.8 KB build:
+What each switch is worth, measured against the 15.7 KB build:
 
 | `--without=` | Removes | Saves |
 |---|---|---|

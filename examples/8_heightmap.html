@@ -57,7 +57,7 @@
         return h * exp(-r * r * 0.9);              // island falloff
       }`;
 
-    const shape = await G.makeCompute(TERRAIN, `
+    const shape = G.makeCompute(TERRAIN, `
         let i = gid.x;
         if (i >= ${VN * VN}u) { return; }
         let p = (vec2<f32>(f32(i % ${VN}u), f32(i / ${VN}u)) / ${N}.0 - 0.5) * ${SIZE};
@@ -67,7 +67,7 @@
     shape.setResources({ heights });
 
     // ── the draw: one instance per cell, six vertices each ───────────────────────────────────
-    const land = await G.makeDraw({
+    const land = G.makeDraw({
       code: `
         struct VSOut {
           @builtin(position) pos: vec4<f32>,
