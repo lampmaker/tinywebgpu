@@ -34,7 +34,7 @@ const makePass = kind => ({
   setPipeline: () => log.push(`${kind}:setPipeline`),
   setBindGroup: () => log.push(`${kind}:setBindGroup`),
   dispatchWorkgroups: (...a) => log.push(`dispatch(${a})`),
-  dispatchWorkgroupsIndirect: () => log.push('dispatchIndirect'),
+  dispatchWorkgroupsIndirect: b => log.push(b?.b ? 'dispatchIndirect:handle-not-unwrapped' : 'dispatchIndirect'),
   draw: () => log.push('draw'),
   end: () => log.push(`${kind}:end`),
 });
@@ -50,7 +50,7 @@ G.device = {
     const id = ++encoders;
     log.push(`encoder${id}`);
     return {
-      beginComputePass: () => { log.push('cpass'); return makePass('cpass'); },
+      beginComputePass: (o = {}) => { log.push('cpass' + (o.tag ? `[${o.tag}]` : '')); return makePass('cpass'); },
       beginRenderPass: () => { log.push('rpass'); return makePass('rpass'); },
       copyBufferToBuffer: () => log.push('copyB2B'),
       clearBuffer: () => log.push('clearBuffer'),
@@ -194,6 +194,24 @@ sim.bindTo(pass);
 check('bindTo binds the pipeline to the given pass',
   log, ['encoder1', 'cpass', 'cpass:setPipeline', 'cpass:setBindGroup']);
 G.endCompute();
+
+// --- beginCompute options survive a mid-chain reopen ------------------------------------------
+// A staged write closes and reopens the chained pass; the reopened pass must carry the same
+// descriptor (think timestampWrites), not a bare {}.
+reset();
+G.beginCompute({ tag: 'q' });
+sim.setUniforms({ step: 2 });          // staged: closes the pass, copies, reopens it
+sim.dispatch(1);
+G.endCompute();
+check('a mid-chain reopen keeps the beginCompute descriptor',
+  log.filter(l => l === 'cpass[q]').length, 2);
+
+// --- dispatchIndirect accepts the handle, not just the raw buffer ----------------------------
+reset();
+G.beginFrame();
+sim.dispatchIndirect(indirect, 0);     // the {b, w} handle itself
+G.endFrame();
+check('dispatchIndirect unwraps a buffer handle', log.includes('dispatchIndirect'), true);
 
 // --- beginFrame twice: the dangling frame is submitted, not leaked ---------------------------
 reset();

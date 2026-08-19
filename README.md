@@ -118,7 +118,11 @@ const photo = await G.loadTexture('image.png');
 const pixels = await G.readTexture(photo);          // Uint8Array, 4 bytes per texel
 
 const quad = await G.makeQuad({
-  frag: `fn frag(uv: vec2<f32>) -> vec4<f32> { return textureSample(photo, samp, uv); }`,
+  // uv.y is 0 at the BOTTOM of the screen and an image's first row is texture v = 0,
+  // so flip v when sampling — without it the photo displays upside down.
+  frag: `fn frag(uv: vec2<f32>) -> vec4<f32> {
+    return textureSample(photo, samp, vec2<f32>(uv.x, 1.0 - uv.y));
+  }`,
   resources: { photo: 'texture_2d<f32>', samp: 'sampler' },
 });
 quad.setResources({ photo, samp: G.createSampler({ magFilter: 'linear' }) });
@@ -256,11 +260,17 @@ not rebuild anything. `targets` and `blend` work exactly as they do on `makeFrag
 
 `makeFrag` is now literally `makeDraw` with the fullscreen vertex stage filled in.
 
-**There is no depth attachment yet.** Render passes carry colour targets only, so overlapping 3D
-geometry is not depth-sorted for you. For a height field that costs nothing — draw the cells
-back-to-front and the painter's algorithm is exact, which is what
-[example 8](examples/8_heightmap.html) does. For general 3D you would need to add a depth
-texture yourself through the escape hatches, or sort.
+**Depth testing is one option away.** `makeDraw({ ..., depth: true })` adds a `depth24plus`
+buffer with `less` compare and depth writes on; the depth texture is created for you, sized to
+the render target, pooled by size, and shared by every depth-enabled pipeline drawing into the
+same target — so multi-pipeline scenes depth-test against each other with nothing to wire up.
+`clear: 'load'` keeps the depth buffer along with the colour. Override any of it with
+`depth: { format?, compare?, write?, texture? }` — `texture` hands over your own depth
+attachment. One footnote: the auto-managed texture needs to know the target's size, so draw to
+the canvas or pass a `GPUTexture` to `drawTo` (not a raw view), or supply `depth.texture`.
+
+You do not always need it: for a height field, drawing the cells back-to-front makes the
+painter's algorithm exact and free, which is what [example 8](examples/8_heightmap.html) does.
 
 [Example 8](examples/8_heightmap.html) is the whole pattern on one page: a compute pass writes a
 terrain into a storage buffer, the vertex stage reads it straight back out with `readOnly`, and
@@ -268,7 +278,7 @@ each facet derives its own normal so the shading is flat.
 
 ## Minified build
 
-`tinywebgpu.min.js` — **15.8 KB** (7.0 KB gzipped), versus 69 KB for the source. Rebuild it with
+`tinywebgpu.min.js` — **17.2 KB** (7.8 KB gzipped), versus 85 KB for the source. Rebuild it with
 `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
 
 It is a **production artifact and it is silent**: every `console` warning is stripped, and so are
@@ -284,12 +294,12 @@ accident.
 ## Tiny build (inline / on-chain embedding)
 
 When the library has to be *inlined* — a single self-contained HTML file, an on-chain generative
-artwork with a hard byte budget — 15.8 KB of it is still mostly features you are not using. A
+artwork with a hard byte budget — 17.2 KB of it is still mostly features you are not using. A
 procedural piece renders from a shader and never touches image loading, readback, or PNG export.
 
-`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 10.4 KB** (4.8 KB gzipped) by dropping
-every optional entry point, and adding `--iife --no-banner` gets it to **10.4 KB** as a classic
-`<script>` that assigns `globalThis.WEBGPU`.
+`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 11.0 KB** (5.2 KB gzipped) by dropping
+every optional entry point, and adding `--iife --no-banner` gets a classic
+`<script>` that assigns `globalThis.WEBGPU` for the same size.
 
 ```
 npm run build:tiny                                  everything optional removed
@@ -298,15 +308,16 @@ node build-min.mjs --without=save,read,texio        start from the full build in
 node build-min.mjs --tiny --iife --no-banner --out=dist/twg.js
 ```
 
-What each switch is worth, measured against the 15.8 KB build:
+What each switch is worth, measured against the 17.2 KB build:
 
 | `--without=` | Removes | Saves |
 |---|---|---|
+| `msg` | error *text* — throws carry a number instead | 1.2 KB |
 | `texio` | `writeTexture`, `loadTexture` | 1.1 KB |
-| `msg` | error *text* — throws carry a number instead | 1.0 KB |
-| `save` | `save()` (PNG download) | 0.8 KB |
+| `save` | `save()` (PNG download) | 0.7 KB |
 | `show` | `show()`, the one-call texture blit | 0.7 KB |
-| `read` | `readTexture`, buffer `.r()`, the staging pool — **`save` needs it** | 1.1 KB¹ |
+| `depth` | `makeDraw({depth})` and the depth-texture pool | 0.6 KB |
+| `read` | `readTexture`, buffer `.r()`, the staging pool — **`save` needs it** | 1.2 KB¹ |
 | `resize` | `resizeCanvas()` | 0.4 KB |
 | `pingpong` | `pingPong`, `createPingPong`, `createPingPongTexture` | 0.2 KB |
 | `blend` | the named presets; a raw `GPUBlendState` still works | 0.1 KB |
@@ -352,7 +363,7 @@ G.pre = shorthand({ RAY: 'MyRay', ...TOKENS });
 | | |
 |---|---|
 | Setup | `init(ctx?)` (no ctx = compute-only) · `resizeCanvas()` · `debug` · `pre` · `onDeviceLost` |
-| Pipelines | `makeFrag(frag, uniforms?, resources?, {format?, blend?, targets?})` · `makeDraw({code, uniforms?, resources?, readOnly?, count?, instances?, topology?, …})` · `makeCompute(body, main, uniforms?, resources?, {wg?})` |
+| Pipelines | `makeFrag(frag, uniforms?, resources?, {format?, blend?, targets?, depth?})` · `makeDraw({code, uniforms?, resources?, readOnly?, count?, instances?, topology?, depth?, …})` · `makeCompute(body, main, uniforms?, resources?, {wg?})` |
 | Pipeline object | `p.uniforms = {…}` / `setUniform(s)` · `p.resources = {…}` / `setResources` · `run(w,h,d)` (items) · `dispatch(x,y,z)` (workgroups) · `dispatchIndirect(buf, off)` · `drawTo(view?, clear?)` |
 | One-liners | `makeQuad({frag, uniforms, …})` · `makeCompute2D({body, size, wg, …})` · `show(tex, view?, opts?)` · `save(tex, filename?, opts?)` |
 | Frame API | `beginFrame()` / `endFrame()` · `beginCompute()` / `endCompute()` — dispatches inside join the open pass automatically |
@@ -366,8 +377,12 @@ autocomplete — no TypeScript build needed.
 
 ## Sharp edges (read once, save hours)
 
-- **Scope**: fullscreen + compute only. No vertex buffers, no depth, no mipmaps, one bind
-  group (`@group(0)`), binding order = schema key order (your ABI).
+- **Scope**: fullscreen + compute + vertex-pulled geometry. No vertex buffers, no mipmaps, one
+  bind group (`@group(0)`), binding order = schema key order (your ABI).
+- **The generated `uv` has y = 0 at the *bottom* of the screen, and an image's first row is
+  texture v = 0** — so `textureSample(img, samp, uv)` displays an image upside down. Sample with
+  `vec2(uv.x, 1.0 - uv.y)` to show it upright (`show()` does this for you). `readTexture`,
+  `save` and `show` round-trip among themselves either way.
 - **`show()` is a texel blit, not a sampler** — no filtering, so it stretches 1:1 over the target.
   That is what lets it display `rgba32float` and friends, which a sampler rejects outright.
 - **A schema entry the shader never references is not declared at all** — it is left out of the

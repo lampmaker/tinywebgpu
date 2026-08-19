@@ -53,6 +53,7 @@ const FEATURES = {
   pingpong: 'F_PINGPONG',
   resize: 'F_RESIZE',
   blend: 'F_BLEND',
+  depth: 'F_DEPTH',
 };
 
 // A feature that cannot stand on its own. Asking for the key implies the values.
@@ -66,7 +67,7 @@ const ERRORS = {
   3: 'WGSL compilation failed',
   4: 'unknown blend preset',
   5: 'buffer write: not a TypedArray or ArrayBuffer',
-  6: 'buffer write: byteOffset must be a multiple of 4 inside beginFrame()',
+  6: 'buffer write: byteOffset must be a multiple of 4',
   7: 'no render target — init() had no canvas context and no view was passed',
   8: 'resizeCanvas: no canvas',
   9: 'writeTexture: unknown bytes-per-texel, pass bytesPerRow',
@@ -80,6 +81,9 @@ const ERRORS = {
   17: 'no active compute pass — call beginCompute() first',
   18: 'drawTo: no view for a named target',
   19: 'save: needs an 8-bit RGBA texture',
+  20: 'loadTexture: the fetch for a URL source failed (HTTP status in the message build)',
+  21: 'depth: target size unknown — pass a GPUTexture to drawTo, or supply depth.texture',
+  22: 'unknown resource name in setResources',
 };
 
 // ── argv ──────────────────────────────────────────────────────────────────────────────────────
@@ -132,7 +136,7 @@ for (const [name, value] of Object.entries(switches)) {
 // bytes of CommonJS interop boilerplate to hand over a single function.
 const iife = args.includes('--iife');
 if (iife) {
-  source = source.replace('export const WEBGPU', 'const WEBGPU') + '\nglobalThis.WEBGPU = WEBGPU;\n';
+  source = source.replace('export let WEBGPU', 'let WEBGPU') + '\nglobalThis.WEBGPU = WEBGPU;\n';
 }
 
 const { code, warnings } = await transform(source, {
@@ -163,6 +167,7 @@ const guards = [
   ['readTexture()', /copyTextureToBuffer/, !switches.F_READ],
   ['resizeCanvas()', /devicePixelRatio/, !switches.F_RESIZE],
   ['blend presets', /one-minus-src-alpha/, !switches.F_BLEND],
+  ['depth support', /depthStencil/, !switches.F_DEPTH],
 ];
 for (const [what, re, shouldBeGone] of guards) {
   if (shouldBeGone && re.test(code)) {

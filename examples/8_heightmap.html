@@ -82,10 +82,11 @@
 
         @vertex fn vs_main(@builtin(vertex_index) v: u32,
                            @builtin(instance_index) i: u32) -> VSOut {
-          // Cell order is back-to-front: the library has no depth attachment yet, so the painter's
-          // algorithm is doing the hiding. For a height field with the camera outside its
-          // footprint, walking the grid away-from-camera on both axes is an exact ordering, and
-          // UB.flip says which way that is for the current orbit angle.
+          // Cell order is back-to-front, so the painter's algorithm does the hiding — kept on
+          // purpose even though makeDraw({depth: true}) now exists, because for a height field
+          // with the camera outside its footprint it is exact and costs nothing. Walking the
+          // grid away-from-camera on both axes is that exact ordering, and UB.flip says which
+          // way that is for the current orbit angle.
           var cx = i % ${N}u;
           var cy = i / ${N}u;
           if (UB.flip.x > 0.5) { cx = ${N - 1}u - cx; }
