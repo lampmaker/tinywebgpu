@@ -198,7 +198,10 @@
 const G = await WEBGPU().init(canvas.getContext('webgpu'));</code></pre>
       <p style="margin-bottom:0">Everything else is ordinary code — <code>await</code> at the top
         level included. Animation loops are stopped when a box is re-run or scrolls out of view,
-        so nothing keeps burning your battery further up the page.</p>
+        so nothing keeps burning your battery further up the page. The picker in the top-right
+        corner runs the whole page against the minified or tiny build instead of the readable
+        source; the tiny build drops optional features, and any box that needs one says so
+        rather than running.</p>
     </div>
     <section class="step" id="setup">
       <h2><span class="num">01</span>Getting a device</h2>
@@ -1129,7 +1132,9 @@ G.endFrame();</code></pre>
             points a self-contained piece never calls — image loading, readback, PNG export,
             <code>show</code> — and gets you to about 11&nbsp;KB. Add
             <code>--with=show</code> and friends to keep the ones you do use. See
-            <i>Tiny build</i> in the README.</li>
+            <i>Tiny build</i> in the README. You can try it right now: pick <code>tiny</code>
+            in the corner of this page and watch which boxes stop being available — those are
+            exactly the features it dropped.</li>
         </ul>
         <p>On GitHub Pages, keep the empty <code>.nojekyll</code> file at the root — without it,
           Jekyll ignores directories beginning with an underscore and can quietly drop files.</p>
@@ -1172,7 +1177,25 @@ G.endFrame();</code></pre>
   </main>
 
   <script type="module">
-    import { WEBGPU } from './tinywebgpu.js';
+    // The corner picker switches the page between the three builds via ?lib=full|min|tiny.
+    // The tutorial itself needs nothing beyond the core, but many boxes read results back,
+    // resize their canvas or upload textures — features the stock tiny build drops — so under
+    // tiny those boxes are skipped with a note instead of failing on a missing function.
+    import { loadLib, explain, missing, TINY_DROPS } from './libselect.js';
+    const { WEBGPU, lib } = await loadLib(['read', 'resize', 'texio'], '.');
+
+    // What a box's code can use that the tiny build lacks. Checked against the live editor
+    // content on every run, so deleting the offending line makes the box runnable again.
+    const NEED_PATTERNS = [
+      [/\.r\s*\(|\.read\s*\(|readTexture/, 'read'],
+      [/resizeCanvas/, 'resize'],
+      [/writeTexture|loadTexture/, 'texio'],
+      [/blend:\s*['"`]/, 'blend'],
+      [/pingPong|createPingPong/, 'pingpong'],
+      [/G\.show\s*\(/, 'show'],
+      [/G\.save\s*\(/, 'save'],
+    ];
+    const needsOf = code => NEED_PATTERNS.filter(([re]) => re.test(code)).map(([, n]) => n);
 
     const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor;
     const supported = !!navigator.gpu;
@@ -1228,6 +1251,16 @@ G.endFrame();</code></pre>
         const alive = () => gen === this.gen && !this.dead;
         this.out.textContent = '';
         this.out.classList.remove('err');
+
+        const lacks = missing(needsOf(this.editor.value), lib);
+        if (lacks.length) {
+          this.out.textContent =
+            `This box uses ${lacks.map(n => TINY_DROPS[n]).join(' and ')}, which the tiny build` +
+            ` leaves out. Switch to full or min in the corner — or delete those calls and re-run.`;
+          this.setStatus('not in tiny', 'err');
+          this.ran = true;
+          return;
+        }
         this.setStatus('running…');
 
         // Loops registered here die with the generation, so a re-run or a scroll-away never
@@ -1241,7 +1274,14 @@ G.endFrame();</code></pre>
           if (this.canvas) {
             if (activeCanvasDemo && activeCanvasDemo !== this) activeCanvasDemo.stop();
             activeCanvasDemo = this;
-            G.resizeCanvas(this.canvas);
+            if (G.resizeCanvas) G.resizeCanvas(this.canvas);
+            else {
+              // The tiny build drops resizeCanvas; size the backing store here so the canvas
+              // boxes that never call it themselves still render sharp.
+              const r = this.canvas.getBoundingClientRect(), d = devicePixelRatio || 1;
+              this.canvas.width = Math.max(1, Math.round(r.width * d));
+              this.canvas.height = Math.max(1, Math.round(r.height * d));
+            }
             useCanvas(this.canvas);
           }
           const fn = new AsyncFunction('G', 'canvas', 'log', 'requestAnimationFrame', this.editor.value);
@@ -1251,7 +1291,7 @@ G.endFrame();</code></pre>
         } catch (e) {
           if (!alive()) return;
           this.out.classList.add('err');
-          this.out.textContent += (this.out.textContent ? '\n' : '') + (e?.message ?? String(e));
+          this.out.textContent += (this.out.textContent ? '\n' : '') + explain(e, lib);
           this.setStatus('error', 'err');
         }
       }

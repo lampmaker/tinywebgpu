@@ -38,7 +38,8 @@
     <pre id="out">running…</pre>
   </main>
   <script type="module">
-    import { WEBGPU } from '../tinywebgpu.js';
+    import { loadLib } from '../libselect.js';
+    const { WEBGPU } = await loadLib(['texio', 'read', 'blend'], '..');   // ?lib=min|tiny switches the build
 
     const G = await WEBGPU().init(document.getElementById('c').getContext('webgpu'));
     const log = [];

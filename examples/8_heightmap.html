@@ -31,7 +31,8 @@
   <canvas id="c"></canvas>
   <pre id="out">running…</pre>
   <script type="module">
-    import { WEBGPU } from '../tinywebgpu.js';
+    import { loadLib } from '../libselect.js';
+    const { WEBGPU } = await loadLib(['read', 'resize'], '..');   // ?lib=min|tiny switches the build
 
     const N = 128;                       // cells per side
     const VN = N + 1;                    // grid vertices per side
