@@ -4,6 +4,19 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Changed — repeated strings hoisted into shared constants** (min −101 B → 16.3 KB, tiny −35 B → 9.4 KB)
+
+The WGSL fragments the generated shaders repeat — `vec2<f32>`, `vec4<f32>`, `vec3<u32>`,
+`@builtin(` — are spelled once and interpolated; the result is byte-identical WGSL, so shader
+hashes and compile-log line numbers are untouched, only the JS shrinks. Likewise `'string'`
+(the typeof checks), `'clamp-to-edge'` (the sampler defaults), and the storage address space,
+now composed as `` `<storage, read${ro ? '' : '_write'}>` ``. Everything else the string
+profile surfaced repeats by less than a declaration costs — hoisting `'load'`, `'auto'` or
+`'nearest'` would grow the build — and the remaining repeats are property names, which the
+opt-in `rename`/`pack` builds already shorten. Also added `createBuffer` and
+`copyExternalImageToTexture` to the rename blocklist: platform members that were not listed
+because they are not pack candidates, but that a rename table must still never touch.
+
 **Changed — expression bodies everywhere a `return` could go** (min −266 B → 16.4 KB, tiny −143 B → 9.5 KB, on top of the repeat pass below)
 
 The minifier merges statements into sequences but never removes a `let`, never converts a
