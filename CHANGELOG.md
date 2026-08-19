@@ -4,6 +4,29 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Changed — `0` is the library's empty value, not `null`** (breaking only if you compared with `===`)
+
+Every internal "nothing here" sentinel is now `0` instead of `null`: one byte instead of four in
+the raw builds (the stock build drops ~0.4 KB, tiny ~0.4 KB), and every check is a plain falsy
+test. Observable edges of that change:
+
+- `G.context` / `G.format` / `G.features` are `0` before `init()`, and `G.device` is `0` after
+  `destroy()`. `G.pre` and `G.onDeviceLost` default to `0` (assigning `null` still works — all
+  checks are falsy tests).
+- `makeSchema(...)` returns `uniformBuffer: 0` when there are no uniforms, and its internal
+  `_uniformBinding` is `-1` (not `null`) when no uniform binding is emitted — `0` is a real
+  binding number, so that one keeps a numeric sentinel.
+- Everywhere the API *accepted* `null` (a skipped `view`, `encoder`, `blend`, `Ctor`…), `0`,
+  `null` and `undefined` are all fine — pass whichever is shortest. The d.ts spells this
+  `None = 0 | null | undefined`.
+- If you compared against `null` (`G.device === null`, `_resolveBlend(x) === null`), switch to a
+  falsy check; that is the whole breaking surface.
+
+The same pass rewrote block-bodied arrows to expression bodies (comma sequences, trailing
+parameters as locals) where a `return`/`{}` could be dropped, and replaced nullish operators
+that guarded the old `null` sentinels: `??`/`??=`/`?.` do not treat `0` as empty, so those are
+now `||`/`||=`/`&&`.
+
 **Added — a build picker on every demo page**
 
 The tutorial, the demo index and all eight examples now take `?lib=full|min|tiny` and load that

@@ -134,14 +134,18 @@ export let WEBGPU = () => {
   // `S.frame.encoder` survives verbatim. `device` keeps its public name through an accessor pair
   // for the same reason: the getter/setter costs ~40 bytes once and saves seven at each of its
   // thirty-odd uses.
+  // "Empty" is `0` rather than `null` throughout the file: one byte instead of four, and every
+  // check stays a plain falsy test. The cost is that the nullish operators cannot guard these —
+  // `??`/`??=` become `||`/`||=`, and `x?.y()` / `x?.()` become `x && x.y()` (0 is not nullish,
+  // so `?.` would reach right through it). Fine here, since the real values are all objects.
   let
-    D = null,                  // the GPUDevice, behind S.device
-    fEnc = null,               // the open frame's command encoder, null outside a frame
-    fView = null,              // that frame's render target, acquired lazily by targetView()
-    fPass = null,              // the open chained compute pass, if beginCompute() opened one
-    fPassOpts = null,          // that pass's descriptor, so a mid-chain reopen keeps e.g. timestampWrites
+    D = 0,                     // the GPUDevice, behind S.device
+    fEnc = 0,                  // the open frame's command encoder, 0 outside a frame
+    fView = 0,                 // that frame's render target, acquired lazily by targetView()
+    fPass = 0,                 // the open chained compute pass, if beginCompute() opened one
+    fPassOpts = 0,             // that pass's descriptor, so a mid-chain reopen keeps e.g. timestampWrites
     fOwned = false,            // the encoder came from beginCompute(), so endCompute() submits it
-    fBound = null,             // the bind fn of the pipeline currently bound to fPass
+    fBound = 0,                // the bind fn of the pipeline currently bound to fPass
     shaderCache = new Map(), pipelineCache = new Map();
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -151,16 +155,16 @@ export let WEBGPU = () => {
     // ─── Device & lifecycle ──────────────────────────────────────────────────────────────────
     get device() { return D; },
     set device(d) { D = d; },
-    context: null, format: null, features: null,
+    context: 0, format: 0, features: 0,
 
     debug: false,                // extra per-uniform warnings; DIAG builds only
     // Optional WGSL preprocessing hook, `(src: string) => string`, applied before hashing and
     // compiling. Must be deterministic — the shader and pipeline caches key on its output.
     // For token shorthands see the companion module wgsl_shorthand.js.
-    pre: null,
+    pre: 0,
     // Called with the GPUDeviceLostInfo on a context crash, driver reset or tab backgrounding.
     // The library logs regardless; set this to rebuild.
-    onDeviceLost: null,
+    onDeviceLost: 0,
 
 
 
@@ -184,13 +188,13 @@ export let WEBGPU = () => {
      * a CSS selector for one to render — or nothing for compute-only use (render calls then need
      * an explicit target view). Requests the adapter's max buffer-size limits. Throws if WebGPU
      * is unavailable.
-     * @param {GPUCanvasContext|HTMLCanvasElement|OffscreenCanvas|string|null} [ctx]
+     * @param {GPUCanvasContext|HTMLCanvasElement|OffscreenCanvas|string|0} [ctx]
      * @param {{features?: string[], limits?: Object, alphaMode?: string, canvasUsage?: number}} [opts]
      *   `features` are best-effort: any the adapter lacks are dropped with a warning rather than
      *   throwing, so check `G.features` for what was granted.
      * @returns {Promise<Object>} this instance, with device/context/format/features populated
      */
-    init: async (ctx = null, opts = {}) => {
+    init: async (ctx = 0, opts = {}) => {
       if (!navigator.gpu) err(1, MSG && 'WebGPU not supported');
       if (typeof ctx === 'string') {
         let sel = ctx;
@@ -214,11 +218,9 @@ export let WEBGPU = () => {
       }
 
       let d = await a.requestDevice({ requiredLimits, requiredFeatures });
-      d.lost.then(info => {
-        if (info.reason === 'destroyed') return;   // G.destroy() — intentional, not a loss
-        console.error(`[TinyWebGPU] GPU device lost (${info.reason || 'unknown'}): ${info.message}`);
-        S.onDeviceLost?.(info);
-      });
+      d.lost.then(info => info.reason !== 'destroyed' && (   // 'destroyed' = G.destroy(), not a loss
+        console.error(`[TinyWebGPU] GPU device lost (${info.reason || 'unknown'}): ${info.message}`),
+        S.onDeviceLost && S.onDeviceLost(info)));
       // The handler's whole body is the log, so without DIAG there is nothing left to install.
       if (DIAG) d.onuncapturederror = e => console.error('[TinyWebGPU] Uncaptured WebGPU error:', e.error?.message ?? e);
       let f = navigator.gpu.getPreferredCanvasFormat();
@@ -236,15 +238,15 @@ export let WEBGPU = () => {
      */
     destroy: () => {
       endPass();
-      fEnc = null;
-      fReset(null);
+      fEnc = 0;
+      fReset();
       if (F_STAGING) { for (let c of ring._chunks) c._buf.destroy(); ring._chunks = []; ring._i = 0; }
       if (F_READ) { for (let l of stagingPool.values()) for (let b of l) b.destroy(); stagingPool.clear(); }
       if (F_DEPTH) { for (let t of depthCache.values()) t.destroy(); depthCache.clear(); }
       if (F_SHOW) blitCache.clear();
       shaderCache.clear(); pipelineCache.clear();
-      D?.destroy();
-      D = null;
+      D && D.destroy();   // `&&`, not `?.` — the empty value is 0, which `?.` would try to call through
+      D = 0;
     },
 
 
@@ -273,7 +275,7 @@ export let WEBGPU = () => {
          *   `targets`: {name: format} for multiple render targets, drawn with `drawTo({name: view})`.
          * @returns {Promise<RenderPipeline>}
          */
-    makeFrag: (frag, uniforms = {}, resources = {}, { format = S.format, blend = null, targets = null, depth = null } = {}) =>
+    makeFrag: (frag, uniforms = {}, resources = {}, { format = S.format, blend, targets, depth } = {}) =>
       // The fullscreen triangle and the wrapper that hands `frag` its uv. Everything else — the
       // schema, the FSOut struct for `targets`, the pipeline — is makeDraw's job.
       S.makeDraw({
@@ -306,12 +308,12 @@ ${frag}
      * @returns {Promise<RenderPipeline>}
      */
     makeDraw: ({ code, uniforms = {}, resources = {}, readOnly = [], count = 3, instances = 1,
-      topology = 'triangle-list', format = S.format, blend = null, targets = null, depth = null }) => {
+      topology = 'triangle-list', format = S.format, blend, targets, depth }) => {
       // `targets` is {name: format}; the matching `struct FSOut { … }` is generated here so the
       // @location indices — the part that is easy to get wrong by hand — follow the key order.
       // WGSL module-scope declarations are order-independent, so the struct may land above the
       // shader that returns it.
-      let names = targets ? OK(targets) : null;
+      let names = targets ? OK(targets) : 0;
       let outStruct = names ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: vec4<f32>`).join(', ')}};\n` : '';
       return makePipeline({
         code: `${outStruct}${code}`, uniforms, resources, readOnly,
@@ -347,10 +349,9 @@ ${main}
      * Besides `clear`, every makeFrag option (format, blend, targets, depth) passes through.
      * @returns {Promise<RenderPipeline & {run: (u?: Object, view?: GPUTextureView) => void}>}
      */
-    makeQuad: async ({ frag, uniforms = {}, resources = {}, clear = [0, 0, 0, 1], ...opts }) => {
-      let p = await S.makeFrag(frag, uniforms, resources, opts);
-      return OA(p, { run: (u = {}, view = targetView()) => (u && OK(u).length && (p.uniforms = u), p.drawTo(view, clear)) });
-    },
+    makeQuad: ({ frag, uniforms = {}, resources = {}, clear = [0, 0, 0, 1], ...opts }) =>
+      S.makeFrag(frag, uniforms, resources, opts).then(p =>
+        OA(p, { run: (u = {}, view = targetView()) => (u && OK(u).length && (p.uniforms = u), p.drawTo(view, clear)) })),
 
     /**
      * `makeCompute` with a default `size`, so `run()` with no arguments covers the whole grid.
@@ -358,10 +359,10 @@ ${main}
      * check the tail with `if (gid.x >= n) { return; }` when the size is not a multiple of `wg`.
      * @returns {Promise<ComputePipeline & {run: (w?: number, h?: number, d?: number) => void}>}
      */
-    makeCompute2D: async ({ body, decls = '', uniforms = {}, resources = {}, size = [1, 1], wg = [8, 8, 1] }) => {
-      let p = await S.makeCompute(decls, body, uniforms, resources, { wg }), run = p.run;
-      return OA(p, { run: (w = size[0], h = size[1], d = 1, encoder) => run(w, h, d, encoder) });
-    },
+    // The .then callback's `run` parameter is a local capturing p.run before OA overwrites it.
+    makeCompute2D: ({ body, decls = '', uniforms = {}, resources = {}, size = [1, 1], wg = [8, 8, 1] }) =>
+      S.makeCompute(decls, body, uniforms, resources, { wg }).then((p, run = p.run) =>
+        OA(p, { run: (w = size[0], h = size[1], d = 1, encoder) => run(w, h, d, encoder) })),
 
 
 
@@ -387,21 +388,21 @@ ${main}
         try { S.endFrame(); }
         catch (e) {
           console.error('[TinyWebGPU] beginFrame: previous frame encoder could not be submitted — that frame was dropped.', e);
-          fEnc = null;
+          fEnc = 0;
         }
       }
       fEnc = mkEnc(DIAG && 'frame');
-      // fView is left null unless the caller named a target: the swapchain texture is acquired
+      // fView is left empty unless the caller named a target: the swapchain texture is acquired
       // lazily by targetView(), so a compute-only frame never touches (or presents) the canvas.
-      fReset(opts.view ?? null);
+      fReset(opts.view);
     },
     endFrame: () => {
       if (!fEnc) return;
       endPass();
       if (F_STAGING) flushRing();
       let enc = fEnc;
-      fEnc = null;                         // cleared first: a throwing finish() must not leave it dangling
-      fReset(null);
+      fEnc = 0;                            // cleared first: a throwing finish() must not leave it dangling
+      fReset();
       submit(enc);
     },
     // beginFrame/endFrame with exception safety: the frame goes out even if `fn` throws, so a
@@ -410,16 +411,13 @@ ${main}
     // Keeps one compute pass open so chained dispatches skip the per-dispatch pass overhead.
     // Works with or without an enclosing frame: inside one the frame owns the submit, outside one
     // this encoder is ours and endCompute() submits it.
-    beginCompute: (opts = {}) => {
-      if (fPass) return fPass;
-      if (!fEnc) { fEnc = mkEnc(DIAG && 'compute'); fOwned = true; }
-      fBound = null;                       // fresh chain: nothing bound yet
-      return (fPass = fEnc.beginComputePass(fPassOpts = opts));
-    },
-    endCompute: () => {
-      endPass();
-      if (fOwned) S.endFrame();            // beginCompute() opened the encoder; nothing else submits it
-    },
+    beginCompute: (opts = {}) => fPass || (
+      fEnc || (fEnc = mkEnc(DIAG && 'compute'), fOwned = true),
+      fBound = 0,                          // fresh chain: nothing bound yet
+      fPass = fEnc.beginComputePass(fPassOpts = opts)),
+    endCompute: () => (
+      endPass(),
+      fOwned && S.endFrame()),             // beginCompute() opened the encoder; nothing else submits it
 
 
 
@@ -450,17 +448,16 @@ ${main}
      * @returns {BufferHandle}
      */
     createStorageBuffer: sizeOrData => {
-      let init = typeof sizeOrData === 'number' ? null : sizeOrData;
+      let init = typeof sizeOrData === 'number' ? 0 : sizeOrData;
       let h = S.createBuffer(init ? len(init) : sizeOrData, BUF_STORAGE | BUF_COPY_SRC | BUF_COPY_DST, 'storage');
       let { b, w } = h, n = b.size;
       // `r` is a debug/export path, not a hot one: F_READ drops it (and the staging pool with it).
       // C is the result view, e.g. Float32Array — passing it as the *only* argument
       // (`buf.r(Float32Array)`) reads the whole buffer typed, no byte counting.
-      let r = !F_READ ? void 0 : (nbytes = n, o = 0, C = U8) => {
-        if (typeof nbytes === 'function') [C, nbytes] = [nbytes, n];
-        return readBack(nbytes, (enc, rb, need) => enc.copyBufferToBuffer(b, o, rb, 0, need), DIAG && 'readback')
-          .then(ab => C ? new C(ab) : ab);
-      };
+      let r = !F_READ ? void 0 : (nbytes = n, o = 0, C = U8) => (
+        typeof nbytes === 'function' && ([C, nbytes] = [nbytes, n]),
+        readBack(nbytes, (enc, rb, need) => enc.copyBufferToBuffer(b, o, rb, 0, need), DIAG && 'readback')
+          .then(ab => C ? new C(ab) : ab));
       let clear = () => fEnc
         ? outsidePass(() => fEnc.clearBuffer(b, 0, n))
         : oneShot(enc => enc.clearBuffer(b, 0, n), DIAG && 'clear');
@@ -524,7 +521,7 @@ ${main}
       writeTexture: (tex, data, opts = {}) => {
         let w = opts.width ?? tex.width, h = opts.height ?? tex.height;
         let bpt = texelBytes(tex.format);
-        if (opts.bytesPerRow == null && !bpt)
+        if (!(opts.bytesPerRow || bpt))
           err(9, MSG && `writeTexture: unknown bytes-per-texel for format '${tex.format}'; pass bytesPerRow explicitly.`);
         D.queue.writeTexture(
           { texture: tex, mipLevel: opts.mipLevel ?? 0, origin: { x: opts.x ?? 0, y: opts.y ?? 0 } },
@@ -619,7 +616,7 @@ ${main}
         let p = await S.makeFrag(
           `fn frag(uv: vec2<f32>) -> vec4<f32> { return textureSample(src, samp, vec2<f32>(uv.x, 1.0 - uv.y)); }`,
           {}, { src: 'texture_2d<f32>', samp: 'sampler' }, { format: tex.format });
-        mipSamp ??= S.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+        mipSamp ||= S.createSampler({ magFilter: 'linear', minFilter: 'linear' });
         // One frame → one submit for the whole chain, unless the caller already has one open.
         let own = !fEnc;
         if (own) S.beginFrame();
@@ -663,10 +660,9 @@ ${main}
        * @param {() => *} make
        * @returns {{read: *, write: *, swap: () => void}}
        */
-      pingPong: make => {
-        let pp = { read: make(), write: make(), swap: () => { [pp.read, pp.write] = [pp.write, pp.read]; } };
-        return pp;
-      },
+      // `pp` is a local, not an argument — see the trailing-parameter note above oneShot.
+      pingPong: (make, pp) =>
+        pp = { read: make(), write: make(), swap: () => [pp.read, pp.write] = [pp.write, pp.read] },
       // Two storage buffers. A TypedArray/ArrayBuffer seeds *both*, so the pair starts consistent.
       createPingPong: sizeOrData => S.pingPong(() => S.createStorageBuffer(sizeOrData)),
       // Two storage textures. Pass `usage` for the render-target flavour (add RENDER_ATTACHMENT).
@@ -706,7 +702,7 @@ ${main}
       resizeCanvas: (canvas = S.context?.canvas, opts = {}) => {
         if (!canvas) err(8, MSG && 'resizeCanvas: no canvas — init() with a context, or pass one.');
         let dpr = opts.dpr ?? globalThis.devicePixelRatio ?? 1;
-        let max = D?.limits.maxTextureDimension2D ?? Infinity;
+        let max = D ? D.limits.maxTextureDimension2D : Infinity;
         // clientWidth is 0 on an OffscreenCanvas (no CSS box) — fall back to the current size.
         let fit = (css, cur) => Math.max(1, Math.min(max, Math.round((css || cur) * dpr)));
         let width = fit(canvas.clientWidth, canvas.width), height = fit(canvas.clientHeight, canvas.height);
@@ -905,28 +901,28 @@ ${main}
   let mkEnc = label => DIAG ? D.createCommandEncoder({ label }) : D.createCommandEncoder();
   let submit = enc => D.queue.submit([enc.finish()]);
   // One-shot submission — open an encoder, record, submit. The outside-a-frame path everywhere.
-  let oneShot = (record, label) => { let enc = mkEnc(label); record(enc); submit(enc); };
+  // `enc` (and its siblings below) is a trailing parameter used as a local: a default parameter
+  // is the one `let` an expression-bodied arrow can have, and callers never pass that far.
+  let oneShot = (record, label, enc = mkEnc(label)) => (record(enc), submit(enc));
   // Record onto the caller's encoder, else the open frame's, else a one-shot of our own — the
   // shared tail of every dispatch and draw.
   let onEncoder = (encoder, record) =>
-    (encoder ?? fEnc) ? record(encoder ?? fEnc) : oneShot(record);
+    (encoder || fEnc) ? record(encoder || fEnc) : oneShot(record);
 
   // Close the chained compute pass without submitting: callers below still need the encoder alive
   // to keep recording. Public endCompute() is the one that may submit.
-  let endPass = () => { try { fPass?.end(); } catch { } fPass = null; };
-  // Reset the per-frame state; `view` is the next frame's target (or null for none).
-  let fReset = view => { fView = view; fPass = fPassOpts = fBound = null; fOwned = false; };
+  let endPass = () => { try { fPass && fPass.end(); } catch { } fPass = 0; };
+  // Reset the per-frame state; `view` is the next frame's target (omitted for none).
+  let fReset = view => { fView = view; fPass = fPassOpts = fBound = 0; fOwned = false; };
 
   // Buffer copies cannot be encoded inside a pass. Close the chained pass, encode, then reopen it
   // and restore the pipeline/bind group of whatever was last bound, so a mid-chain write is
-  // invisible. The reopen is unconditional — `fBound?.()` would short-circuit its own argument and
-  // leave the chain closed when the write comes before the first dispatch.
-  let outsidePass = encode => {
-    let had = fPass;
-    endPass();
-    encode();
-    if (had) { fPass = fEnc.beginComputePass(fPassOpts ?? {}); fBound?.(fPass); }
-  };
+  // invisible. The reopen is unconditional — gating it on fBound would leave the chain closed
+  // when the write comes before the first dispatch.
+  let outsidePass = (encode, had = fPass) => (
+    endPass(),
+    encode(),
+    had && (fPass = fEnc.beginComputePass(fPassOpts || {}), fBound && fBound(fPass)));
 
   // ─── Staging ring ──────────────────────────────────────────────────────────────────────────
   // While a frame is open, uniform/buffer writes are staged CPU-side and copyBufferToBuffer'd
@@ -935,8 +931,8 @@ ${main}
   // fall back to plain queue writes everywhere (see the switch's comment for what that changes).
   // The `_` field names are minifier instructions: build-min.mjs renames every `_`-prefixed
   // property, and nothing outside this file reads them.
-  let ring = F_STAGING ? { _chunks: [], _i: 0, _cap: 1 << 18 } : null;
-  let stageCopy = !F_STAGING ? null : (dst, dstOff, data, size) => {
+  let ring = F_STAGING ? { _chunks: [], _i: 0, _cap: 1 << 18 } : 0;
+  let stageCopy = !F_STAGING ? 0 : (dst, dstOff, data, size) => {
     let need = (size + 3) & ~3;       // copyBufferToBuffer needs 4-byte multiples
     while (ring._chunks[ring._i] && ring._chunks[ring._i]._buf.size - ring._chunks[ring._i]._at < need) ring._i++;
     let c = ring._chunks[ring._i];
@@ -958,7 +954,7 @@ ${main}
   };
   // Upload all staged chunk contents; must run just before submitting the frame encoder (queue
   // writes execute before subsequently submitted command buffers).
-  let flushRing = !F_STAGING ? null : () => {
+  let flushRing = !F_STAGING ? 0 : () => {
     for (let c of ring._chunks) {
       if (c._at > 0) D.queue.writeBuffer(c._buf, 0, c._cpu, 0, c._at);
       c._at = 0;
@@ -968,20 +964,17 @@ ${main}
 
   // Pooled staging buffers for readbacks, keyed by size, max 4 kept per size. Reached through S
   // (see the test seams at the bottom) so test/layout.test.mjs can stub them.
-  let stagingPool = F_READ ? new Map() : null;
-  let acquireStaging = !F_READ ? null : size => stagingPool.get(size)?.pop()
+  let stagingPool = F_READ ? new Map() : 0;
+  let acquireStaging = !F_READ ? 0 : size => stagingPool.get(size)?.pop()
     ?? mkBuf({ size, usage: BUF_COPY_DST | BUF_MAP_READ, ...(DIAG && { label: 'readback staging' }) });
-  let releaseStaging = !F_READ ? null : buf => {
-    let list = stagingPool.get(buf.size) ?? [];
-    if (list.length < 4) { list.push(buf); stagingPool.set(buf.size, list); }
-    else buf.destroy();
-  };
+  let releaseStaging = !F_READ ? 0 : (buf, list = stagingPool.get(buf.size) ?? []) =>
+    list.length < 4 ? (list.push(buf), stagingPool.set(buf.size, list)) : buf.destroy();
 
   // The shared readback tail behind buffer `.r()` and readTexture: pool a staging buffer, encode
   // the caller's copy into a one-shot submission, map, copy out, release. `nbytes` may be
   // unaligned — copy sizes and mapped ranges must be 4-byte multiples, so the copy is padded
   // (`need`, handed to the encode callback) and the result trimmed back to `nbytes`.
-  let readBack = !F_READ ? null : async (nbytes, encode, label) => {
+  let readBack = !F_READ ? 0 : async (nbytes, encode, label) => {
     if (fEnc) console.warn('[TinyWebGPU] readback during an open frame reads pre-frame data — call endFrame() first.');
     let need = (nbytes + 3) & ~3;
     let rb = S._acquireStaging(need);
@@ -1001,7 +994,7 @@ ${main}
   });
   // Levels in a full mip chain, and the linear sampler generateMipmaps reuses across calls.
   let mipCount = (w, h) => 32 - Math.clz32(Math.max(w, h));
-  let mipSamp = null;
+  let mipSamp = 0;
 
   // A stable small integer per GPU object, for building bind-group cache keys out of resource
   // identities. WeakMap-backed, so it holds nothing alive.
@@ -1018,58 +1011,48 @@ ${main}
   // The default view of a texture, memoized — bind groups are rebuilt often and a fresh
   // createView() per rebind is pure garbage. The view's size is recorded on the way through, so
   // the auto depth attachment can size itself from any view this library created.
-  let viewCache = new WeakMap(), viewSize = F_DEPTH ? new WeakMap() : null;
-  let viewOf = t => {
-    let v = viewCache.get(t);
-    if (!v) {
-      viewCache.set(t, v = t.createView());
-      if (F_DEPTH) viewSize.set(v, [t.width, t.height]);
-    }
-    return v;
-  };
+  let viewCache = new WeakMap(), viewSize = F_DEPTH ? new WeakMap() : 0;
+  let viewOf = (t, v = viewCache.get(t)) => v || (
+    viewCache.set(t, v = t.createView()),
+    F_DEPTH && viewSize.set(v, [t.width, t.height]),
+    v);
   // A texture or a view, normalized to a view.
   let asView = v => v.createView ? viewOf(v) : v;
 
   // Where a render pass draws when the caller didn't say: the frame's view, else the swapchain.
   // Acquired on first use and, inside a frame, cached — so every pass of one frame draws into the
   // same swapchain texture, and a frame that never draws never acquires one at all.
-  let targetView = () => {
-    let v = fView ?? (S.context && viewOf(S.context.getCurrentTexture()));
-    if (!v) err(7, MSG && 'No render target: init() was called without a canvas context — pass an explicit view.');
-    if (fEnc) fView = v;
-    return v;
-  };
+  let targetView = (v = fView || S.context && viewOf(S.context.getCurrentTexture())) => (
+    v || err(7, MSG && 'No render target: init() was called without a canvas context — pass an explicit view.'),
+    fEnc && (fView = v),
+    v);
 
   // The auto-managed depth textures behind makeDraw({depth}), pooled by size and format so every
   // pipeline drawing into the same target shares one depth buffer — which is also what makes
   // depth testing work *across* pipelines in a frame.
-  let depthCache = F_DEPTH ? new Map() : null;
-  let depthFor = !F_DEPTH ? null : (colorView, format) => {
-    let s = viewSize.get(colorView);
-    if (!s) err(21, MSG && 'depth: target size unknown. Pass a GPUTexture (not a view) to drawTo, or supply depth.texture.');
-    let key = `${s[0]}x${s[1]} ${format}`;
-    let t = depthCache.get(key);
-    if (!t) {
+  let depthCache = F_DEPTH ? new Map() : 0;
+  let depthFor = !F_DEPTH ? 0 : (colorView, format,
+    s = viewSize.get(colorView) || err(21, MSG && 'depth: target size unknown. Pass a GPUTexture (not a view) to drawTo, or supply depth.texture.'),
+    key = `${s[0]}x${s[1]} ${format}`, k) =>
+    viewOf(depthCache.get(key) || (
       // Old sizes (a resized canvas leaves them behind) are destroyed, not merely dropped.
-      if (depthCache.size >= 4) { let k = depthCache.keys().next().value; depthCache.get(k).destroy(); depthCache.delete(k); }
-      depthCache.set(key, t = tex2d(s[0], s[1], format, TEX_RENDER_ATTACHMENT, 'depth'));
-    }
-    return viewOf(t);
-  };
+      depthCache.size >= 4 && (k = depthCache.keys().next().value, depthCache.get(k).destroy(), depthCache.delete(k)),
+      depthCache.set(key, k = tex2d(s[0], s[1], format, TEX_RENDER_ATTACHMENT, 'depth')),
+      k));
 
   // Bytes per texel, derived from the format name rather than tabulated: <channels><bits><type>.
   // This covers every copyable colour format WebGPU has — including the 16-bit unorm/snorm and
   // rgb10a2uint variants a fixed table kept missing. The three packed formats don't follow the
   // pattern and are named. Depth/stencil formats are absent on purpose: they have no single
   // bytes-per-texel for copies, and callers must pass bytesPerRow.
-  let texelBytes = !(F_TEXIO || F_READ) ? null : f => {
+  let texelBytes = !(F_TEXIO || F_READ) ? 0 : f => {
     let m = /^(r|rg|rgba|bgra)(8|16|32)/.exec(f);
     return m ? m[1].length * (m[2] / 8) : { 'rgb10a2unorm': 4, 'rgb10a2uint': 4, 'rg11b10ufloat': 4 }[f];
   };
 
   // Warns (doesn't throw) when a requested size exceeds the device limits — allocation is still
   // attempted, since limits vary wildly across GPUs. Diagnostics only.
-  let checkSize = !DIAG ? () => { } : (n, isStorage) => {
+  let checkSize = !DIAG ? 0 : (n, isStorage) => {   // every call site is DIAG-guarded
     try {
       if (!D) return;
       if (n > D.limits.maxBufferSize)
@@ -1099,15 +1082,12 @@ ${main}
     return D.queue.writeBuffer(b, o, d.buffer ?? d, d.byteOffset ?? 0, len(d));
   };
 
-  let blitCache = F_SHOW ? new Map() : null;
+  let blitCache = F_SHOW ? new Map() : 0;
 
-  // Accepts a preset name or a raw GPUBlendState; null/undefined = no blending (opaque).
-  let resolveBlend = blend => {
-    if (!blend || typeof blend !== 'string') return blend || null;
-    let b = BLENDS[blend];
-    if (!b) err(4, MSG && `Unknown blend preset '${blend}'. Use ${OK(BLENDS).map(k => `'${k}'`).join(', ')} or a GPUBlendState object.`);
-    return b;
-  };
+  // Accepts a preset name or a raw GPUBlendState; falsy = no blending (opaque).
+  let resolveBlend = blend =>
+    !blend || typeof blend !== 'string' ? blend || 0
+      : BLENDS[blend] ?? err(4, MSG && `Unknown blend preset '${blend}'. Use ${OK(BLENDS).map(k => `'${k}'`).join(', ')} or a GPUBlendState object.`);
 
   let compileShader = async (code, label) => {
     let module = D.createShaderModule({ code, ...(DIAG && { label: `shader ${label ?? ''}` }) });
@@ -1140,16 +1120,15 @@ ${main}
   // `layout: 'auto'` derives the bind group layout from what the shader actually references.
   // `format` is one format string, or an array of them for multiple render targets in @location
   // order; a blend state, if given, applies to every target.
-  let rawRender = (module, format, topology, blend, dep) => {
-    let b = resolveBlend(blend);
-    return D.createRenderPipeline({
+  let rawRender = (module, format, topology, blend, dep) => (
+    blend = resolveBlend(blend),
+    D.createRenderPipeline({
       layout: 'auto',
       vertex: { module, entryPoint: 'vs_main' },
-      fragment: { module, entryPoint: 'fs_main', targets: [format].flat().map(f => b ? { format: f, blend: b } : { format: f }) },
+      fragment: { module, entryPoint: 'fs_main', targets: [format].flat().map(f => blend ? { format: f, blend } : { format: f }) },
       primitive: { topology },
       ...(F_DEPTH && dep ? { depthStencil: { format: dep.format, depthWriteEnabled: dep.write, depthCompare: dep.compare } } : {}),
-    });
-  };
+    }));
   let rawCompute = module => D.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
 
   // ─── Schema engine ─────────────────────────────────────────────────────────────────────────
@@ -1171,19 +1150,18 @@ ${main}
     // matCxR is C columns of vecR, and a 3-row column occupies 4 units like any vec3.
     // `components` is how many numbers the caller supplies — smaller than `size` for exactly the
     // 3-row matrices, whose columns are written on a 4-unit stride. `packRows` flags that case.
-    let typeInfo = t => {
-      let m;
-      if (/^[fiu]32$/.test(t)) return [1, 1, 1, 0];
-      if ((m = /^vec([234])<[fiu]32>$/.exec(t))) { let c = +m[1]; return [c, c === 3 ? 4 : c, c, 0]; }
-      if ((m = /^mat([234])x([234])<f32>$/.exec(t))) {
-        let cols = +m[1], rows = +m[2], stride = rows === 3 ? 4 : rows;
-        return [cols * stride, stride, cols * rows, rows === 3 ? 3 : 0];
-      }
-      err(12, MSG && `Unknown uniform type size for: ${t}`);
-    };
+    // `m`, `c`, `r` are locals via trailing parameters; the vec branch reuses `m` for the width,
+    // the mat branch for cols/rows.
+    let typeInfo = (t, m, c, r) =>
+      /^[fiu]32$/.test(t) ? [1, 1, 1, 0]
+        : (m = /^vec([234])<[fiu]32>$/.exec(t)) ? (c = +m[1], [c, c === 3 ? 4 : c, c, 0])
+        : (m = /^mat([234])x([234])<f32>$/.exec(t)) ? (
+          c = +m[1], r = +m[2],
+          [c * (r === 3 ? 4 : r), r === 3 ? 4 : r, c * r, r === 3 ? 3 : 0])
+        : err(12, MSG && `Unknown uniform type size for: ${t}`);
     let alignTo = (n, a) => Math.ceil(n / a) * a;
 
-    let uniformBuffer = null, uniformWrite = () => { }, uniformWGSL = '';
+    let uniformBuffer = 0, uniformWrite = () => 0, uniformWGSL = '';
     let uniformEntries = OE(uniforms);
     if (uniformEntries.length > 0) {
       let offset = 0, layout = {};
@@ -1278,17 +1256,17 @@ ${structFields.join('\n')}
       wgsl: [uniformWGSL, ...resourceWGSL].filter(Boolean).join('\n'),
       uniformBuffer,
       uniformWrite,
-      _entries: values => OE(resourceLayout).map(([name, info]) => {
-        let resource = values[name];
-        if (!resource) return null;
-        if (info._isTex) resource = asView(resource);
-        else if (info._isBuf) resource = { buffer: resource };
-        return { binding: info._binding, resource };
-      }).filter(Boolean),
+      _entries: values => OE(resourceLayout).map(([name, info], i, a, resource = values[name]) =>
+        resource && {
+          binding: info._binding,
+          resource: info._isTex ? asView(resource) : info._isBuf ? { buffer: resource } : resource,
+        }).filter(Boolean),
       _uniformFields: OK(uniforms),
       _resourceFields: OK(resources),
       _resourceLayout: resourceLayout,
-      _uniformBinding: uniformEntries.length > 0 && emit ? (opts.startBinding ?? 0) : null,
+      // -1 = no uniform binding. 0 is a real binding number, so this one keeps a sentinel;
+      // readers test `>= 0`.
+      _uniformBinding: uniformEntries.length && emit ? (opts.startBinding ?? 0) : -1,
     };
   };
 
@@ -1296,13 +1274,13 @@ ${structFields.join('\n')}
   // The engine behind makeFrag / makeDraw / makeCompute: generate the schema WGSL, compile and
   // cache the pipeline, and hand back the object those three return.
   let makePipeline = async ({ code, uniforms = {}, resources = {}, format = S.format,
-    isCompute = false, blend = null, wg = [8, 8, 1], targetNames = null,
-    topology = 'triangle-list', count = 3, instances = 1, readOnly = [], depth = null }) => {
+    isCompute = false, blend, wg = [8, 8, 1], targetNames,
+    topology = 'triangle-list', count = 3, instances = 1, readOnly = [], depth }) => {
     // The resolved depth config: defaults, overridable field by field. `texture` is the caller's
     // own depth attachment; without it drawTo manages one sized to the target.
     let dep = F_DEPTH && depth && !isCompute
-      ? { format: 'depth24plus', compare: 'less', write: true, texture: null, ...(depth === true ? {} : depth) }
-      : null;
+      ? { format: 'depth24plus', compare: 'less', write: true, ...(depth === true ? {} : depth) }
+      : 0;
     // Declare only what the shader actually mentions. layout:'auto' drops bindings the shader
     // never references, and a bind-group entry for a dropped binding is a validation error — so
     // instead of emitting everything and reconciling afterwards, the schema is filtered up front
@@ -1360,29 +1338,28 @@ ${structFields.join('\n')}
     }
     let pipeline = await pending;
 
-    let bindGroup = null, bound = null;   // `bound` = the resource map the current group was built from
+    let bindGroup = 0, bound = 0;   // `bound` = the resource map the current group was built from
 
     // What a declared type needs the resource to have been created with. Checking it here turns
     // the commonest texture mistake (a plain createTexture behind a texture_storage_2d) from a wall
     // of driver validation text into one line naming the resource and the missing flag. Diagnostics
     // only — WebGPU validates the bind group itself, so the minified build folds this away.
-    let usageNeed = !DIAG ? null : info => {
-      if (info._isBuf) return [BUF_STORAGE, 'GPUBufferUsage.STORAGE'];
-      if (info._isTex) return /^texture_storage_/.test(info._wgslType)
-        ? [TEX_STORAGE_BINDING, 'GPUTextureUsage.STORAGE_BINDING (use createStorageTexture)']
-        : [TEX_BINDING, 'GPUTextureUsage.TEXTURE_BINDING'];
-      return [0, ''];
-    };
-    let validateResources = !DIAG ? () => { } : vals => {
+    let usageNeed = !DIAG ? 0 : info =>
+      info._isBuf ? [BUF_STORAGE, 'GPUBufferUsage.STORAGE']
+        : info._isTex ? (/^texture_storage_/.test(info._wgslType)
+          ? [TEX_STORAGE_BINDING, 'GPUTextureUsage.STORAGE_BINDING (use createStorageTexture)']
+          : [TEX_BINDING, 'GPUTextureUsage.TEXTURE_BINDING'])
+        : [0, ''];
+    let validateResources = !DIAG ? 0 : vals => {   // both call sites are DIAG-guarded
       let missing = [], mismatched = [];
       for (let name of rFields) {
         let info = rLayout?.[name];
-        if (!(name in vals) || vals[name] == null) { missing.push(name); continue; }
         let v = vals[name];
+        if (!v) { missing.push(name); continue; }
         let expected = info?._wgslType ?? resources[name];
         // Heuristics: catch the obvious mismatches without producing false positives. A sampler is
         // opaque, so it gets no kind check at all.
-        let bad = null;
+        let bad = 0;
         if (info?._isBuf) {
           if (!(typeof v.mapAsync === 'function' || typeof v.getMappedRange === 'function' || typeof v.buffer?.mapAsync === 'function')) bad = typeof v;
         } else if (info?._isTex) {
@@ -1391,14 +1368,14 @@ ${structFields.join('\n')}
             && !(typeof v.createView === 'function' || 'dimension' in v || 'mipLevelCount' in v)) bad = typeof v;
         }
         // Right kind of object, wrong usage flags: catch it here rather than in the driver.
-        if (!bad && info && v.usage != null) {
+        if (!bad && info && v.usage) {
           let [need, label] = usageNeed(info);
           if (need && !(v.usage & need)) bad = `a ${info._isBuf ? 'buffer' : 'texture'} created without ${label}`;
         }
         if (bad) mismatched.push({ name, expected, got: bad });
       }
       if (!missing.length && !mismatched.length) return;
-      let at = n => rLayout?.[n]?._binding != null ? ` (binding ${rLayout[n]._binding})` : '';
+      let at = n => rLayout?.[n]?._binding >= 0 ? ` (binding ${rLayout[n]._binding})` : '';
       let msg = 'BindGroup(0) resource validation failed.';
       if (missing.length) msg += '\nMissing:' + missing.map(n => `\n  - ${n}${at(n)}`).join('');
       if (mismatched.length) msg += '\nMismatched:' + mismatched.map(m => `\n  - ${m.name}${at(m.name)}: expected ${m.expected}, got ${m.got}`).join('');
@@ -1427,7 +1404,7 @@ ${structFields.join('\n')}
       if (hit) return void (bindGroup = hit);
       if (DIAG && rFields.length > 0) validateResources(next);
       let entries = [
-        ...(uBinding != null ? [{ binding: 0, resource: { buffer: schema.uniformBuffer } }] : []),
+        ...(uBinding >= 0 ? [{ binding: 0, resource: { buffer: schema.uniformBuffer } }] : []),
         ...schema._entries(next),
       ];
       // Reporting only, as at pipeline creation — the driver rejects a bad group regardless.
@@ -1442,35 +1419,27 @@ ${structFields.join('\n')}
 
     // Nothing left for the caller to supply: build @group(0) now. Otherwise wait for
     // setResources, so the group is never built against a layout still missing entries.
-    if (uBinding != null && !rFields.length) rebindResources({});
+    if (uBinding >= 0 && !rFields.length) rebindResources({});
 
     // Whether @group(0) exists at all. If it does and nothing is bound to it, dispatching produces
     // a bare "bind group 0 is not set" from the driver — say which call is missing instead.
-    let needsBindGroup = uBinding != null || rFields.length > 0;
+    let needsBindGroup = uBinding >= 0 || rFields.length > 0;
 
-    let bind = pass => {
-      if (!bindGroup && needsBindGroup)
-        err(15, MSG && `No resources bound. Call setResources({ ${rFields.join(', ')} }) before dispatching/drawing.`);
-      pass.setPipeline(pipeline);
-      if (bindGroup) pass.setBindGroup(0, bindGroup);
-    };
+    let bind = pass => (
+      !bindGroup && needsBindGroup &&
+        err(15, MSG && `No resources bound. Call setResources({ ${rFields.join(', ')} }) before dispatching/drawing.`),
+      pass.setPipeline(pipeline),
+      bindGroup && pass.setBindGroup(0, bindGroup));
 
     // Records compute work. When beginCompute() has a pass open on the encoder we would use, join
     // it — rebinding only if the last pipeline bound to it was a different one — so chaining is
     // what you get by default and `dispatch()` never silently ends someone else's chain.
     // Otherwise open a pass of our own, and submit if we also own the encoder.
-    let computePass = (record, encoder = null) => {
-      if (fPass && (!encoder || encoder === fEnc)) {
-        if (fBound !== bind) { bind(fPass); fBound = bind; }
-        return record(fPass);
-      }
-      onEncoder(encoder, enc => {
-        let pass = enc.beginComputePass();
-        bind(pass);
-        record(pass);
-        pass.end();
-      });
-    };
+    let computePass = (record, encoder) =>
+      fPass && (!encoder || encoder === fEnc)
+        ? (fBound !== bind && (bind(fPass), fBound = bind), record(fPass))
+        : onEncoder(encoder, (enc, pass = enc.beginComputePass()) =>
+          (bind(pass), record(pass), pass.end()));
 
     let base = {
       pipeline,
@@ -1490,41 +1459,36 @@ ${structFields.join('\n')}
     };
 
     return isCompute ? OA(base, {
-      dispatch: (x = 1, y = 1, z = 1, encoder = null) => computePass(p => p.dispatchWorkgroups(x, y, z), encoder),
+      dispatch: (x = 1, y = 1, z = 1, encoder) => computePass(p => p.dispatchWorkgroups(x, y, z), encoder),
       // dispatch() counts workgroups; run() counts the items you actually have and divides by the
       // workgroup size for you. Guard the tail with `if (gid.x >= n) { return; }` as usual.
-      run: (w = 1, h = 1, d = 1, encoder = null) => computePass(
+      run: (w = 1, h = 1, d = 1, encoder) => computePass(
         p => p.dispatchWorkgroups(Math.ceil(w / wg[0]), Math.ceil(h / wg[1]), Math.ceil(d / wg[2])), encoder),
       // Takes a raw GPUBuffer or a handle — `.b ??` unwraps, as setResources does.
-      dispatchIndirect: (buffer, byteOffset = 0, encoder = null) =>
+      dispatchIndirect: (buffer, byteOffset = 0, encoder) =>
         computePass(p => p.dispatchWorkgroupsIndirect(buffer.b ?? buffer, byteOffset), encoder),
       // Escape hatch: bind this pipeline to a pass you opened yourself, then dispatch on it with
       // the raw WebGPU calls. Not needed for beginCompute() chains — dispatch() handles those.
-      bindTo: (pass = fPass) => {
-        if (!pass) err(17, MSG && 'No active compute pass. Call G.beginCompute() first, or pass one.');
-        bind(pass);
-        // Remember it: a staged write mid-chain has to close and reopen the pass, and the reopened
-        // one starts with no pipeline bound.
-        if (pass === fPass) fBound = bind;
-      },
+      // fBound is remembered because a staged write mid-chain has to close and reopen the pass,
+      // and the reopened one starts with no pipeline bound.
+      bindTo: (pass = fPass) => (
+        pass || err(17, MSG && 'No active compute pass. Call G.beginCompute() first, or pass one.'),
+        bind(pass),
+        pass === fPass && (fBound = bind)),
     }) : OA(base, {
       // Single target: a view or texture, defaulting to the canvas. Multiple targets: an object
       // keyed by the `targets` schema — `drawTo({ colour: a, normal: b })` — so the @location order
       // lives in one place and callers never restate it.
-      drawTo: (view, clear = [0, 0, 0, 1], encoder = null) => {
+      drawTo: (view, clear = [0, 0, 0, 1], encoder) => {
         let c = Array.isArray(clear) ? clear : [0, 0, 0, 1];
         let loadOp = clear === 'load' ? 'load' : 'clear', clearValue = { r: c[0], g: c[1], b: c[2], a: c[3] };
         let views = targetNames
-          ? targetNames.map(n => {
-            let v = view?.[n];
-            if (!v) err(18, MSG && `drawTo: no target for '${n}'. Pass { ${targetNames.join(', ')} }.`);
-            return asView(v);
-          })
+          ? targetNames.map(n => asView(view?.[n] || err(18, MSG && `drawTo: no target for '${n}'. Pass { ${targetNames.join(', ')} }.`)))
           : [view ? asView(view) : targetView()];
 
-        onEncoder(encoder, enc => {
-          if (enc === fEnc && fPass) endPass();   // a render pass cannot nest inside the compute pass
-          let pass = enc.beginRenderPass({
+        onEncoder(encoder, (enc, pass) => (
+          enc === fEnc && fPass && endPass(),   // a render pass cannot nest inside the compute pass
+          pass = enc.beginRenderPass({
             colorAttachments: views.map(v => ({ view: v, loadOp, storeOp: 'store', clearValue })),
             // The depth buffer follows the clear mode of the colour targets: 'load' keeps both.
             ...(F_DEPTH && dep ? {
@@ -1533,11 +1497,10 @@ ${structFields.join('\n')}
                 depthClearValue: 1, depthLoadOp: loadOp, depthStoreOp: 'store',
               }
             } : {}),
-          });
-          bind(pass);
-          pass.draw(base.count, base.instances, 0, 0);
-          pass.end();
-        });
+          }),
+          bind(pass),
+          pass.draw(base.count, base.instances, 0, 0),
+          pass.end()));
       },
     });
   };

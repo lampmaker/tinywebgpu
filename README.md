@@ -151,7 +151,7 @@ produced something and you just want to look at it:
 
 ```js
 G.show(result);                                  // onto the canvas
-G.show(hdr, null, { scale: [0.25, 0.25, 0.25, 1] });   // tone-map an HDR buffer on the way
+G.show(hdr, 0, { scale: [0.25, 0.25, 0.25, 1] });      // tone-map an HDR buffer on the way
 G.show(depth, myTarget.createView());            // or into a texture you own
 ```
 

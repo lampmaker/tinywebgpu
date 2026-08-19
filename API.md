@@ -48,12 +48,13 @@ The `GPU*` names come from TypeScript's own `lib.dom`; on an older TS add `@webg
 Enables uniform-write warnings (width overflow, non-integer into int fields). WGSL compile
 checking is always on: errors throw with a pretty source-window log, warnings are logged.
 
-### `G.pre = null | (src: string) => string` (default null)
-Optional WGSL preprocessing hook, applied in `makeShader` before hashing/compiling. `null`
-means user WGSL is never rewritten. Must be deterministic — the shader cache keys on the
-post-`pre` source. See “WGSL preprocessing” below for the stock token expander.
+### `G.pre = 0 | (src: string) => string` (default 0)
+Optional WGSL preprocessing hook, applied in `makeShader` before hashing/compiling. Any falsy
+value (the default is `0`) means user WGSL is never rewritten. Must be deterministic — the
+shader cache keys on the post-`pre` source. See “WGSL preprocessing” below for the stock
+token expander.
 
-### `G.onDeviceLost = null | (info: GPUDeviceLostInfo) => void` (default null)
+### `G.onDeviceLost = 0 | (info: GPUDeviceLostInfo) => void` (default 0)
 Called if the GPU device is lost (driver reset, context crash). The library always logs the
 loss; set this to rebuild/recover. Uncaptured WebGPU errors are also logged with labels
 (buffers, textures, shaders and encoders carry `label`s for readable messages).

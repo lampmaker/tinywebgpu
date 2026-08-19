@@ -460,7 +460,7 @@
     const POPS = [1024, 8192, 65536];
     let dimIdx = 2, popIdx = 1, fnIdx = 0;
     let D = 0, P = 0, fn = FNS[0];
-    let pop = null, fit = null, best = null, density = null;
+    let pop = 0, fit = 0, best = 0, density = 0;
     let gen = 0, parity = 0, running = true, inFlight = false;
     let evals = 0, rate = 0, lastT = performance.now();
 
@@ -470,13 +470,13 @@
       D = DIMS[dimIdx];
       P = POPS[popIdx];
       while (P * D > MAX_GENOME && P > 1024) P = P / 2;         // keep the allocation sane
-      pop?.b.destroy();
-      fit?.b.destroy();
-      best?.b.destroy();
+      pop && pop.b.destroy();
+      fit && fit.b.destroy();
+      best && best.b.destroy();
       pop = G.createStorageBuffer(2 * P * D * 4);
       fit = G.createStorageBuffer(2 * P * 4);
       best = G.createStorageBuffer((2 + D) * 4);
-      density ??= G.createStorageBuffer(GRID * GRID * 4);
+      density ||= G.createStorageBuffer(GRID * GRID * 4);
 
       seed.setResources({ pop: pop.b, fit: fit.b });
       step.setResources({ pop: pop.b, fit: fit.b });

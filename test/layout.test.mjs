@@ -211,7 +211,8 @@ const layoutOf = uniforms => {
   check('blend: additive', S._resolveBlend('additive'),
     { color: add('one', 'one'), alpha: add('one', 'one') });
 
-  check('blend: null is opaque', S._resolveBlend(null), null);
+  check('blend: falsy is opaque', S._resolveBlend(null), 0);
+  check('blend: omitted is opaque', S._resolveBlend(undefined), 0);
   const raw = { color: { srcFactor: 'zero', dstFactor: 'one', operation: 'subtract' } };
   check('blend: a raw GPUBlendState passes straight through', S._resolveBlend(raw), raw);
 

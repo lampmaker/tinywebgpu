@@ -231,12 +231,12 @@
 
     // ---- live state ---------------------------------------------------------------------------
     let N = COUNTS[countIdx];
-    let parts = null, grid = null, gw = 0, gh = 0, cells = 0, aspect = 1;
+    let parts = 0, grid = 0, gw = 0, gh = 0, cells = 0, aspect = 1;
     let repel = false, swirl = true, held = false;
     let attract = [0, 0], target = [0, 0], pointer = false;
 
     const allocParticles = () => {
-      parts?.b.destroy();
+      parts && parts.b.destroy();
       parts = G.createStorageBuffer(makeParticles(N, aspect));
       sim.setResources({ parts: parts.b, grid: grid.b });
     };
@@ -252,7 +252,7 @@
       gw = Math.max(8, Math.round(width * scale));
       gh = Math.max(8, Math.round(height * scale));
       cells = gw * gh;
-      grid?.b.destroy();
+      grid && grid.b.destroy();
       grid = G.createStorageBuffer(cells * 4);
       fade.setResources({ grid: grid.b });
       draw.setResources({ grid: grid.b });
