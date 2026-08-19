@@ -854,7 +854,7 @@ ${main}
 
   // A minifier cannot shorten a property access on a global, and these are spelled out about twenty
   // times between them. Aliasing is worth ~200 bytes minified.
-  let OE = Object.entries, OK = Object.keys, OA = Object.assign, OV = Object.values;
+  let {entries:OE, keys:OK, assign:OA, values:OV,fromEntries:OF} = Object;
 
   // WGSL fragments and enum strings the file repeats, spelled once and interpolated. The
   // interpolated result is byte-identical WGSL, so shader hashes and the compile-log windows
@@ -1281,7 +1281,7 @@ ${structFields.join('\n')}
     // driver, and the bind group rejected.
     let bare = code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*/g, '');
     let refd = name => new RegExp(`\\b${name}\\b`).test(bare);
-    let usedResources = Object.fromEntries(OE(resources).filter(([n]) => refd(n)));
+    let usedResources = OF(OE(resources).filter(([n]) => refd(n)));
     let usesUB = refd(UNIFORM_VAR);
     if (DIAG) {
       let unused = OK(resources).filter(n => !(n in usedResources));
