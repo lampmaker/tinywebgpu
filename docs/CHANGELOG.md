@@ -31,15 +31,23 @@ stock tiny build (which strips the option) is flagged in the build picker. READM
 the painter's algorithm is "exact and free" for a height field is corrected to say what the
 ordering actually requires.
 
-The example also gained a `MODE` constant above its draw — `'solid'`, `'wire'`, `'both'` or
-`'points'`. The triangle edges are found in the *fragment* shader, from a barycentric coordinate
-the rasteriser interpolates, so `'wire'` and `'both'` are the same single draw as `'solid'`, with
-no second pipeline and no line primitives; `'both'` gets hidden-line removal from the depth
-buffer for free, since the filled facets still write depth while `'wire'` discards them.
-`WIRE_PX` sets the line width. `'points'` switches `topology` to `'point-list'` and draws the
-grid vertices bright, and the comment carries what a reader coming from WebGL needs: topology is
-a pipeline property, so points cannot share a draw with the surface, and there is no
-`gl_PointSize` — a point is one *device* pixel, so bigger dots mean a quad per vertex.
+The example also gained a `MODE` constant above its draw, covering **all five WebGPU
+topologies** over one unchanged heights buffer: `'solid'` / `'wire'` / `'both'` (triangle-list),
+`'lines'` (line-list, three edges per cell), `'strip'` (triangle-strip, one strip per row),
+`'ribbons'` (line-strip, one polyline per grid row) and `'points'` (point-list). A small table
+maps each to its topology, vertex count, instance count and the four lines of WGSL that turn
+`(v, i)` into a grid point; everything else in the shader is shared.
+
+`'wire'` and `'both'` are not a topology: the edges come from a barycentric coordinate the
+rasteriser interpolates, found in the *fragment* shader, so they are the same single draw as
+`'solid'` — which is also the only way to fill and outline at once, since topology is a pipeline
+property. `'both'` gets hidden-line removal from the depth buffer for free, as the filled facets
+still write depth while `'wire'` discards them; `WIRE_PX` sets the line width. The comments carry
+what a reader coming from WebGL will otherwise assume wrong: there is no `lineWidth` and no
+`gl_PointSize`, and the one pixel you get is a *device* pixel, so visible marks mean a quad per
+vertex. `'strip'` is the vertex-count lesson — a third as many vertices as `'solid'`, paid for in
+flat shading, because sharing vertices leaves `@interpolate(flat)` only the provoking vertex and
+the facets stop matching the triangles.
 
 **Changed — `G.pre` is gone; `G.defines` is WGSL's missing `#define`, built into the core**
 (min +149 B → 15.8 KB, tiny +140 B → 8.9 KB)

@@ -1315,25 +1315,29 @@ G.endFrame();</code></pre>
           depth-enabled pipeline drawing into it — so a second pass depth-tests against this one
           with nothing to wire up. Override any field with
           <code>depth: { format, compare, write, texture }</code>.</p>
-        <p>One more knob comes free with <code>makeDraw</code>: <code>topology</code>, which
-          defaults to <code>'triangle-list'</code> and takes any of the five WebGPU has.
-          <code>'line-list'</code> reads the same six vertices as three lines rather than two
-          triangles — though that particular pairing is not the wireframe you want here, since a
-          cell&rsquo;s vertical edges never come up in it. For a wireframe you generally keep the
-          triangles and find the edges in the <em>fragment</em> shader instead, from a
-          barycentric coordinate the rasteriser interpolates for you: one draw then gives you the
-          surface, the edges, or both at once.</p>
-        <p><code>'point-list'</code> is there too — WebGPU&rsquo;s <code>gl.POINTS</code>, and a
-          quick way to see where your vertices actually ended up when something looks wrong. Two
-          things to know before you reach for it. <code>topology</code> belongs to the pipeline,
-          so points cannot share a draw with the surface the way that fragment-shader wireframe
-          can; overlaying them is a second <code>makeDraw</code> over the same buffer. And there
-          is no <code>gl_PointSize</code> in WebGPU: a point is always exactly one pixel — one
-          <em>device</em> pixel at that, so on a 2&times; display it is half a CSS pixel. When you
-          want dots you can see, draw a small quad per vertex instead.
-          <a href="../examples/8_heightmap.html">Example 8</a> has all of this behind a
-          <code>MODE</code> constant above its draw: <code>'solid'</code>, <code>'wire'</code>,
-          <code>'both'</code>, <code>'points'</code>.</p>
+        <p>One more knob comes free with <code>makeDraw</code>: <code>topology</code>. It
+          defaults to <code>'triangle-list'</code> and takes any of the five WebGPU has — the two
+          line topologies and <code>'point-list'</code> included, so the same heights buffer will
+          draw you a wireframe, a set of contour lines, or a point cloud, changing only which
+          grid point each vertex maps to.</p>
+        <p>Three things are worth knowing before you pick one.
+          <code>topology</code> belongs to the <em>pipeline</em>, so lines or points cannot share
+          a draw with the surface — overlaying them means a second <code>makeDraw</code> over the
+          same buffer, which is why a wireframe is more often found in the <em>fragment</em>
+          shader instead, from a barycentric coordinate the rasteriser interpolates: that one
+          gives you the surface, the edges, or both at once, in a single draw. Lines and points
+          are always exactly one pixel — WebGPU has no <code>lineWidth</code> and no
+          <code>gl_PointSize</code> — and that is one <em>device</em> pixel, so on a 2&times;
+          display a dot is half a CSS pixel; when you want marks you can see, draw a small quad
+          per vertex. And strips are how you stop sending six vertices per cell, at the price of
+          flat shading: with vertices shared between neighbouring triangles,
+          <code>@interpolate(flat)</code> can only hand each triangle its provoking vertex&rsquo;s
+          value, so the facets stop lining up with the triangles.</p>
+        <p><a href="../examples/8_heightmap.html">Example 8</a> has all five behind a
+          <code>MODE</code> constant above its draw — <code>'solid'</code>, <code>'wire'</code>,
+          <code>'both'</code>, <code>'lines'</code>, <code>'strip'</code>,
+          <code>'ribbons'</code>, <code>'points'</code> — over one unchanged heights buffer, which
+          makes them worth flipping through side by side.</p>
         <p>You can sometimes do without it: draw back-to-front and the painter&rsquo;s algorithm
           gets the same picture for free. It is a tempting trade and easy to get subtly wrong.
           <a href="../examples/8_heightmap.html">Example 8</a> used to sweep this grid away from
