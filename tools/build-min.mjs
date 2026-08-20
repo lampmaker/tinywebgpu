@@ -37,7 +37,9 @@
 //   6. `pack` rewrites repeated long WebGPU member names to bracket reads from one packed
 //      string table (`packNames` picks mnemonic codes, e.g. cRP for createRenderPipeline);
 //      `packComment` appends a legend naming them. Platform names can only be aliased this
-//      way — the browser owns them.
+//      way — the browser owns them. A second pass extends the same table to dictionary keys
+//      (width, height, format, …) via computed keys — `{[$w]: w}` builds the identical
+//      descriptor — with a per-name byte gate deciding which entries pay in each build.
 //   7. `rename` (config table / --rename) truly renames the library's *own* API via esbuild's
 //      mangleCache — setResources → sR, resources → rS — so a piece built against it saves the
 //      bytes on both sides of every call. The build ends with a /*renamed:…*/ legend; the
@@ -111,6 +113,25 @@ const CANDIDATES = [
   'mapAsync', 'createView', 'createTexture', 'requestAdapter', 'requestDevice', 'writeTexture',
   'createSampler', 'getCurrentTexture', 'clearBuffer', 'destroy', 'configure',
   'getPreferredCanvasFormat', 'pushErrorScope', 'popErrorScope',
+];
+
+// Dictionary keys (and short platform members) the pack's *second* loop may alias. Unlike
+// CANDIDATES these appear as object-literal keys, which the member-only rewrite must refuse —
+// but a *computed* key evaluates to the identical string, so `{width: w}` → `{[$w]: w}` hands
+// the browser the very same `width`, and a member write (`canvas[$w] = s`) is as sound as a
+// read. Both positions are therefore rewritten: `.name` → `[$x]` and `name:` → `[$x]:`. A name
+// is skipped per build when any occurrence is neither shape — inside a MSG string or a WGSL
+// template (the mask below sees where literals are), or as a bare identifier — and when the
+// per-name byte gate says the table entry costs more than the rewrites save (a short key like
+// `size` rarely pays; `format` at 30+ uses always does). Listing a name here costs nothing in
+// builds where it loses or never occurs.
+const KEY_CANDIDATES = [
+  'width', 'height', 'format', 'usage', 'size', 'label', 'texture', 'buffer', 'view', 'sampler',
+  'layout', 'entries', 'binding', 'resource', 'module', 'entryPoint', 'targets', 'vertex',
+  'fragment', 'compute', 'primitive', 'topology', 'colorAttachments', 'depthStencilAttachment',
+  'loadOp', 'storeOp', 'clearValue', 'mipLevel', 'mipLevelCount', 'baseMipLevel', 'bytesPerRow',
+  'rowsPerImage', 'sampleCount', 'origin', 'magFilter', 'minFilter', 'addressModeU',
+  'addressModeV', 'addressModeW', 'colorSpace', 'premultipliedAlpha', 'flipY', 'offset',
 ];
 
 // Names the `rename` table must never touch: platform members the library calls (see
@@ -259,6 +280,33 @@ const mapTemplateText = (code, fn) => {
       else if (ch === '}') {
         if (t === 0) { stack.pop(); out += ch; i++; continue; }   // back into the template text
         stack[stack.length - 1] = t - 1;
+      }
+    }
+    out += ch; i++;
+  }
+  return out;
+};
+
+// The same walk, reduced to a mask: every character inside a string or template-text span
+// becomes a space (quotes and ${ } stay; a 2-char escape becomes 2 spaces), so the result has
+// identical length and offsets. The key pack matches against the mask and edits the real code
+// at the matched positions — a literal's content can then never be rewritten by construction.
+const maskStrings = code => {
+  let out = '', stack = [], i = 0;
+  while (i < code.length) {
+    const ch = code[i], t = stack[stack.length - 1];
+    if (t === '`' || t === "'" || t === '"') {
+      if (ch === '\\') { out += '  '; i += 2; continue; }
+      if (ch === t) { stack.pop(); out += ch; i++; continue; }
+      if (t === '`' && ch === '$' && code[i + 1] === '{') { stack.push(0); out += '${'; i += 2; continue; }
+      out += ' '; i++; continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') stack.push(ch);
+    else if (typeof t === 'number') {
+      if (ch === '{') stack[stack.length - 1] = t + 1;
+      else if (ch === '}') {
+        if (t === 0) stack.pop();   // back into the template text
+        else stack[stack.length - 1] = t - 1;
       }
     }
     out += ch; i++;
@@ -450,9 +498,11 @@ if (compressTokens.length) {
 // Rewrites repeated long WebGPU member names to bracket reads from one packed string table:
 // `.beginComputePass(` becomes `[$a](` with `beginComputePass` spelled once in a `let[$a,…]=
 // "…".split(",")` declaration at the top of the factory body. Raw bytes only — gzip would deduplicate the names anyway, but the
-// inline/on-chain builds this exists for never gzip. A name is rewritten only when *every*
-// occurrence in the output is a member access — one appearance as an object key or inside a
-// string disqualifies it, so the rewrite can never change an API contract.
+// inline/on-chain builds this exists for never gzip. A CANDIDATES name is rewritten only when
+// *every* occurrence in the output is a member access — one appearance as an object key or
+// inside a string disqualifies it, so the rewrite can never change an API contract. The
+// KEY_CANDIDATES loop below relaxes exactly the key half of that rule, safely: a computed key
+// produces the same string at runtime.
 const packTable = [], prePack = packed.length;
 if (pack) {
   // `packNames` in the config picks mnemonic codes for chosen names ({ createRenderPipeline:
@@ -462,7 +512,7 @@ if (pack) {
   const packNames = config.packNames ?? {};
   const seen = new Set();
   for (const [n, id] of Object.entries(packNames)) {
-    if (!CANDIDATES.includes(n)) { console.error(`build-min: packNames: '${n}' is not a pack candidate.`); process.exit(1); }
+    if (!CANDIDATES.includes(n) && !KEY_CANDIDATES.includes(n)) { console.error(`build-min: packNames: '${n}' is not a pack candidate.`); process.exit(1); }
     if (!/^[A-Za-z_]\w*$/.test(id)) { console.error(`build-min: packNames: code '${id}' (for '${n}') must be word characters.`); process.exit(1); }
     if (seen.has(id)) { console.error(`build-min: packNames: code '${id}' is used twice.`); process.exit(1); }
     seen.add(id);
@@ -473,13 +523,37 @@ if (pack) {
     const id = '$' + c;
     if (!new RegExp(`\\$${c}\\b`).test(packed)) ids.push(id);
   }
-  for (const name of CANDIDATES) {
+  // ── phase 1: price every candidate, rewriting nothing ───────────────────────────────────────
+  // Selection has to be a *set* decision: the table declaration's fixed skeleton —
+  // `let[]="".split(",");`, ~20 bytes — is paid once however many names pack, so no single name
+  // should be asked to cover it (that gate would starve a table whose names are only jointly
+  // profitable), and it must not be ignored either (a lone marginal name would then pack at a
+  // net loss). So: price each name against its own slot cost here, and let the sum clear the
+  // skeleton below. Pricing with the head of the id pool is exact without consuming it — every
+  // auto id is two characters. The gate counts *code* bytes only; the legend comment is
+  // separable documentation on its own line below the code (logged where it is appended).
+  //
+  // A CANDIDATES name qualifies only when every occurrence is a member access (`.name` /
+  // `?.name`): these are the browser's *method* names, and the count test keeps the rewrite from
+  // ever touching an API contract. A KEY_CANDIDATES name is additionally allowed in key
+  // position — `name:` after `{`, `,` or `(` — rewritten as a computed key (`{[$w]: v}`), which
+  // hands the browser the identical string. For those, occurrences inside string or template
+  // literals are told apart with the mask (several appear in MSG texts), and any occurrence
+  // that is neither shape — a bare identifier, a destructuring shorthand — disqualifies the
+  // name for this build.
+  const masked = maskStrings(packed);
+  const priced = [];
+  const idFor = name => {
     let id = packNames[name];
     if (id && new RegExp(`\\b${escapeRe(id)}\\b`).test(packed)) {
       console.warn(`build-min: packNames: '${id}' already appears in the output — using an auto id for '${name}'.`);
       id = undefined;
     }
-    if (!id) { if (!ids.length) continue; id = ids[0]; }
+    return id ?? ids[0];
+  };
+  for (const name of CANDIDATES) {
+    const id = idFor(name);
+    if (!id) continue;
     // \b-bounded on both sides: a plain substring count would see `dispatchWorkgroups` inside
     // `dispatchWorkgroupsIndirect` and wrongly disqualify it as a non-member occurrence.
     const total = (packed.match(new RegExp(`\\b${escapeRe(name)}\\b`, 'g')) ?? []).length;
@@ -488,12 +562,50 @@ if (pack) {
     // profit: each `.name` (1+len) → `[id]` (2+id.len); `?.name` → `?.[id]` costs 2 more.
     const saved = uses.reduce((a, m) => a + name.length + 1 - (2 + id.length) - (m[1] === '?.' ? 2 : 0), 0);
     const cost = name.length + 1 + id.length + 1;         // table string entry + destructure slot
-    if (saved <= cost) continue;
-    if (id === ids[0]) ids.shift();
-    packTable.push([name, id]);
-    packed = packed.replace(new RegExp(`(\\?\\.|\\.)${name}\\b`, 'g'),
-      (m, d) => (d === '?.' ? '?.[' : '[') + id + ']');
+    if (saved > cost) priced.push({ name, gain: saved - cost, keyed: false });
   }
+  for (const name of KEY_CANDIDATES) {
+    const id = idFor(name);
+    if (!id) continue;
+    const codeUses = (masked.match(new RegExp(`\\b${escapeRe(name)}\\b`, 'g')) ?? []).length;
+    const inLiterals = (packed.match(new RegExp(`\\b${escapeRe(name)}\\b`, 'g')) ?? []).length - codeUses;
+    const members = [...masked.matchAll(new RegExp(`(\\?\\.|\\.)${escapeRe(name)}\\b`, 'g'))];
+    const keys = [...masked.matchAll(new RegExp(`([{,(])${escapeRe(name)}:`, 'g'))];
+    if (!codeUses || inLiterals || members.length + keys.length !== codeUses) continue;
+    // profit: members as above; `name:` (len+1) → `[id]:` (id.len+3).
+    const saved = members.reduce((a, m) => a + name.length + 1 - (2 + id.length) - (m[1] === '?.' ? 2 : 0), 0)
+      + keys.length * (name.length + 1 - (id.length + 3));
+    const cost = name.length + 1 + id.length + 1;
+    if (saved > cost) priced.push({ name, gain: saved - cost, keyed: true });
+  }
+
+  // ── phase 2: if the set clears the declaration skeleton, rewrite ────────────────────────────
+  if (priced.reduce((a, p) => a + p.gain, 0) > 'let[]="".split(",");'.length) {
+    // Member rewrites first, name-anchored so offsets don't matter.
+    for (const p of priced) {
+      let id = packNames[p.name];
+      if (!id || new RegExp(`\\b${escapeRe(id)}\\b`).test(packed)) { id = ids.shift(); }
+      if (!id) { p.keyed = 'dropped'; continue; }   // id pool exhausted — leave the name unpacked
+      packTable.push([p.name, id]);
+      p.id = id;
+      if (!p.keyed) packed = packed.replace(new RegExp(`(\\?\\.|\\.)${p.name}\\b`, 'g'),
+        (m, d) => (d === '?.' ? '?.[' : '[') + id + ']');
+    }
+    // Keyed rewrites by offset, on one fresh mask (the member rewrites above shifted positions;
+    // nothing below shifts another name's matches until the splices, which go end-first so
+    // earlier offsets stay valid — and the mask proves no position lies inside a literal).
+    const masked2 = maskStrings(packed);
+    const edits = [];
+    for (const p of priced.filter(p => p.keyed === true)) {
+      for (const m of masked2.matchAll(new RegExp(`(\\?\\.|\\.)${escapeRe(p.name)}\\b`, 'g'))) edits.push({ m, id: p.id });
+      for (const m of masked2.matchAll(new RegExp(`([{,(])${escapeRe(p.name)}:`, 'g'))) edits.push({ m, id: p.id });
+    }
+    for (const { m, id } of edits.sort((a, b) => b.m.index - a.m.index))
+      packed = packed.slice(0, m.index)
+        + (m[1] === '?.' ? `?.[${id}]` : m[1] === '.' ? `[${id}]` : `${m[1]}[${id}]:`)
+        + packed.slice(m.index + m[0].length);
+  }
+
   if (packTable.length) {
     const decl = `let[${packTable.map(t => t[1]).join(',')}]=${JSON.stringify(packTable.map(t => t[0]).join(','))}.split(",");`;
     // The declaration opens the factory body — every use is inside it, and the export-shape
@@ -519,7 +631,9 @@ if (config.singleLine !== false) {
 // The legend for the packed names, on its own line below the code — so the packed output stays
 // readable without this script at hand, and the code itself stays a single line.
 if (packTable.length && (config.packComment || args.includes('--pack-comment'))) {
-  packed = packed.trimEnd() + `\n/*pack:${packTable.map(([n, id]) => `${id}=${n}`).join(',')}*/\n`;
+  const legend = `\n/*pack:${packTable.map(([n, id]) => `${id}=${n}`).join(',')}*/\n`;
+  packed = packed.trimEnd() + legend;
+  console.log(`  pack legend: +${legend.length - 1}B (packComment — documentation on its own line, not counted as code)`);
 }
 
 // The renamed build is a different API, so its legend is not optional: without this comment
