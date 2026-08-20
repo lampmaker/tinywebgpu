@@ -190,10 +190,11 @@
     </div>
 
     <div class="note">
-      <p><b>How the boxes work.</b> Each one is a function body with three things already in
+      <p><b>How the boxes work.</b> Each one is a function body with a few things already in
         scope: <code>G</code> (an initialised TinyWebGPU), <code>canvas</code> (the one above the
-        code, when there is one) and <code>log(…)</code>, which writes to the output panel. In a
-        file of your own, those first lines would be:</p>
+        code, when there is one), <code>log(…)</code>, which writes to the output panel, and the
+        type constants <code>FLOAT</code>, <code>VEC2</code>, … that step 03 sets up. In a file of
+        your own, those first lines would be:</p>
       <pre class="static"><code>import { WEBGPU } from './tinywebgpu.js';
 const G = await WEBGPU().init(canvas.getContext('webgpu'));</code></pre>
       <p style="margin-bottom:0">Everything else is ordinary code — <code>await</code> at the top
@@ -251,8 +252,8 @@ const G = await WEBGPU().init();                             // compute only</co
           <script type="text/plain" class="code">
             const quad = G.makeQuad({
               frag: `
-                fn frag(uv: VEC2) -> VEC4 {
-                  return VEC4(uv.x, uv.y, 0.6, 1.0);
+                fn frag(uv: vec2<f32>) -> vec4<f32> {
+                  return vec4<f32>(uv.x, uv.y, 0.6, 1.0);
                 }`,
             });
 
@@ -277,12 +278,12 @@ const G = await WEBGPU().init();                             // compute only</co
     <section class="step" id="defines">
       <h2><span class="num">03</span>Defines — because WGSL doesn’t have them</h2>
       <div class="body">
-        <p>You just wrote <code>vec4&lt;f32&gt;</code> three times in a four-line shader. Coming
-          from GLSL, where that was plain <code>vec4</code>, the angle brackets get old fast —
-          and WGSL has no <code>#define</code> to shorten them with. So TinyWebGPU provides one.
-          <code>G.defines</code> is a string of <code>TOKEN replacement</code> entries, separated
-          by commas or newlines, and every shader you compile is expanded against it — whole
-          words only, longest token first, so <code>FLOAT</code> matches but
+        <p>That three-line shader spelled out an angle-bracketed type three times. Coming from
+          GLSL, where those were plain <code>vec2</code> and <code>vec4</code>, the brackets get
+          old fast — and WGSL has no <code>#define</code> to shorten them with. So TinyWebGPU
+          provides one. <code>G.defines</code> is a string of <code>TOKEN replacement</code>
+          entries, separated by commas or newlines, and every shader you compile is expanded
+          against it — whole words only, longest token first, so <code>FLOAT</code> matches but
           <code>myFLOATish</code> doesn’t:</p>
         <pre class="static"><code>G.defines = `
   FLOAT f32,  INT i32,  UINT u32
@@ -296,6 +297,7 @@ const G = await WEBGPU().init();                             // compute only</co
           <canvas></canvas>
           <script type="text/plain" class="code">
             // This page assigns the table above for you, so the tokens just work:
+            // (and FLOAT / VEC2 / … are in scope as JS strings — see below)
             const quad = G.makeQuad({
               frag: `
                 fn frag(uv: VEC2) -> VEC4 {
@@ -316,10 +318,31 @@ const G = await WEBGPU().init();                             // compute only</co
             pipeline and use <code>HALF</code> in the shader. A WGSL error still points at the
             expanded source, so nothing gets harder to debug.</div>
         </div>
-        <p>Every box from here on uses these tokens. One caveat, a step early: the <em>schema</em>
-          type strings you are about to meet — <code>uniforms: { time: 'f32' }</code> — stay
-          spelled out. Those live on the JS side and are parsed, not compiled, so defines never
-          touch them.</p>
+        <h3>The other half: the same names in JavaScript</h3>
+        <p>Defines stop at the shader. The <em>schema</em> you meet in the next step —
+          <code>uniforms: { time: 'f32' }</code> — is an ordinary JavaScript object that the
+          library parses itself; no compiler ever sees it, so <code>G.defines</code> never touches
+          it. Left alone, that splits your vocabulary down the middle: <code>VEC2</code> inside the
+          shader string, <code>'vec2&lt;f32&gt;'</code> in the schema one line above it.</p>
+        <p>JavaScript needs no feature from the library to fix this — a WGSL type is just text, so
+          make it a constant:</p>
+        <pre class="static"><code>const FLOAT = 'f32', INT = 'i32', UINT = 'u32';
+const VEC2 = 'vec2&lt;f32&gt;', VEC3 = 'vec3&lt;f32&gt;', VEC4 = 'vec4&lt;f32&gt;', MAT4 = 'mat4x4&lt;f32&gt;';</code></pre>
+        <p>Now both sides read the same, and a schema says what it means:</p>
+        <pre class="static"><code>uniforms: { time: FLOAT, res: VEC2, mouse: VEC2 }</code></pre>
+        <p>Better still, write the table <em>once</em> and let the string follow from it, so the two
+          halves cannot drift apart:</p>
+        <pre class="static"><code>const TYPES = { FLOAT: 'f32', VEC2: 'vec2&lt;f32&gt;', VEC4: 'vec4&lt;f32&gt;' /* … */ };
+const { FLOAT, VEC2, VEC4 } = TYPES;
+G.defines = Object.entries(TYPES).map(([t, r]) =&gt; `${t} ${r}`).join('\n');</code></pre>
+        <p>That is exactly what this page does, which is why every box below can use
+          <code>VEC2</code> in a shader and <code>VEC2</code> in a schema and mean the same thing.
+          Two notes on the edges. <code>PI</code> and <code>TAU</code> stay shader-only — they are
+          values, not types, so no schema ever asks for them. And <em>resource</em> schemas keep
+          their quotes: <code>'array&lt;f32&gt;'</code>, <code>'texture_2d&lt;f32&gt;'</code>,
+          a whole <code>struct</code> — those are complete type expressions rather than the plain
+          names the table covers, and <code>`array&lt;${FLOAT}&gt;`</code> costs more to read than
+          it saves.</p>
       </div>
     </section>
 
@@ -328,7 +351,7 @@ const G = await WEBGPU().init();                             // compute only</co
       <div class="body">
         <p>A shader with no inputs can only ever draw one image. Uniforms are the inputs, and this
           is where TinyWebGPU earns its keep. You declare them as a plain JS object:</p>
-        <pre class="static"><code>uniforms: { time: 'f32' }</code></pre>
+        <pre class="static"><code>uniforms: { time: FLOAT }</code></pre>
         <p>and the library generates the WGSL struct, binds it at
           <code>@group(0) @binding(0)</code>, and gives you a setter that writes the right bytes at
           the right offsets. Inside the shader they live on <code>UB</code>. There is nothing to
@@ -343,7 +366,7 @@ const G = await WEBGPU().init();                             // compute only</co
                                           + VEC3(0.0, 2.0, 4.0));
                   return VEC4(c, 1.0);
                 }`,
-              uniforms: { time: 'f32' },
+              uniforms: { time: FLOAT },
             });
 
             const loop = t => {
@@ -358,13 +381,16 @@ const G = await WEBGPU().init();                             // compute only</co
             <span class="status">idle</span>
           </div>
           <pre class="out"></pre>
-          <div class="try"><b>Try:</b> add <code>speed: 'f32'</code> to the uniforms, pass it in
+          <div class="try"><b>Try:</b> add <code>speed: FLOAT</code> to the uniforms, pass it in
             <code>run()</code>, and multiply <code>UB.time</code> by it. Nothing else needs to
             change — no struct to edit, no offsets to count.</div>
         </div>
         <p>Uniform types cover the usual ground: <code>f32</code>, <code>i32</code>,
-          <code>u32</code>, <code>vec2/3/4</code> of each, and <code>mat4x4&lt;f32&gt;</code>.
-          Vectors and matrices take arrays; scalars take numbers.</p>
+          <code>u32</code>, <code>vec2/3/4</code> of each, and <code>mat4x4&lt;f32&gt;</code> —
+          which is what <code>FLOAT</code>, <code>INT</code>, <code>UINT</code>,
+          <code>VEC2/3/4</code> and <code>MAT4</code> hold, so the constants and the quoted
+          spellings are interchangeable. Vectors and matrices take arrays; scalars take
+          numbers.</p>
       </div>
     </section>
 
@@ -394,7 +420,7 @@ const G = await WEBGPU().init();                             // compute only</co
                           + VEC3(0.10, 0.13, 0.30) * rings;
                   return VEC4(col, 1.0);
                 }`,
-              uniforms: { res: 'vec2<f32>', mouse: 'vec2<f32>', time: 'f32' },
+              uniforms: { res: VEC2, mouse: VEC2, time: FLOAT },
             });
 
             let mouse = [0.5, 0.5];
@@ -464,7 +490,7 @@ const G = await WEBGPU().init();                             // compute only</co
                           + VEC3(0.85, 0.93, 1.0) * edge * 0.9;
                   return VEC4(col, 1.0);
                 }`,
-              uniforms: { res: 'vec2<f32>', time: 'f32' },
+              uniforms: { res: VEC2, time: FLOAT },
             });
 
             const loop = t => {
@@ -501,7 +527,7 @@ const G = await WEBGPU().init();                             // compute only</co
                 if (i >= UB.n) { return; }      // the last workgroup overhangs
                 data[i] = FLOAT(i) * FLOAT(i);
               `,
-              { n: 'u32' },                     // uniforms  -> UB
+              { n: UINT },                     // uniforms  -> UB
               { data: 'array<f32>' },           // resources -> storage buffer
               { wg: [64, 1, 1] });              // threads per workgroup
 
@@ -556,7 +582,7 @@ const G = await WEBGPU().init();                             // compute only</co
                 }
                 atomicAdd(&count.n, 1u);
               `,
-              { n: 'u32' },
+              { n: UINT },
               { count: 'struct Count { n: atomic<u32> }' },
               { wg: [WG, 1, 1] });
 
@@ -626,7 +652,7 @@ const G = await WEBGPU().init();                             // compute only</co
                     sin(p.x + UB.time) * cos(p.y * 1.3 - UB.time * 0.7)
                   + 0.5 * sin(length(p - 3.0) * 4.0 - UB.time * 2.0);
               `,
-              { time: 'f32' }, { heat: 'array<f32>' }, { wg: [8, 8, 1] });
+              { time: FLOAT }, { heat: 'array<f32>' }, { wg: [8, 8, 1] });
 
             const show = G.makeFrag(`
                 fn frag(uv: VEC2) -> VEC4 {
@@ -751,7 +777,7 @@ const G = await WEBGPU().init();                             // compute only</co
                 if (i >= 4u) { return; }
                 out[UB.slot * 4u + i] = UB.value;   // each dispatch fills one row
               `,
-              { slot: 'u32', value: 'f32' }, { out: 'array<f32>' }, { wg: [4, 1, 1] });
+              { slot: UINT, value: FLOAT }, { out: 'array<f32>' }, { wg: [4, 1, 1] });
 
             const buf = G.createStorageBuffer(3 * 4 * 4);
             p.setResources({ out: buf.b });
@@ -827,7 +853,7 @@ G.endFrame();</code></pre>
                 atomicAdd(&stats.hits, hits);        // …one shared write
                 atomicAdd(&stats.threads, 1u);
               `,
-              { threads: 'u32', round: 'u32', k: 'u32' },
+              { threads: UINT, round: UINT, k: UINT },
               { stats: 'struct Stats { hits: atomic<u32>, threads: atomic<u32> }' },
               { wg: [WG, 1, 1] });
 
@@ -982,7 +1008,7 @@ G.endFrame();</code></pre>
                   let p = uv * 2.0 + VEC2(UB.time * 0.06, 0.0);
                   return textureSample(img, samp, p);
                 }`,
-              uniforms: { time: 'f32' },
+              uniforms: { time: FLOAT },
               resources: { img: 'texture_2d<f32>', samp: 'sampler' },
             });
 
@@ -1034,7 +1060,7 @@ G.endFrame();</code></pre>
                 if (i >= UB.cells) { return; }
                 grid[i] = grid[i] * 232u / 256u;
               `,
-              { cells: 'u32' }, { grid: 'array<u32>' }, { wg: [256, 1, 1] });
+              { cells: UINT }, { grid: 'array<u32>' }, { wg: [256, 1, 1] });
 
             // 2. simulate and splat — world space is x in [-aspect, aspect], y in [-1, 1]
             const sim = G.makeCompute(`
@@ -1065,8 +1091,8 @@ G.endFrame();</code></pre>
                 let cy = min(UINT(uv.y * FLOAT(UB.gh)), UB.gh - 1u);
                 atomicAdd(&grid[cy * UB.gw + cx], 1u);   // the whole "draw call"
               `,
-              { attract: 'vec2<f32>', dt: 'f32', aspect: 'f32', pull: 'f32',
-                n: 'u32', gw: 'u32', gh: 'u32' },
+              { attract: VEC2, dt: FLOAT, aspect: FLOAT, pull: FLOAT,
+                n: UINT, gw: UINT, gh: UINT },
               { parts: 'array<Particle>', grid: 'array<atomic<u32>>' },
               { wg: [WG, 1, 1] });
 
@@ -1080,7 +1106,7 @@ G.endFrame();</code></pre>
                                   VEC3(1.0, 0.5, 0.42), b)
                               + VEC3(b * b * b * 0.6), 1.0);
                 }`,
-              { gw: 'u32', gh: 'u32' }, { grid: 'array<u32>' });
+              { gw: UINT, gh: UINT }, { grid: 'array<u32>' });
 
             // 4 floats per particle: pos.xy, vel.xy — a spinning disc to start
             const init = new Float32Array(N * 4);
@@ -1256,12 +1282,18 @@ G.endFrame();</code></pre>
     let G = 0, initPromise = 0;
     const configured = new WeakSet();
 
-    // The table step 03 promises — assigned before any box compiles, so every example can
-    // write FLOAT / VEC2 / PI instead of the angle-bracketed long forms.
-    const DEFINES = `
-  FLOAT f32,  INT i32,  UINT u32
-  VEC2 vec2<f32>,  VEC3 vec3<f32>,  VEC4 vec4<f32>,  MAT4 mat4x4<f32>
-  PI 3.141592653589793,  TAU 6.283185307179586`;
+    // The table step 03 promises, written once and used on both sides of the JS/WGSL line.
+    // TYPES becomes G.defines, so shader source can say VEC2; the same names are also handed to
+    // every box as JS constants, so the schemas — plain JS strings, which defines never see —
+    // spell their types with the very same words.
+    const TYPES = {
+      FLOAT: 'f32', INT: 'i32', UINT: 'u32',
+      VEC2: 'vec2<f32>', VEC3: 'vec3<f32>', VEC4: 'vec4<f32>', MAT4: 'mat4x4<f32>',
+    };
+    // Shader-side only: values rather than types, so no schema ever asks for them.
+    const CONSTS = { PI: '3.141592653589793', TAU: '6.283185307179586' };
+    const TYPE_NAMES = Object.keys(TYPES);
+    const DEFINES = Object.entries({ ...TYPES, ...CONSTS }).map(([t, r]) => `${t} ${r}`).join('\n');
 
     const getG = () => (initPromise ||= WEBGPU().init().then(g => (g.defines = DEFINES, g)));
 
@@ -1340,8 +1372,9 @@ G.endFrame();</code></pre>
             }
             useCanvas(this.canvas);
           }
-          const fn = new AsyncFunction('G', 'canvas', 'log', 'requestAnimationFrame', this.editor.value);
-          await fn(G, this.canvas, log, raf);
+          const fn = new AsyncFunction('G', 'canvas', 'log', 'requestAnimationFrame',
+            ...TYPE_NAMES, this.editor.value);
+          await fn(G, this.canvas, log, raf, ...TYPE_NAMES.map(n => TYPES[n]));
           if (alive()) this.setStatus(this.canvas ? 'running' : 'done', 'ok');
           this.ran = true;
         } catch (e) {
