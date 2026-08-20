@@ -706,7 +706,8 @@ ${main}
         width = fit(canvas.clientWidth, canvas.width), height = fit(canvas.clientHeight, canvas.height),
         changed = canvas.width !== width || canvas.height !== height,
         changed && (canvas.width = width, canvas.height = height),
-        { width, height, changed }),
+        // sz spells the width/height keys once for the whole library — reuse it here too.
+        { ...sz(width, height), changed }),
     } : {}),
 
     ...(F_SHOW ? {
@@ -760,7 +761,10 @@ ${main}
         if (!/^(rgba|bgra)8unorm(-srgb)?$/.test(tex.format))
           err(19, MSG && `save: needs an 8-bit RGBA texture, got '${tex.format}'. Render it into an rgba8unorm target first.`);
         let [width, height] = texWH(tex, opts);
-        let px = await S.readTexture(tex, { x: opts.x, y: opts.y, width, height, mipLevel: opts.mipLevel, Ctor: U8 });
+        // readTexture derives the same x/y/width/height/mipLevel defaults from `opts` itself;
+        // save's extra keys (type, quality, download) are ignored there, and Ctor spread last
+        // always wins, so the pixels come back as bytes whatever the caller passed.
+        let px = await S.readTexture(tex, { ...opts, Ctor: U8 });
         // ImageData is RGBA; the canvas format is BGRA on most platforms, so swap the ends.
         if (tex.format.startsWith('bgra'))
           for (let i = 0; i < px.length; i += 4) { let b = px[i]; px[i] = px[i + 2]; px[i + 2] = b; }
