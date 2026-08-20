@@ -101,14 +101,6 @@ const F_STAGING = true;
 // resourceFields on pipelines. The short forms (b/w/r) always exist.
 const F_ALIASES = true;
 
-// SHORTHAND is a build seam rather than a switch: it stays 0 here and in the stock builds.
-// A build config whose `shorthand` names a token table (see wgsl_shorthand.js) makes
-// build-min.mjs swap this line for an expander that compileShader runs on every shader — the
-// library's own WGSL then ships compressed (V for vec2<f32>, …) and the piece's WGSL may use
-// the same tokens without shipping wgsl_shorthand.js. Schema *type strings* are never
-// expanded; spell those out. Leave the line shape intact — build-min.mjs matches it literally.
-const SHORTHAND = 0;
-
 // The generated uniform variable's name; makePipeline tests the shader for it.
 const UNIFORM_VAR = 'UB';
 
@@ -165,11 +157,14 @@ export let WEBGPU = () => {
     context: 0, format: 0, features: 0,
 
     debug: false,                // extra per-uniform warnings; DIAG builds only
-    // Optional WGSL preprocessing hook, `(src: string) => string`, applied before compiling.
-    // show() and generateMipmaps memoize their pipelines per `pre` (compared by identity), so
-    // swap in a new function to change behaviour rather than mutating one they captured.
-    // For token shorthands see the companion module wgsl_shorthand.js.
-    pre: 0,
+    // WGSL's missing #define. One string of `TOKEN replacement` entries separated by commas or
+    // newlines (tokens are identifier-like words; replacements may contain spaces, not commas),
+    // expanded whole-word, longest token first, in every shader compiled. Empty = no rewriting.
+    // Compose by appending — e.g. `G.defines = 'FLOAT f32, VEC2 vec2<f32>'` then `+=` more.
+    // Schema *type strings* are never expanded; spell those out. show() and generateMipmaps
+    // memoize their blit pipelines per defines value, so an entry never outlives its table.
+    // Leave the line's shape intact — build-min.mjs's `shorthand` option matches it literally.
+    defines: '',
     // Called with the GPUDeviceLostInfo on a context crash, driver reset or tab backgrounding.
     // The library logs regardless; set this to rebuild.
     onDeviceLost: 0,
@@ -318,7 +313,7 @@ ${frag}
       names = opts.targets ? OK(opts.targets) : 0,
       makePipeline({
         ...opts,
-        isCompute: false, targetNames: names,
+        _isCompute: false, _targetNames: names,
         code: names ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: ${V4}`).join(', ')}};\n${opts.code}` : opts.code,
         format: names ? OV(opts.targets) : opts.format,
       })),
@@ -342,7 +337,7 @@ ${frag}
 fn main(${BI}global_invocation_id) gid: ${V3U}, ${BI}local_invocation_id) lid: ${V3U}, ${BI}workgroup_id) wid: ${V3U}) {
 ${main}
 }
-`.trim(), uniforms, resources, isCompute: true, wg
+`.trim(), uniforms, resources, _isCompute: true, wg
     })),
 
     /**
@@ -610,10 +605,10 @@ ${main}
        */
       generateMipmaps: tex => {
         // The blit pipeline is memoized per format, like show()'s blitCache — and like there,
-        // `pre` is compared too, so an entry never outlives the hook it was compiled under.
+        // `defines` is compared too, so an entry never outlives the table it was compiled under.
         let entry = mipCache.get(tex.format);
-        (!entry || entry.pre !== S.pre) && mipCache.set(tex.format, entry = {
-          pre: S.pre,
+        (!entry || entry._d !== S.defines) && mipCache.set(tex.format, entry = {
+          _d: S.defines,
           p: S.makeFrag(
             `fn frag(uv: ${V2}) -> ${V4} { return textureSample(src, samp, ${V2}(uv.x, 1.0 - uv.y)); }`,
             {}, { src: 'texture_2d<f32>', samp: 'sampler' }, { format: tex.format }),
@@ -733,15 +728,15 @@ ${main}
         sample = /uint$/.test(tex.format) ? 'u32' : /sint$/.test(tex.format) ? 'i32' : 'f32',
         key = `${format}|${sample}|${opts.flipY ? 1 : 0}`,
         entry = blitCache.get(key),
-        // `pre` is compared too: a different G.pre means different generated WGSL, and the entry
-        // must not outlive the hook it was compiled under.
-        (!entry || entry.pre !== S.pre) && (
+        // `defines` is compared too: a different table means different generated WGSL, and the
+        // entry must not outlive the table it was compiled under.
+        (!entry || entry._d !== S.defines) && (
           p = S.makeFrag(`fn frag(uv: ${V2}) -> ${V4} {
     let d = ${V2}(textureDimensions(src));
     let c = vec2<i32>(clamp(${V2}(uv.x, ${opts.flipY ? 'uv.y' : '1.0 - uv.y'}) * d, ${V2}(0.0), d - 1.0));
     return ${V4}(textureLoad(src, c, 0)) * UB.scale + UB.offset;
   }`, { scale: V4, offset: V4 }, { src: `texture_2d<${sample}>` }, { format }),
-          blitCache.set(key, entry = { pre: S.pre, p })),
+          blitCache.set(key, entry = { _d: S.defines, p })),
         p = entry.p,
         p.setResources({ src: tex }),
         p.setUniforms({ scale: opts.scale ?? [1, 1, 1, 1], offset: opts.offset ?? [0, 0, 0, 0] }),
@@ -805,15 +800,12 @@ ${main}
                                                                                      
      */
     /**
-     * Compiles a WGSL shader module, applying `G.pre`. The module comes back synchronously;
+     * Compiles a WGSL shader module, applying `G.defines`. The module comes back synchronously;
      * DIAG builds report compile warnings and errors asynchronously with a pretty source-window
      * log, and a bad module also fails pipeline creation, so errors stay loud in every build.
-     * `applyPre` is false when the caller already ran `G.pre` — makePipeline does.
      * @param {string} code @returns {GPUShaderModule}
      */
-    makeShader: (code, applyPre = true) => (
-      applyPre && S.pre && (code = S.pre(code)),
-      compileShader(code)),
+    makeShader: code => compileShader(code),
     // entries: [{ binding:0, resource:{ buffer } }, { binding:1, resource: textureView }, ...]
     bindGroup: (pipeline, groupIndex, entries) =>
       D.createBindGroup({ layout: pipeline.getBindGroupLayout(groupIndex), entries }),
@@ -1086,8 +1078,12 @@ ${main}
   // A bad module also fails pipeline creation, which is where errors stay loud in every build:
   // DIAG through its validation scope, stripped builds through the driver. DIAG guards the whole
   // chain, so stripped builds never even request the info (and never await anything).
-  let compileShader = (code, module) => (
-    SHORTHAND && (code = SHORTHAND(code)),   // builds with a token table expand it here
+  let compileShader = (code, module, map = {}, keys = 0) => (
+    // G.defines expands here, on every path into the compiler, so the log below and the driver
+    // both see the expanded source. An empty table parses to no keys and rewrites nothing.
+    S.defines.replace(/([^\s,]+)[ \t]+([^,\n]+)/g, (e, t, r) => map[t] = r.trim()),
+    (keys = OK(map)).length && (code = code.replace(
+      new RegExp(`\\b(?:${keys.sort((a, b) => b.length - a.length).join('|')})\\b`, 'g'), t => map[t])),
     module = D.createShaderModule({ code, ...(DIAG && { label: 'shader' }) }),
     DIAG && module.getCompilationInfo().then(({ messages }) => {
       let msgs = messages.filter(m => m.message && m.type !== 'info');
@@ -1134,7 +1130,7 @@ ${main}
     let readOnly = opts.readOnly ?? [];
     // Uniforms whose var the shader never mentions still get a buffer and setters — only the
     // @binding is left out, so `p.uniforms = {…}` keeps working against a shader that ignores UB.
-    let emit = opts.emitUniform ?? true;
+    let emit = opts._emitUniform ?? true;
     let binding = opts.startBinding ?? 0;
     // The @group/@binding prefix of every generated var line, spelled once.
     let gb = b => `@group(${group}) @binding(${b}) var`;
@@ -1264,7 +1260,7 @@ ${structFields.join('\n')}
   // is usable on the next line and pieces never await a factory.
   // `wg` has no default: makeCompute always normalizes and passes it, and render never reads it.
   let makePipeline = ({ code, uniforms = {}, resources = {}, format = S.format,
-    isCompute = false, blend, wg, targetNames,
+    _isCompute: isCompute = false, blend, wg, _targetNames: targetNames,
     topology = 'triangle-list', count = 3, instances = 1, readOnly = [], depth }) => {
     // The resolved depth config: defaults, overridable field by field. `texture` is the caller's
     // own depth attachment; without it drawTo manages one sized to the target.
@@ -1289,19 +1285,18 @@ ${structFields.join('\n')}
         `[TinyWebGPU] Schema declares ${unused.map(n => `'${n}'`).join(', ')} but the shader never references ${unused.length > 1 ? 'them' : 'it'}; ` +
         `${unused.length > 1 ? 'they are' : 'it is'} left out of the generated WGSL and the bind group.`);
     }
-    let schema = buildSchema(uniforms, usedResources, { group: 0, startBinding: 0, emitUniform: usesUB, readOnly });
+    let schema = buildSchema(uniforms, usedResources, { group: 0, startBinding: 0, _emitUniform: usesUB, readOnly });
     // Destructured once: these are read on every setResources() and every dispatch, and a local is
     // both faster and — since the minifier renames it — a great deal shorter than the path.
     let { _resourceFields: rFields, _resourceLayout: rLayout, _uniformBinding: uBinding, uniformWrite: uWrite } = schema;
 
-    // Prepend the schema WGSL, then run the G.pre hook once, here, on the complete source.
-    let preCode = schema.wgsl ? `${schema.wgsl}\n${code}` : code;
-    let finalCode = S.pre ? S.pre(preCode) : preCode;
+    // Prepend the schema WGSL; compileShader expands G.defines on the complete source.
+    let finalCode = schema.wgsl ? `${schema.wgsl}\n${code}` : code;
 
     // The error scope is purely for reporting: WebGPU rejects a bad pipeline either way, and
     // without DIAG the driver's own message is the one that surfaces.
     if (DIAG) D.pushErrorScope('validation');
-    let module = S.makeShader(finalCode, false);   // S.pre already applied above
+    let module = S.makeShader(finalCode);
     let pipeline = isCompute ? rawCompute(module) : rawRender(module, format, topology, blend, dep);
     if (DIAG) D.popErrorScope().then(err => {
       err && console.error(`[TinyWebGPU] Pipeline creation failed:\n${err.message}`);

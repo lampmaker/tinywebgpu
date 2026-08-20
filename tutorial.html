@@ -251,8 +251,8 @@ const G = await WEBGPU().init();                             // compute only</co
           <script type="text/plain" class="code">
             const quad = G.makeQuad({
               frag: `
-                fn frag(uv: vec2<f32>) -> vec4<f32> {
-                  return vec4<f32>(uv.x, uv.y, 0.6, 1.0);
+                fn frag(uv: VEC2) -> VEC4 {
+                  return VEC4(uv.x, uv.y, 0.6, 1.0);
                 }`,
             });
 
@@ -274,8 +274,57 @@ const G = await WEBGPU().init();                             // compute only</co
       </div>
     </section>
 
+    <section class="step" id="defines">
+      <h2><span class="num">03</span>Defines — because WGSL doesn’t have them</h2>
+      <div class="body">
+        <p>You just wrote <code>vec4&lt;f32&gt;</code> three times in a four-line shader. Coming
+          from GLSL, where that was plain <code>vec4</code>, the angle brackets get old fast —
+          and WGSL has no <code>#define</code> to shorten them with. So TinyWebGPU provides one.
+          <code>G.defines</code> is a string of <code>TOKEN replacement</code> entries, separated
+          by commas or newlines, and every shader you compile is expanded against it — whole
+          words only, longest token first, so <code>FLOAT</code> matches but
+          <code>myFLOATish</code> doesn’t:</p>
+        <pre class="static"><code>G.defines = `
+  FLOAT f32,  INT i32,  UINT u32
+  VEC2 vec2&lt;f32&gt;,  VEC3 vec3&lt;f32&gt;,  VEC4 vec4&lt;f32&gt;,  MAT4 mat4x4&lt;f32&gt;
+  PI 3.141592653589793,  TAU 6.283185307179586`;</code></pre>
+        <p>It is an ordinary property: assign it once after <code>init()</code>, append your own
+          entries with <code>+=</code>, and note it is not limited to types — <code>PI</code> and
+          <code>TAU</code> above are constants, the way you would have used <code>#define</code>
+          in GLSL. The default is <code>''</code>, which rewrites nothing.</p>
+        <div class="demo">
+          <canvas></canvas>
+          <script type="text/plain" class="code">
+            // This page assigns the table above for you, so the tokens just work:
+            const quad = G.makeQuad({
+              frag: `
+                fn frag(uv: VEC2) -> VEC4 {
+                  let c = 0.5 + 0.5 * cos(TAU * uv.x + VEC3(0.0, 2.0, 4.0));
+                  return VEC4(c, 1.0);
+                }`,
+            });
+
+            quad.run();
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> add <code>G.defines += ', HALF 0.5';</code> above the
+            pipeline and use <code>HALF</code> in the shader. A WGSL error still points at the
+            expanded source, so nothing gets harder to debug.</div>
+        </div>
+        <p>Every box from here on uses these tokens. One caveat, a step early: the <em>schema</em>
+          type strings you are about to meet — <code>uniforms: { time: 'f32' }</code> — stay
+          spelled out. Those live on the JS side and are parsed, not compiled, so defines never
+          touch them.</p>
+      </div>
+    </section>
+
     <section class="step" id="time">
-      <h2><span class="num">03</span>Uniforms, and making it move</h2>
+      <h2><span class="num">04</span>Uniforms, and making it move</h2>
       <div class="body">
         <p>A shader with no inputs can only ever draw one image. Uniforms are the inputs, and this
           is where TinyWebGPU earns its keep. You declare them as a plain JS object:</p>
@@ -289,10 +338,10 @@ const G = await WEBGPU().init();                             // compute only</co
           <script type="text/plain" class="code">
             const quad = G.makeQuad({
               frag: `
-                fn frag(uv: vec2<f32>) -> vec4<f32> {
+                fn frag(uv: VEC2) -> VEC4 {
                   let c = 0.5 + 0.5 * cos(UB.time + uv.xyx * 4.0
-                                          + vec3<f32>(0.0, 2.0, 4.0));
-                  return vec4<f32>(c, 1.0);
+                                          + VEC3(0.0, 2.0, 4.0));
+                  return VEC4(c, 1.0);
                 }`,
               uniforms: { time: 'f32' },
             });
@@ -320,7 +369,7 @@ const G = await WEBGPU().init();                             // compute only</co
     </section>
 
     <section class="step" id="resolution">
-      <h2><span class="num">04</span>Resolution, aspect and the pointer</h2>
+      <h2><span class="num">05</span>Resolution, aspect and the pointer</h2>
       <div class="body">
         <p>Two things bite everyone once. First, a canvas has a CSS size and a backing-store size,
           and they are not the same on a phone — <code>G.resizeCanvas()</code> sets the second from
@@ -332,18 +381,18 @@ const G = await WEBGPU().init();                             // compute only</co
           <script type="text/plain" class="code">
             const quad = G.makeQuad({
               frag: `
-                fn frag(uv: vec2<f32>) -> vec4<f32> {
+                fn frag(uv: VEC2) -> VEC4 {
                   // square up the coordinates, so a circle stays a circle
                   let a = UB.res.x / UB.res.y;
-                  let p = vec2<f32>((uv.x - 0.5) * a, uv.y - 0.5);
-                  let m = vec2<f32>((UB.mouse.x - 0.5) * a, UB.mouse.y - 0.5);
+                  let p = VEC2((uv.x - 0.5) * a, uv.y - 0.5);
+                  let m = VEC2((UB.mouse.x - 0.5) * a, UB.mouse.y - 0.5);
 
                   let d = length(p - m);
                   let glow = 0.04 / (d + 0.03);
                   let rings = 0.5 + 0.5 * sin(d * 55.0 - UB.time * 3.0);
-                  let col = vec3<f32>(0.45, 0.72, 1.0) * glow
-                          + vec3<f32>(0.10, 0.13, 0.30) * rings;
-                  return vec4<f32>(col, 1.0);
+                  let col = VEC3(0.45, 0.72, 1.0) * glow
+                          + VEC3(0.10, 0.13, 0.30) * rings;
+                  return VEC4(col, 1.0);
                 }`,
               uniforms: { res: 'vec2<f32>', mouse: 'vec2<f32>', time: 'f32' },
             });
@@ -379,7 +428,7 @@ const G = await WEBGPU().init();                             // compute only</co
     </section>
 
     <section class="step" id="wgsl">
-      <h2><span class="num">05</span>It is just WGSL above your frag</h2>
+      <h2><span class="num">06</span>It is just WGSL above your frag</h2>
       <div class="body">
         <p>Anything you put in the <code>frag</code> string before the <code>frag</code> function is
           ordinary module-scope WGSL: helper functions, structs, constants. The library only
@@ -390,30 +439,30 @@ const G = await WEBGPU().init();                             // compute only</co
           <script type="text/plain" class="code">
             const quad = G.makeQuad({
               frag: `
-                fn sdBox(p: vec2<f32>, b: vec2<f32>) -> f32 {
+                fn sdBox(p: VEC2, b: VEC2) -> FLOAT {
                   let d = abs(p) - b;
-                  return length(max(d, vec2<f32>(0.0))) + min(max(d.x, d.y), 0.0);
+                  return length(max(d, VEC2(0.0))) + min(max(d.x, d.y), 0.0);
                 }
-                fn smin(a: f32, b: f32, k: f32) -> f32 {
+                fn smin(a: FLOAT, b: FLOAT, k: FLOAT) -> FLOAT {
                   let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
                   return mix(b, a, h) - k * h * (1.0 - h);
                 }
-                fn frag(uv: vec2<f32>) -> vec4<f32> {
+                fn frag(uv: VEC2) -> VEC4 {
                   let a = UB.res.x / UB.res.y;
-                  let p = vec2<f32>((uv.x - 0.5) * a, uv.y - 0.5) * 2.2;
+                  let p = VEC2((uv.x - 0.5) * a, uv.y - 0.5) * 2.2;
                   let t = UB.time;
 
-                  let ball = length(p - vec2<f32>(cos(t) * 0.5, sin(t) * 0.3)) - 0.22;
-                  let box = sdBox(p - vec2<f32>(cos(t * 0.7) * 0.5, 0.0),
-                                  vec2<f32>(0.22, 0.17));
+                  let ball = length(p - VEC2(cos(t) * 0.5, sin(t) * 0.3)) - 0.22;
+                  let box = sdBox(p - VEC2(cos(t * 0.7) * 0.5, 0.0),
+                                  VEC2(0.22, 0.17));
                   let d = smin(ball, box, 0.28);      // they melt into each other
 
                   let fill = smoothstep(0.02, -0.02, d);
                   let edge = smoothstep(0.02, 0.0, abs(d));
-                  let col = mix(vec3<f32>(0.05, 0.06, 0.11),
-                                vec3<f32>(0.16, 0.42, 0.95), fill)
-                          + vec3<f32>(0.85, 0.93, 1.0) * edge * 0.9;
-                  return vec4<f32>(col, 1.0);
+                  let col = mix(VEC3(0.05, 0.06, 0.11),
+                                VEC3(0.16, 0.42, 0.95), fill)
+                          + VEC3(0.85, 0.93, 1.0) * edge * 0.9;
+                  return VEC4(col, 1.0);
                 }`,
               uniforms: { res: 'vec2<f32>', time: 'f32' },
             });
@@ -437,7 +486,7 @@ const G = await WEBGPU().init();                             // compute only</co
       </div>
     </section>
     <section class="step" id="compute">
-      <h2><span class="num">06</span>Your first compute pass</h2>
+      <h2><span class="num">07</span>Your first compute pass</h2>
       <div class="body">
         <p>No canvas from here to step 8 — compute needs no pixels at all. A compute pipeline takes
           two strings: declarations, and the body of the entry point. The body gets
@@ -450,7 +499,7 @@ const G = await WEBGPU().init();                             // compute only</co
             const p = G.makeCompute('', `
                 let i = gid.x;
                 if (i >= UB.n) { return; }      // the last workgroup overhangs
-                data[i] = f32(i) * f32(i);
+                data[i] = FLOAT(i) * FLOAT(i);
               `,
               { n: 'u32' },                     // uniforms  -> UB
               { data: 'array<f32>' },           // resources -> storage buffer
@@ -481,7 +530,7 @@ const G = await WEBGPU().init();                             // compute only</co
     </section>
 
     <section class="step" id="dispatch">
-      <h2><span class="num">07</span>Sizing a dispatch — and counting primes</h2>
+      <h2><span class="num">08</span>Sizing a dispatch — and counting primes</h2>
       <div class="body">
         <p>A dispatch asks for a number of <em>workgroups</em>, not threads. With
           <code>wg: [64,1,1]</code>, one workgroup is 64 threads, so covering <code>N</code> items
@@ -556,7 +605,7 @@ const G = await WEBGPU().init();                             // compute only</co
     </section>
 
     <section class="step" id="buffers">
-      <h2><span class="num">08</span>A storage buffer, driving pixels</h2>
+      <h2><span class="num">09</span>A storage buffer, driving pixels</h2>
       <div class="body">
         <p>Compute and render are not separate worlds. A buffer written by a compute pass can be
           read by a fragment shader in the same frame, without ever going back to the CPU — the
@@ -572,7 +621,7 @@ const G = await WEBGPU().init();                             // compute only</co
                 let x = gid.x;
                 let y = gid.y;
                 if (x >= ${W}u || y >= ${H}u) { return; }
-                let p = vec2<f32>(f32(x) / ${W}.0, f32(y) / ${H}.0) * 6.0;
+                let p = VEC2(FLOAT(x) / ${W}.0, FLOAT(y) / ${H}.0) * 6.0;
                 heat[y * ${W}u + x] =
                     sin(p.x + UB.time) * cos(p.y * 1.3 - UB.time * 0.7)
                   + 0.5 * sin(length(p - 3.0) * 4.0 - UB.time * 2.0);
@@ -580,13 +629,13 @@ const G = await WEBGPU().init();                             // compute only</co
               { time: 'f32' }, { heat: 'array<f32>' }, { wg: [8, 8, 1] });
 
             const show = G.makeFrag(`
-                fn frag(uv: vec2<f32>) -> vec4<f32> {
-                  let x = min(u32(uv.x * ${W}.0), ${W}u - 1u);
-                  let y = min(u32(uv.y * ${H}.0), ${H}u - 1u);
+                fn frag(uv: VEC2) -> VEC4 {
+                  let x = min(UINT(uv.x * ${W}.0), ${W}u - 1u);
+                  let y = min(UINT(uv.y * ${H}.0), ${H}u - 1u);
                   let v = heat[y * ${W}u + x];
-                  let warm = vec3<f32>(1.0, 0.55, 0.25);
-                  let cool = vec3<f32>(0.20, 0.45, 1.0);
-                  return vec4<f32>(mix(cool, warm, v * 0.5 + 0.5) * abs(v), 1.0);
+                  let warm = VEC3(1.0, 0.55, 0.25);
+                  let cool = VEC3(0.20, 0.45, 1.0);
+                  return VEC4(mix(cool, warm, v * 0.5 + 0.5) * abs(v), 1.0);
                 }`,
               {}, { heat: 'array<f32>' });
 
@@ -617,7 +666,7 @@ const G = await WEBGPU().init();                             // compute only</co
     </section>
 
     <section class="step" id="pingpong">
-      <h2><span class="num">09</span>Ping-pong: state that lives on the GPU</h2>
+      <h2><span class="num">10</span>Ping-pong: state that lives on the GPU</h2>
       <div class="body">
         <p>A simulation needs to read the previous state while writing the next one, and it cannot
           do both to the same buffer — threads would race each other. The fix is two buffers,
@@ -628,11 +677,11 @@ const G = await WEBGPU().init();                             // compute only</co
             const W = 192, H = 108;
 
             const step = G.makeCompute(`
-                fn idx(x: i32, y: i32) -> u32 {          // wraps at the edges
-                  return u32(((y + ${H}) % ${H}) * ${W} + ((x + ${W}) % ${W}));
+                fn idx(x: INT, y: INT) -> UINT {          // wraps at the edges
+                  return UINT(((y + ${H}) % ${H}) * ${W} + ((x + ${W}) % ${W}));
                 }`, `
-                let x = i32(gid.x);
-                let y = i32(gid.y);
+                let x = INT(gid.x);
+                let y = INT(gid.y);
                 if (x >= ${W} || y >= ${H}) { return; }
                 var n = 0u;
                 for (var dy = -1; dy <= 1; dy++) {
@@ -647,11 +696,11 @@ const G = await WEBGPU().init();                             // compute only</co
               {}, { src: 'array<u32>', dst: 'array<u32>' }, { wg: [8, 8, 1] });
 
             const show = G.makeFrag(`
-                fn frag(uv: vec2<f32>) -> vec4<f32> {
-                  let x = min(u32(uv.x * ${W}.0), ${W}u - 1u);
-                  let y = min(u32((1.0 - uv.y) * ${H}.0), ${H}u - 1u);
-                  let c = f32(cells[y * ${W}u + x]);
-                  return vec4<f32>(c * 0.75, c * 0.95, c * 0.6 + 0.05, 1.0);
+                fn frag(uv: VEC2) -> VEC4 {
+                  let x = min(UINT(uv.x * ${W}.0), ${W}u - 1u);
+                  let y = min(UINT((1.0 - uv.y) * ${H}.0), ${H}u - 1u);
+                  let c = FLOAT(cells[y * ${W}u + x]);
+                  return VEC4(c * 0.75, c * 0.95, c * 0.6 + 0.05, 1.0);
                 }`,
               {}, { cells: 'array<u32>' });
 
@@ -685,7 +734,7 @@ const G = await WEBGPU().init();                             // compute only</co
       </div>
     </section>
     <section class="step" id="frames">
-      <h2><span class="num">10</span>One submit per frame</h2>
+      <h2><span class="num">11</span>One submit per frame</h2>
       <div class="body">
         <p>Every <code>dispatch()</code> and <code>drawTo()</code> so far submitted work to the
           queue on its own. That is fine for one or two, and wasteful for ten.
@@ -746,7 +795,7 @@ G.endFrame();</code></pre>
     </section>
 
     <section class="step" id="atomics">
-      <h2><span class="num">11</span>Atomics, reduction, and not stalling</h2>
+      <h2><span class="num">12</span>Atomics, reduction, and not stalling</h2>
       <div class="body">
         <p>Thousands of threads with one answer between them need an atomic. The trap is using it
           per item: every thread queueing on the same address serialises the very thing you
@@ -759,11 +808,11 @@ G.endFrame();</code></pre>
             const THREADS = 16384, K = 16, WG = 64, ROUNDS = 16;
 
             const darts = G.makeCompute(`
-                fn rnd(state: ptr<function, u32>) -> f32 {
+                fn rnd(state: ptr<function, UINT>) -> FLOAT {
                   let x = *state * 747796405u + 2891336453u;
                   *state = x;
                   let w = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
-                  return f32((w >> 22u) ^ w) * 2.3283064365386963e-10;
+                  return FLOAT((w >> 22u) ^ w) * 2.3283064365386963e-10;
                 }`, `
                 let i = gid.x;
                 if (i >= UB.threads) { return; }
@@ -824,7 +873,7 @@ G.endFrame();</code></pre>
     </section>
 
     <section class="step" id="indirect">
-      <h2><span class="num">12</span>Letting the GPU decide the workgroup count</h2>
+      <h2><span class="num">13</span>Letting the GPU decide the workgroup count</h2>
       <div class="body">
         <p>Sometimes the amount of work is only known once the GPU has done some. Reading a count
           back to the CPU just to size the next dispatch throws away the whole frame's pipelining.
@@ -907,7 +956,7 @@ G.endFrame();</code></pre>
     </section>
 
     <section class="step" id="textures">
-      <h2><span class="num">13</span>Textures and samplers</h2>
+      <h2><span class="num">14</span>Textures and samplers</h2>
       <div class="body">
         <p>Pixels get in two ways: raw bytes with <code>writeTexture</code>, or anything the
           browser can decode with <code>loadTexture</code> — a URL, a <code>Blob</code>, an
@@ -929,8 +978,8 @@ G.endFrame();</code></pre>
 
             const quad = G.makeQuad({
               frag: `
-                fn frag(uv: vec2<f32>) -> vec4<f32> {
-                  let p = uv * 2.0 + vec2<f32>(UB.time * 0.06, 0.0);
+                fn frag(uv: VEC2) -> VEC4 {
+                  let p = uv * 2.0 + VEC2(UB.time * 0.06, 0.0);
                   return textureSample(img, samp, p);
                 }`,
               uniforms: { time: 'f32' },
@@ -962,7 +1011,7 @@ G.endFrame();</code></pre>
       </div>
     </section>
     <section class="step" id="particles">
-      <h2><span class="num">14</span>Putting it together: particles</h2>
+      <h2><span class="num">15</span>Putting it together: particles</h2>
       <div class="body">
         <p>TinyWebGPU has no vertex buffers and no point sprites, which sounds like a problem for a
           particle system and turns out to be the interesting part. Instead of drawing N points,
@@ -990,8 +1039,8 @@ G.endFrame();</code></pre>
             // 2. simulate and splat — world space is x in [-aspect, aspect], y in [-1, 1]
             const sim = G.makeCompute(`
                 struct Particle {
-                  pos: vec2<f32>,
-                  vel: vec2<f32>,
+                  pos: VEC2,
+                  vel: VEC2,
                 }`, `
                 let i = gid.x;
                 if (i >= UB.n) { return; }
@@ -1001,19 +1050,19 @@ G.endFrame();</code></pre>
                 let r2 = dot(d, d) + 0.02;          // softened: no singularity
                 let inv = inverseSqrt(r2);
                 let dir = d * inv;
-                let tang = vec2<f32>(-dir.y, dir.x);  // perpendicular -> orbits
+                let tang = VEC2(-dir.y, dir.x);  // perpendicular -> orbits
 
                 p.vel += (dir * min(UB.pull / r2, 50.0) + tang * 1.5 * inv) * UB.dt;
                 p.vel *= 0.99;
                 p.pos += p.vel * UB.dt;
 
-                let lim = vec2<f32>(UB.aspect, 1.0);
+                let lim = VEC2(UB.aspect, 1.0);
                 p.pos = clamp(p.pos, -lim, lim);
                 parts[i] = p;
 
-                let uv = (p.pos / lim) * 0.5 + vec2<f32>(0.5);
-                let cx = min(u32(uv.x * f32(UB.gw)), UB.gw - 1u);
-                let cy = min(u32(uv.y * f32(UB.gh)), UB.gh - 1u);
+                let uv = (p.pos / lim) * 0.5 + VEC2(0.5);
+                let cx = min(UINT(uv.x * FLOAT(UB.gw)), UB.gw - 1u);
+                let cy = min(UINT(uv.y * FLOAT(UB.gh)), UB.gh - 1u);
                 atomicAdd(&grid[cy * UB.gw + cx], 1u);   // the whole "draw call"
               `,
               { attract: 'vec2<f32>', dt: 'f32', aspect: 'f32', pull: 'f32',
@@ -1023,13 +1072,13 @@ G.endFrame();</code></pre>
 
             // 3. colour the grid
             const draw = G.makeFrag(`
-                fn frag(uv: vec2<f32>) -> vec4<f32> {
-                  let cx = min(u32(uv.x * f32(UB.gw)), UB.gw - 1u);
-                  let cy = min(u32(uv.y * f32(UB.gh)), UB.gh - 1u);
-                  let b = 1.0 - exp(-f32(grid[cy * UB.gw + cx]) * 0.3);
-                  return vec4<f32>(mix(vec3<f32>(0.03, 0.02, 0.09),
-                                       vec3<f32>(1.0, 0.5, 0.42), b)
-                                   + vec3<f32>(b * b * b * 0.6), 1.0);
+                fn frag(uv: VEC2) -> VEC4 {
+                  let cx = min(UINT(uv.x * FLOAT(UB.gw)), UB.gw - 1u);
+                  let cy = min(UINT(uv.y * FLOAT(UB.gh)), UB.gh - 1u);
+                  let b = 1.0 - exp(-FLOAT(grid[cy * UB.gw + cx]) * 0.3);
+                  return VEC4(mix(VEC3(0.03, 0.02, 0.09),
+                                  VEC3(1.0, 0.5, 0.42), b)
+                              + VEC3(b * b * b * 0.6), 1.0);
                 }`,
               { gw: 'u32', gh: 'u32' }, { grid: 'array<u32>' });
 
@@ -1086,7 +1135,7 @@ G.endFrame();</code></pre>
     </section>
 
     <section class="step" id="edges">
-      <h2><span class="num">15</span>Sharp edges</h2>
+      <h2><span class="num">16</span>Sharp edges</h2>
       <div class="body">
         <p>The handful of things that will otherwise cost you an evening.</p>
         <h3>A resource your shader never mentions disappears</h3>
@@ -1116,7 +1165,7 @@ G.endFrame();</code></pre>
     </section>
 
     <section class="step" id="shipping">
-      <h2><span class="num">16</span>Shipping it</h2>
+      <h2><span class="num">17</span>Shipping it</h2>
       <div class="body">
         <p>There is no build step. Copy <code>tinywebgpu.js</code> next to your HTML and import it.
           Two things to know:</p>
@@ -1207,7 +1256,14 @@ G.endFrame();</code></pre>
     let G = 0, initPromise = 0;
     const configured = new WeakSet();
 
-    const getG = () => (initPromise ||= WEBGPU().init());
+    // The table step 03 promises — assigned before any box compiles, so every example can
+    // write FLOAT / VEC2 / PI instead of the angle-bracketed long forms.
+    const DEFINES = `
+  FLOAT f32,  INT i32,  UINT u32
+  VEC2 vec2<f32>,  VEC3 vec3<f32>,  VEC4 vec4<f32>,  MAT4 mat4x4<f32>
+  PI 3.141592653589793,  TAU 6.283185307179586`;
+
+    const getG = () => (initPromise ||= WEBGPU().init().then(g => (g.defines = DEFINES, g)));
 
     const useCanvas = canvas => {
       if (!canvas) return;

@@ -30,9 +30,10 @@
 //   4. The F_* switches drop whole entry points — the config's `features` true/false map
 //      (plus --with / --without per run) says which stay; each entry carries a one-line
 //      description of what it guards.
-//   5. `shorthand` (a token table, wgsl_shorthand.js format) swaps the `const SHORTHAND = 0;`
-//      seam in the source for an expander that runs on every shader at compile time, then
-//      compresses the library's own WGSL template literals to the same tokens.
+//   5. `shorthand` (a G.defines-format token table) seeds the `defines: ''` default —
+//      the core's always-on G.defines expander serves the tokens at compile time — then
+//      compresses the library's own WGSL template literals to the same tokens. The seeded
+//      tokens are load-bearing in such a build: append to G.defines, never replace it.
 //   6. `pack` rewrites repeated long WebGPU member names to bracket reads from one packed
 //      string table (`packNames` picks mnemonic codes, e.g. cRP for createRenderPipeline);
 //      `packComment` appends a legend naming them. Platform names can only be aliased this
@@ -278,12 +279,15 @@ for (const [sw, value] of Object.entries(switches)) {
   if (!value) source = source.replace(needle, `const ${sw} = false;`);
 }
 
-// ── shorthand: swap the SHORTHAND seam for an expander, remember the compressible tokens ──────
-// The table is a wgsl_shorthand.js-format string: entries split on commas/newlines, each
-// `TOKEN replacement`. The expander built from it runs in compileShader on every shader.
-// Only tokens whose replacement is a generic type (contains `<`) are also *compressed* out of
-// the library's own WGSL below — bare words like `f32` appear in regexes and messages too, and
-// rewriting those would corrupt them; the expander still serves them for the piece's WGSL.
+// ── shorthand: seed the G.defines default, remember the compressible tokens ──────────────────
+// The table is a G.defines-format string: entries split on commas/newlines, each
+// `TOKEN replacement`. The expander lives in the core now (G.defines, always on); building a
+// table in just replaces the `defines: ''` default with it, normalized to one comma-joined
+// string. Only tokens whose replacement is a generic type (contains `<`) are also *compressed*
+// out of the library's own WGSL below — bare words like `f32` appear in regexes and messages
+// too, and rewriting those would corrupt them; the runtime expander still serves them for the
+// piece's WGSL. The seeded tokens are load-bearing: the library's own shaders need them at
+// compile time, so a piece must append to G.defines (`+=`), never replace it.
 let compressTokens = [];
 if (config.shorthand) {
   const map = {};
@@ -291,10 +295,9 @@ if (config.shorthand) {
     const m = /^(\S+)\s+(.+)/.exec(e.trim());
     if (m) map[m[1]] = m[2];
   }
-  const keys = Object.keys(map).sort((a, b) => b.length - a.length);
-  replaceOnce('const SHORTHAND = 0;',
-    `const SHORTHAND = s => s.replace(/\\b(?:${keys.map(escapeRe).join('|')})\\b/g, t => (${JSON.stringify(map)})[t]);`,
-    'The SHORTHAND seam moved or changed shape');
+  replaceOnce(`defines: '',`,
+    `defines: ${JSON.stringify(Object.entries(map).map(([t, r]) => `${t} ${r}`).join(','))},`,
+    'The defines seam moved or changed shape');
   compressTokens = Object.entries(map).filter(([, v]) => v.includes('<'))
     .sort((a, b) => b[1].length - a[1].length);
 }
@@ -367,6 +370,26 @@ if (dupes.length || undocumented.length) {
 
 let packed = code;
 
+// ── export shape: no intermediate alias ───────────────────────────────────────────────────────
+// esbuild's minifier lowers `export let WEBGPU = () => {…}` to `let yt=()=>{…};export{yt as
+// WEBGPU};` (and the --iife rewrite above to `let yt=…;globalThis.WEBGPU=yt;`). The alias name
+// spends ~11 bytes to say nothing — splice it out so the artifact exports the factory directly,
+// the way the source spells it. The rewritten opening is also the anchor the name-table pack
+// below hangs its declaration on, which keeps $a/$b inside the factory instead of module scope.
+const OPEN = iife ? 'globalThis.WEBGPU=()=>{' : 'export let WEBGPU=()=>{';
+if (!packed.includes(OPEN)) {
+  const alias = packed.match(iife ? /globalThis\.WEBGPU=([A-Za-z_$][\w$]*);?/ : /export\{([A-Za-z_$][\w$]*) as WEBGPU\};?/);
+  const decl = alias && new RegExp(`\\b(?:let|var) ${escapeRe(alias[1])}=\\(\\)=>\\{`);
+  // The alias must appear exactly twice — declaration and export/assignment — or the splice
+  // would orphan a reference. Fail loudly rather than ship a broken artifact.
+  const uses = alias ? (packed.match(new RegExp(`\\b${escapeRe(alias[1])}\\b`, 'g')) ?? []).length : 0;
+  if (!alias || uses !== 2 || !decl.test(packed)) {
+    console.error(`build-min: could not rewrite the WEBGPU export to \`${OPEN}\` — the minified export changed shape.`);
+    process.exit(1);
+  }
+  packed = packed.replace(alias[0], '').replace(decl, OPEN);
+}
+
 // ── shorthand compression: the library's own WGSL uses the short tokens too ──────────────────
 // Template-literal text only — schema type strings and error messages are quoted strings and
 // stay long-form (schema types are parsed, not compiled, so the expander never sees them).
@@ -376,13 +399,13 @@ if (compressTokens.length) {
     for (const [token, long] of compressTokens) s = s.replaceAll(long, token);
     return s;
   });
-  console.log(`  shorthand: ${compressTokens.length} token(s) compressed (-${before - packed.length}B strings, +expander)`);
+  console.log(`  shorthand: ${compressTokens.length} token(s) compressed (-${before - packed.length}B strings, +table)`);
 }
 
 // ── name-table compression ────────────────────────────────────────────────────────────────────
 // Rewrites repeated long WebGPU member names to bracket reads from one packed string table:
 // `.beginComputePass(` becomes `[$a](` with `beginComputePass` spelled once in a `let[$a,…]=
-// "…".split(",")` prelude. Raw bytes only — gzip would deduplicate the names anyway, but the
+// "…".split(",")` declaration at the top of the factory body. Raw bytes only — gzip would deduplicate the names anyway, but the
 // inline/on-chain builds this exists for never gzip. A name is rewritten only when *every*
 // occurrence in the output is a member access — one appearance as an object key or inside a
 // string disqualifies it, so the rewrite can never change an API contract.
@@ -413,7 +436,9 @@ if (pack) {
       id = undefined;
     }
     if (!id) { if (!ids.length) continue; id = ids[0]; }
-    const total = packed.split(name).length - 1;
+    // \b-bounded on both sides: a plain substring count would see `dispatchWorkgroups` inside
+    // `dispatchWorkgroupsIndirect` and wrongly disqualify it as a non-member occurrence.
+    const total = (packed.match(new RegExp(`\\b${escapeRe(name)}\\b`, 'g')) ?? []).length;
     const uses = [...packed.matchAll(new RegExp(`(\\?\\.|\\.)${name}\\b`, 'g'))];
     if (total === 0 || uses.length !== total) continue;   // key/string appearance → unsafe, skip
     // profit: each `.name` (1+len) → `[id]` (2+id.len); `?.name` → `?.[id]` costs 2 more.
@@ -427,9 +452,10 @@ if (pack) {
   }
   if (packTable.length) {
     const decl = `let[${packTable.map(t => t[1]).join(',')}]=${JSON.stringify(packTable.map(t => t[0]).join(','))}.split(",");`;
-    // keep the /*! banner */ first if present
-    const m = packed.match(/^\/\*![^]*?\*\/\n?/);
-    packed = m ? m[0] + decl + packed.slice(m[0].length) : decl + packed;
+    // The declaration opens the factory body — every use is inside it, and the export-shape
+    // rewrite above guarantees the anchor — so the ids never touch module/global scope.
+    const at = packed.indexOf(OPEN) + OPEN.length;
+    packed = packed.slice(0, at) + decl + packed.slice(at);
     console.log(`  name-table: ${packTable.length} names packed (${prePack - packed.length >= 0 ? '-' : '+'}${Math.abs(prePack - packed.length)}B)`);
   }
 }

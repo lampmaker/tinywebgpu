@@ -4,9 +4,6 @@
 // CLI flags override this file per run: --out=, --with=, --without=, --iife,
 // --pack / --no-pack, --no-banner.
 
-// Imported so the `shorthand` option below is one edit away; unused while it stays ''.
-import { SHORT_TOKENS } from './wgsl_shorthand.js';
-
 // The rename table: short codes for the library's *own* API names, applied with `--rename` (or
 // `rename: true` below). The build then truly renames them — `p.setResources(...)` becomes
 // `p.sR(...)` — and a piece written against the renamed build saves the bytes on both sides of
@@ -30,6 +27,9 @@ export const RENAMES = {
   setUniforms: 'sU', setUniform: 'sU1', setResources: 'sR', uniforms: 'uS', resources: 'rS',
   drawTo: 'dT', dispatchIndirect: 'dI', bindTo: 'bT',
   uniformFields: 'uF', resourceFields: 'rF',
+  pipeline: 'pl', count: 'cN', instances: 'iN',
+  // the makeSchema result shape (wgsl / uniformBuffer / uniformWrite are its documented keys)
+  wgsl: 'wG', uniformBuffer: 'uB', uniformWrite: 'uW',
 };
 
 export default {
@@ -74,11 +74,12 @@ export default {
   // The legend comments (pack/renamed) then sit on their own lines below it.
   singleLine: true,
 
-  // Set to SHORT_TOKENS to build the one-letter WGSL tokens in: the library's own WGSL ships
-  // compressed (V for vec2<f32>, X for vec4<f32>, …) and the piece's WGSL may use the same
-  // tokens without shipping wgsl_shorthand.js. Measured on the bare build: the expander costs
-  // ~145 B and the library's own strings save 93 B, a ~50 B net loss — so this pays once your
-  // piece's WGSL uses ~7 or more tokens (each V saves 8 B). Schema type strings are never
-  // expanded; spell those out.
-  shorthand: '',   // e.g. SHORT_TOKENS
+  // A token table to seed G.defines with (same format: `TOKEN replacement` entries split on
+  // commas/newlines): the library's own WGSL ships compressed to any generic-type tokens in it,
+  // and the piece's WGSL may use every token without setting G.defines itself. The expander is
+  // always in the core — building the table in costs only the table string, offset by what the
+  // library's own strings save. The seeded tokens are load-bearing: the library's shaders need
+  // them at compile time, so the piece must append to G.defines (`+=`), never replace it.
+  // Schema type strings are never expanded; spell those out.
+  shorthand: '',   // e.g. 'F f32, V vec2<f32>, W vec3<f32>, X vec4<f32>'
 };

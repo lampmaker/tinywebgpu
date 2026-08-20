@@ -388,16 +388,18 @@ The aliasing pass took the stock build from 18.2 KB to 15.8 KB raw but only 7.4 
 gzipped. Chase raw size when you inline; if you are served over HTTP with compression, only
 dropping features moves the needle.
 
-## Optional WGSL shorthands
+## WGSL defines
 
-The core never rewrites your WGSL. If you want token expansion, opt in with the companion
-module (or plug in any `(src) => src` function):
+WGSL has no `#define`; `G.defines` is one. Assign a table and every shader the instance
+compiles is expanded against it (whole words, longest token first); the default `''` rewrites
+nothing:
 
 ```js
-import { shorthand, TOKENS, SHORT_TOKENS } from './wgsl_shorthand.js';
-G.pre = shorthand();                          // FLOAT INT VEC2/3/4 MAT4 PI TAU EPS
-G.pre = shorthand(TOKENS + SHORT_TOKENS);     // + one-letter aliases F V W X I U U3
-G.pre = shorthand('RAY MyRay\n' + TOKENS);    // custom additions
+G.defines = `
+  FLOAT f32,  INT i32,  UINT u32
+  VEC2 vec2<f32>,  VEC3 vec3<f32>,  VEC4 vec4<f32>,  MAT4 mat4x4<f32>
+  PI 3.141592653589793,  TAU 6.283185307179586`;
+G.defines += '\nRAY MyRay';              // custom additions
 ```
 
 A token table is just a string — entries separated by commas or newlines, each one

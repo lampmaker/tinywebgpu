@@ -140,8 +140,9 @@ export interface TinyWebGPU {
   features: GPUSupportedFeatures | 0;
   /** Extra per-uniform warnings (DIAG builds only). */
   debug: boolean;
-  /** Optional WGSL preprocessing hook, applied before hashing/compiling. Must be deterministic. */
-  pre: ((src: string) => string) | None;
+  /** WGSL's missing #define: one string of `TOKEN replacement` entries separated by commas or
+   *  newlines, expanded whole-word (longest token first) in every shader compiled. Default ''. */
+  defines: string;
   /** Called on device loss (not on G.destroy()). Set this to rebuild. */
   onDeviceLost: ((info: GPUDeviceLostInfo) => void) | None;
 
@@ -226,8 +227,8 @@ export interface TinyWebGPU {
     x?: number; y?: number; width?: number; height?: number; mipLevel?: number }): Promise<Blob>;
 
   // ─── Escape hatches ───────────────────────────────────────────────────────────────────────
-  /** Compile a WGSL module, applying G.pre. Diagnostics are reported asynchronously. */
-  makeShader(code: string, applyPre?: boolean): GPUShaderModule;
+  /** Compile a WGSL module, applying G.defines. Diagnostics are reported asynchronously. */
+  makeShader(code: string): GPUShaderModule;
   bindGroup(pipeline: GPURenderPipeline | GPUComputePipeline, groupIndex: number,
     entries: GPUBindGroupEntry[]): GPUBindGroup;
   /** The schema engine itself; the result carries `wgsl`, `uniformBuffer`, `uniformWrite`. */
