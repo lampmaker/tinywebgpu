@@ -42,7 +42,7 @@ export default {
   // Escape the newlines inside template literals after minifying, so the file is one line.
   singleLine: true,
 
-  // A wgsl_shorthand token table to seed G.defines with (see build.tiny.config.mjs for the
+  // A token table to seed G.defines with (see build.tiny.config.mjs for the
   // trade-off). Off for the stock build: assigning G.defines at runtime covers the same ground.
   shorthand: '',
 };

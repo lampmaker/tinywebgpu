@@ -6,7 +6,22 @@
 
 const ENTRY = process.env.TWG_ENTRY ?? '../tinywebgpu.js';
 const { WEBGPU } = await import(ENTRY);
-import { TOKENS, SHORT_TOKENS } from '../wgsl_shorthand.js';
+// The long-form and one-letter tables the defines tests exercise (the tutorial ships a
+// similar one — a table is just a string, so there is no module to import).
+const TOKENS = `
+FLOAT f32
+INT i32
+VEC2 vec2<f32>
+VEC3 vec3<f32>
+VEC4 vec4<f32>
+MAT4 mat4x4<f32>
+PI 3.14159265359
+`;
+const SHORT_TOKENS = `
+F f32, I i32, U u32
+V vec2<f32>, W vec3<f32>, X vec4<f32>
+U3 vec3<u32>
+`;
 
 let failures = 0;
 const check = (name, got, want) => {

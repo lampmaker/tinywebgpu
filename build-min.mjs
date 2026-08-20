@@ -30,7 +30,7 @@
 //   4. The F_* switches drop whole entry points — the config's `features` true/false map
 //      (plus --with / --without per run) says which stay; each entry carries a one-line
 //      description of what it guards.
-//   5. `shorthand` (a token table, wgsl_shorthand.js format) seeds the `defines: ''` default —
+//   5. `shorthand` (a G.defines-format token table) seeds the `defines: ''` default —
 //      the core's always-on G.defines expander serves the tokens at compile time — then
 //      compresses the library's own WGSL template literals to the same tokens. The seeded
 //      tokens are load-bearing in such a build: append to G.defines, never replace it.
@@ -280,7 +280,7 @@ for (const [sw, value] of Object.entries(switches)) {
 }
 
 // ── shorthand: seed the G.defines default, remember the compressible tokens ──────────────────
-// The table is a wgsl_shorthand.js-format string: entries split on commas/newlines, each
+// The table is a G.defines-format string: entries split on commas/newlines, each
 // `TOKEN replacement`. The expander lives in the core now (G.defines, always on); building a
 // table in just replaces the `defines: ''` default with it, normalized to one comma-joined
 // string. Only tokens whose replacement is a generic type (contains `<`) are also *compressed*

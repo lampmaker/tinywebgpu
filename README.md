@@ -392,12 +392,13 @@ dropping features moves the needle.
 
 WGSL has no `#define`; `G.defines` is one. Assign a table and every shader the instance
 compiles is expanded against it (whole words, longest token first); the default `''` rewrites
-nothing. Ready-made tables live in the companion module:
+nothing:
 
 ```js
-import { TOKENS, SHORT_TOKENS } from './wgsl_shorthand.js';
-G.defines = TOKENS;                      // FLOAT INT VEC2/3/4 MAT4 PI TAU EPS
-G.defines = TOKENS + SHORT_TOKENS;       // + one-letter aliases F V W X I U U3
+G.defines = `
+  FLOAT f32,  INT i32,  UINT u32
+  VEC2 vec2<f32>,  VEC3 vec3<f32>,  VEC4 vec4<f32>,  MAT4 mat4x4<f32>
+  PI 3.141592653589793,  TAU 6.283185307179586`;
 G.defines += '\nRAY MyRay';              // custom additions
 ```
 

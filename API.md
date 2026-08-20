@@ -318,21 +318,21 @@ WGSL has no `#define`; `G.defines` is one. It is **one string**: entries separat
 or newlines, each one `TOKEN replacement` (tokens are identifier-like words; replacements may
 contain spaces, not commas — they are the entry separator). Every shader the instance compiles
 is expanded against it — whole words only, longest token first. The default is `''`, which
-rewrites nothing. Composing tables is string concatenation; ready-made tables live in the
-optional module `wgsl_shorthand.js`:
+rewrites nothing. Composing tables is string concatenation:
 
 ```js
-import { TOKENS, SHORT_TOKENS } from './wgsl_shorthand.js';
-G.defines = TOKENS;                      // safe stock set: FLOAT INT VEC2/3/4 MAT4 PI TAU EPS
-G.defines = TOKENS + SHORT_TOKENS;       // + one-letter legacy aliases F V W X I U U3
+G.defines = `
+  FLOAT f32,  INT i32,  UINT u32
+  VEC2 vec2<f32>,  VEC3 vec3<f32>,  VEC4 vec4<f32>,  MAT4 mat4x4<f32>
+  PI 3.141592653589793,  TAU 6.283185307179586`;
 G.defines += '\nRAY MyRay';              // custom additions
 ```
 
 Schema *type strings* are never expanded (they are parsed, not compiled); spell those out.
 
-Careful with `SHORT_TOKENS`: one-letter aliases collide with natural identifier names, so
-`let F = fresnel(...)` becomes `let f32 = ...` and won't compile. They are opt-in for exactly
-that reason.
+Careful with one-letter tokens (`F f32`, `V vec2<f32>`, …): they collide with natural
+identifier names, so `let F = fresnel(...)` becomes `let f32 = ...` and won't compile. Prefer
+the longer spellings above.
 
 ## Builds
 

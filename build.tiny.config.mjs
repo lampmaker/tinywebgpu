@@ -4,9 +4,6 @@
 // CLI flags override this file per run: --out=, --with=, --without=, --iife,
 // --pack / --no-pack, --no-banner.
 
-// Imported so the `shorthand` option below is one edit away; unused while it stays ''.
-import { SHORT_TOKENS } from './wgsl_shorthand.js';
-
 // The rename table: short codes for the library's *own* API names, applied with `--rename` (or
 // `rename: true` below). The build then truly renames them — `p.setResources(...)` becomes
 // `p.sR(...)` — and a piece written against the renamed build saves the bytes on both sides of
@@ -77,12 +74,12 @@ export default {
   // The legend comments (pack/renamed) then sit on their own lines below it.
   singleLine: true,
 
-  // Set to SHORT_TOKENS to seed G.defines with the one-letter WGSL tokens: the library's own
-  // WGSL ships compressed (V for vec2<f32>, X for vec4<f32>, …) and the piece's WGSL may use
-  // the same tokens without shipping wgsl_shorthand.js. The expander is always in the core
-  // (G.defines) — building the table in costs only the table string itself, offset by what the
+  // A token table to seed G.defines with (same format: `TOKEN replacement` entries split on
+  // commas/newlines): the library's own WGSL ships compressed to any generic-type tokens in it,
+  // and the piece's WGSL may use every token without setting G.defines itself. The expander is
+  // always in the core — building the table in costs only the table string, offset by what the
   // library's own strings save. The seeded tokens are load-bearing: the library's shaders need
   // them at compile time, so the piece must append to G.defines (`+=`), never replace it.
   // Schema type strings are never expanded; spell those out.
-  shorthand: '',   // e.g. SHORT_TOKENS
+  shorthand: '',   // e.g. 'F f32, V vec2<f32>, W vec3<f32>, X vec4<f32>'
 };

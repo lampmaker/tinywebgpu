@@ -160,7 +160,7 @@ export let WEBGPU = () => {
     // WGSL's missing #define. One string of `TOKEN replacement` entries separated by commas or
     // newlines (tokens are identifier-like words; replacements may contain spaces, not commas),
     // expanded whole-word, longest token first, in every shader compiled. Empty = no rewriting.
-    // Compose by appending — `G.defines += '\nRAY MyRay'` — stock tables: wgsl_shorthand.js.
+    // Compose by appending — e.g. `G.defines = 'FLOAT f32, VEC2 vec2<f32>'` then `+=` more.
     // Schema *type strings* are never expanded; spell those out. show() and generateMipmaps
     // memoize their blit pipelines per defines value, so an entry never outlives its table.
     // Leave the line's shape intact — build-min.mjs's `shorthand` option matches it literally.

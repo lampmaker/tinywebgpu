@@ -11,8 +11,10 @@ The optional `G.pre` hook and the `shorthand()` expander module are folded into 
 mechanism. `G.defines` is a string of `TOKEN replacement` entries (commas or newlines between
 entries; replacements may contain spaces, not commas), expanded whole-word, longest token
 first, in every shader compiled — the default `''` rewrites nothing, so stock behavior is
-unchanged. Compose by appending: `G.defines += '\nRAY MyRay'`. `wgsl_shorthand.js` now exports
-only the ready-made tables (`G.defines = TOKENS`); its `shorthand()` function is gone.
+unchanged. Compose by appending: `G.defines += '\nRAY MyRay'`. `wgsl_shorthand.js` is gone —
+a table is just a string, so there is nothing left to import; the tutorial and API.md carry a
+ready-made one. The tutorial gained a step introducing defines, and its examples now write
+`FLOAT` / `VEC2` / `VEC4` instead of the angle-bracketed long forms.
 `show()`/`generateMipmaps` memoize per defines *value* (a string compare — previously `G.pre`
 was tracked by function identity). The build-time `shorthand` option now seeds the `defines`
 default instead of splicing in a second expander; in such a build the seeded tokens are
