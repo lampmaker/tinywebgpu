@@ -67,29 +67,44 @@
       { time: 'f32' }, { heights: 'array<f32>' }, { wg: [64, 1, 1] });
     shape.setResources({ heights });
 
-    // ── what to draw: filled facets, the triangle edges, or both ─────────────────────────────
-    // 'solid' — the surface. 'wire' — only the triangle edges. 'both' — the wireframe over the
-    // surface, which is also the one that hides the edges round the back: the facets are still
-    // filled, so they still write depth. In 'wire' the facet interiors are discarded, and a
-    // discarded fragment writes no depth, so you see the far side of the terrain through it.
+    // ── what to draw: facets, edges, both, or the bare vertices ──────────────────────────────
+    // 'solid'  — the surface.
+    // 'wire'   — the triangle edges only. The interiors are discarded, and a discarded fragment
+    //            writes no depth, so you see the far side of the terrain through it.
+    // 'both'   — the wireframe over the surface. This is the one that hides the edges round the
+    //            back, because the facets are still filled and still write depth.
+    // 'points' — the grid vertices, one pixel each. WebGPU's answer to gl.POINTS.
     //
-    // All three are one draw. The edges come out of the fragment shader, from a barycentric
-    // coordinate the rasteriser interpolates for free, so switching costs no second pipeline and
-    // no second pass. The other route is real line primitives — `topology: 'line-list'` with a
-    // table of edge endpoints instead of corners — which draws honest lines, but only ever 1 px
-    // wide (that is all WebGPU offers), and cannot fill and outline in the same pass.
+    // 'wire' and 'both' cost nothing extra: the edges come out of the *fragment* shader, from a
+    // barycentric coordinate the rasteriser interpolates for free, so they are the same single
+    // draw as 'solid'. The alternative is real line primitives — topology: 'line-list' with a
+    // table of edge endpoints instead of corners — which draws honest lines but only ever 1 px
+    // wide, and cannot fill and outline in one pass.
     //
-    // One caveat worth knowing before you flip it: at N = 128 the mesh is finer than the pixels,
-    // so the lines cover ~95% of the terrain and you get a white blob. Drop N to 24–32 as well
-    // and the wireframe reads properly — and in 'both' the surface hides the edges behind it.
-    const MODE = 'solid';                // ← 'solid' | 'wire' | 'both'
-    const WIRE_PX = 1.0;                 // ← line half-width, in pixels
+    // 'points' is different in kind, and worth knowing about before you reach for it to debug
+    // something. topology is a property of the *pipeline*, so points cannot share a draw with
+    // the surface the way the wireframe can — overlaying both means a second makeDraw over the
+    // same heights buffer, cheap but a second pipeline.
+    //
+    // And WebGPU has no gl_PointSize: a point is always exactly one pixel, with no knob. Worse
+    // than it sounds, because that is one *device* pixel — resizeCanvas sizes the backing store
+    // to the CSS box times devicePixelRatio, so on a 2x display each dot is half a CSS pixel.
+    // For dots you can actually see, draw a small quad per vertex instead (count: 6,
+    // instances: VN * VN, the corners nudged apart in clip space by a pixel size you pass in):
+    // the usual billboard, any size you like, and it can be round.
+    //
+    // One caveat before flipping any of them: at N = 128 the mesh is finer than the pixels, so
+    // the lines cover ~95% of the terrain and you get a white blob. Drop N to 24–32 as well and
+    // the wireframe reads properly.
+    const MODE = 'solid';                // ← 'solid' | 'wire' | 'both' | 'points'
+    const WIRE_PX = 1.0;                 // ← 'wire'/'both' line half-width, in pixels
 
     // ── the draw: one instance per cell, six vertices each ───────────────────────────────────
     const land = G.makeDraw({
       code: `
-        const EDGES     = ${MODE !== 'solid'};   // folded away at compile time when false
+        const EDGES     = ${MODE === 'wire' || MODE === 'both'};   // folded away when false
         const WIRE_ONLY  = ${MODE === 'wire'};
+        const POINTS     = ${MODE === 'points'};
 
         struct VSOut {
           @builtin(position) pos: vec4<f32>,
@@ -154,6 +169,10 @@
         }
 
         @fragment fn fs_main(vs: VSOut) -> @location(0) vec4<f32> {
+          // One dark pixel on a dark background is not a debugging aid, so the points ignore the
+          // terrain's shading and come out bright. Depth still hides the ones round the back.
+          if (POINTS) { return vec4<f32>(1.0, 0.83, 0.35, 1.0); }
+
           var col = vs.tint;
           if (EDGES) {
             let b = min(min(vs.bary.x, vs.bary.y), vs.bary.z);
@@ -173,6 +192,11 @@
       // a read_write storage binding, and read_write is what the schema emits by default. Drop
       // this line and pipeline creation fails with a bind-group layout error.
       readOnly:  ['heights'],
+      // Every mode but 'points' draws the same two triangles per cell; 'points' reads those six
+      // vertices as six points instead, so each grid vertex is drawn once per facet touching it.
+      // They land on the same pixel at the same depth, so the duplicates cost a little and show
+      // nothing — a per-vertex draw (count: 1, instances: VN * VN) would avoid them.
+      topology:  MODE === 'points' ? 'point-list' : 'triangle-list',
       // depth24plus, `less`, depth writes on. The texture is allocated to match the render
       // target and shared by every depth-enabled pipeline drawing into it, so a second pass
       // would depth-test against this one with nothing else to wire up.

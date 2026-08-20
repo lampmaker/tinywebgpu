@@ -31,11 +31,15 @@ stock tiny build (which strips the option) is flagged in the build picker. READM
 the painter's algorithm is "exact and free" for a height field is corrected to say what the
 ordering actually requires.
 
-The example also gained a `MODE` constant above its draw — `'solid'`, `'wire'` or `'both'`. The
-triangle edges are found in the *fragment* shader, from a barycentric coordinate the rasteriser
-interpolates, so all three modes are the same single draw with no second pipeline and no line
-primitives; `'both'` gets hidden-line removal from the depth buffer for free, since the filled
-facets still write depth while `'wire'` discards them. `WIRE_PX` sets the line width.
+The example also gained a `MODE` constant above its draw — `'solid'`, `'wire'`, `'both'` or
+`'points'`. The triangle edges are found in the *fragment* shader, from a barycentric coordinate
+the rasteriser interpolates, so `'wire'` and `'both'` are the same single draw as `'solid'`, with
+no second pipeline and no line primitives; `'both'` gets hidden-line removal from the depth
+buffer for free, since the filled facets still write depth while `'wire'` discards them.
+`WIRE_PX` sets the line width. `'points'` switches `topology` to `'point-list'` and draws the
+grid vertices bright, and the comment carries what a reader coming from WebGL needs: topology is
+a pipeline property, so points cannot share a draw with the surface, and there is no
+`gl_PointSize` — a point is one *device* pixel, so bigger dots mean a quad per vertex.
 
 **Changed — `G.pre` is gone; `G.defines` is WGSL's missing `#define`, built into the core**
 (min +149 B → 15.8 KB, tiny +140 B → 8.9 KB)
