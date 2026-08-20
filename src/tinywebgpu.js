@@ -129,6 +129,7 @@ I8,        8        ,8I  88888888888  88888888ba     ,ad8888ba,   88888888ba   8
  * Creates an independent toolkit instance. Call `await G.init(ctx?)` before anything else.
  */
 export let WEBGPU = () => {
+  let {min,max,round,clz32,ceil} = Math;
   // Hot state lives in closure variables rather than on the instance. Both forms cost the same to
   // read at runtime, but a closure variable is renamed to one character by the minifier while
   // `S.frame.encoder` survives verbatim. `device` keeps its public name through an accessor pair
@@ -700,8 +701,8 @@ ${main}
       resizeCanvas: (canvas = S.context?.canvas, opts = {}, fit, width, height, changed) => (
         canvas || err(8, MSG && 'resizeCanvas: no canvas — init() with a context, or pass one.'),
         // clientWidth is 0 on an OffscreenCanvas (no CSS box) — fall back to the current size.
-        fit = (css, cur) => Math.max(1, Math.min(D ? D.limits.maxTextureDimension2D : Infinity,
-          Math.round((css || cur) * (opts.dpr ?? globalThis.devicePixelRatio ?? 1)))),
+        fit = (css, cur) => max(1, min(D ? D.limits.maxTextureDimension2D : Infinity,
+          round((css || cur) * (opts.dpr ?? globalThis.devicePixelRatio ?? 1)))),
         width = fit(canvas.clientWidth, canvas.width), height = fit(canvas.clientHeight, canvas.height),
         changed = canvas.width !== width || canvas.height !== height,
         changed && (canvas.width = width, canvas.height = height),
@@ -925,7 +926,7 @@ ${main}
     while (ring._chunks[ring._i] && ring._chunks[ring._i]._buf.size - ring._chunks[ring._i]._at < need) ring._i++;
     let c = ring._chunks[ring._i];
     if (!c) {
-      let cap = Math.max(ring._cap, need);
+      let cap = max(ring._cap, need);
       c = ring._chunks[ring._i] = {
         _buf: mkBuf({ size: cap, usage: BUF_COPY_SRC | BUF_COPY_DST, ...(DIAG && { label: 'staging ring' }) }),
         _cpu: new U8(cap), _at: 0
@@ -977,7 +978,7 @@ ${main}
   });
   // Levels in a full mip chain, and the sampler + per-format blit pipelines generateMipmaps
   // reuses across calls.
-  let mipCount = (w, h) => 32 - Math.clz32(Math.max(w, h));
+  let mipCount = (w, h) => 32 - clz32(max(w, h));
   let mipSamp = 0, mipCache = F_MIPS ? new Map() : 0;
 
   // A stable small integer per GPU object, for building bind-group cache keys out of resource
@@ -1092,12 +1093,12 @@ ${main}
       let log = '\n=== WGSL Compile Log ===\n';
       for (let m of msgs) {
         let ln = m.lineNum, col = m.linePos, t = m.type.toUpperCase();
-        let s = Math.max(0, ln - 10), e = Math.min(L.length, ln + 4);
+        let s = max(0, ln - 10), e = min(L.length, ln + 4);
         log += `\n${t} @ ${ln}:${col} — ${m.message}\n\n`;
         for (let i = s; i < e; i++) {
           let n = i + 1;
           log += `${String(n).padStart(4, ' ')} | ${L[i]}\n`;
-          if (n === ln) log += `     | ${' '.repeat(Math.max(0, col - 1))}^\n`;
+          if (n === ln) log += `     | ${' '.repeat(max(0, col - 1))}^\n`;
         }
       }
       (msgs.some(m => m.type === 'error') ? console.error : console.warn)(log);
@@ -1150,7 +1151,7 @@ ${main}
           c = +m[1], r = +m[2],
           [c * (r === 3 ? 4 : r), r === 3 ? 4 : r, c * r, r === 3 ? 3 : 0])
         : err(12, MSG && `Unknown uniform type size for: ${t}`);
-    let alignTo = (n, a) => Math.ceil(n / a) * a;
+    let alignTo = (n, a) => ceil(n / a) * a;
 
     let uniformBuffer = 0, uniformWrite = () => 0, uniformWGSL = '';
     let uniformEntries = OE(uniforms);
@@ -1426,7 +1427,7 @@ ${structFields.join('\n')}
       dispatch,
       // dispatch() counts workgroups; run() counts the items you actually have and divides by the
       // workgroup size for you. Guard the tail with `if (gid.x >= n) { return; }` as usual.
-      run: (w = 1, h = 1, d = 1, encoder) => dispatch(...[w, h, d].map((n, i) => Math.ceil(n / wg[i])), encoder),
+      run: (w = 1, h = 1, d = 1, encoder) => dispatch(...[w, h, d].map((n, i) => ceil(n / wg[i])), encoder),
       // Takes a raw GPUBuffer or a handle — `.b ??` unwraps, as setResources does.
       dispatchIndirect: (buffer, byteOffset = 0, encoder) =>
         computePass(p => p.dispatchWorkgroupsIndirect(buffer.b ?? buffer, byteOffset), encoder),
