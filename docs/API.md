@@ -339,8 +339,8 @@ the longer spellings above.
 | File | Size | What it is |
 |---|---|---|
 | `src/tinywebgpu.js` | 91 KB | the source, with comments and every diagnostic. `main`/`exports` point here. |
-| `dist/tinywebgpu.min.js` | 15.7 KB (7.7 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
-| `dist/tinywebgpu.tiny.js` | 8.8 KB (4.6 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
+| `dist/tinywebgpu.min.js` | 15.5 KB (7.4 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
+| `dist/tinywebgpu.tiny.js` | 8.5 KB (4.5 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
 
 `build:tiny` drops `writeTexture`, `loadTexture`, `readTexture`, buffer `.r()`, `save`, `show`,
 the ping-pong helpers, `resizeCanvas`, depth support, mipmaps, the staging ring (in-frame writes become plain queue writes — last value per frame wins), the long aliases, and the named blend presets. Tiny builds also pack repeated WebGPU member names into a string table (`--no-pack` to skip). Keep any of them with
