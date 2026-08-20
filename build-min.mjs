@@ -367,6 +367,26 @@ if (dupes.length || undocumented.length) {
 
 let packed = code;
 
+// ── export shape: no intermediate alias ───────────────────────────────────────────────────────
+// esbuild's minifier lowers `export let WEBGPU = () => {…}` to `let yt=()=>{…};export{yt as
+// WEBGPU};` (and the --iife rewrite above to `let yt=…;globalThis.WEBGPU=yt;`). The alias name
+// spends ~11 bytes to say nothing — splice it out so the artifact exports the factory directly,
+// the way the source spells it. The rewritten opening is also the anchor the name-table pack
+// below hangs its declaration on, which keeps $a/$b inside the factory instead of module scope.
+const OPEN = iife ? 'globalThis.WEBGPU=()=>{' : 'export let WEBGPU=()=>{';
+if (!packed.includes(OPEN)) {
+  const alias = packed.match(iife ? /globalThis\.WEBGPU=([A-Za-z_$][\w$]*);?/ : /export\{([A-Za-z_$][\w$]*) as WEBGPU\};?/);
+  const decl = alias && new RegExp(`\\b(?:let|var) ${escapeRe(alias[1])}=\\(\\)=>\\{`);
+  // The alias must appear exactly twice — declaration and export/assignment — or the splice
+  // would orphan a reference. Fail loudly rather than ship a broken artifact.
+  const uses = alias ? (packed.match(new RegExp(`\\b${escapeRe(alias[1])}\\b`, 'g')) ?? []).length : 0;
+  if (!alias || uses !== 2 || !decl.test(packed)) {
+    console.error(`build-min: could not rewrite the WEBGPU export to \`${OPEN}\` — the minified export changed shape.`);
+    process.exit(1);
+  }
+  packed = packed.replace(alias[0], '').replace(decl, OPEN);
+}
+
 // ── shorthand compression: the library's own WGSL uses the short tokens too ──────────────────
 // Template-literal text only — schema type strings and error messages are quoted strings and
 // stay long-form (schema types are parsed, not compiled, so the expander never sees them).
@@ -382,7 +402,7 @@ if (compressTokens.length) {
 // ── name-table compression ────────────────────────────────────────────────────────────────────
 // Rewrites repeated long WebGPU member names to bracket reads from one packed string table:
 // `.beginComputePass(` becomes `[$a](` with `beginComputePass` spelled once in a `let[$a,…]=
-// "…".split(",")` prelude. Raw bytes only — gzip would deduplicate the names anyway, but the
+// "…".split(",")` declaration at the top of the factory body. Raw bytes only — gzip would deduplicate the names anyway, but the
 // inline/on-chain builds this exists for never gzip. A name is rewritten only when *every*
 // occurrence in the output is a member access — one appearance as an object key or inside a
 // string disqualifies it, so the rewrite can never change an API contract.
@@ -427,9 +447,10 @@ if (pack) {
   }
   if (packTable.length) {
     const decl = `let[${packTable.map(t => t[1]).join(',')}]=${JSON.stringify(packTable.map(t => t[0]).join(','))}.split(",");`;
-    // keep the /*! banner */ first if present
-    const m = packed.match(/^\/\*![^]*?\*\/\n?/);
-    packed = m ? m[0] + decl + packed.slice(m[0].length) : decl + packed;
+    // The declaration opens the factory body — every use is inside it, and the export-shape
+    // rewrite above guarantees the anchor — so the ids never touch module/global scope.
+    const at = packed.indexOf(OPEN) + OPEN.length;
+    packed = packed.slice(0, at) + decl + packed.slice(at);
     console.log(`  name-table: ${packTable.length} names packed (${prePack - packed.length >= 0 ? '-' : '+'}${Math.abs(prePack - packed.length)}B)`);
   }
 }
