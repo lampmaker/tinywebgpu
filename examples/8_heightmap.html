@@ -3,7 +3,8 @@
      A compute pass writes the heights; makeDraw reads them straight back out of the same
      storage buffer in the vertex shader — no vertex buffers, no CPU in between. Two triangles
      per grid cell, one instance per cell, and the face normal is derived in the vertex shader
-     so every facet gets a single flat colour.
+     so every facet gets a single flat colour. Hidden surfaces are makeDraw({depth: true}): one
+     option, and the depth texture is created, sized and pooled for you.
      Serve this folder (python3 -m http.server) and open /examples/8_heightmap.html -->
 <html lang="en">
 
@@ -32,7 +33,7 @@
   <pre id="out">running…</pre>
   <script type="module">
     import { loadLib } from '../libselect.js';
-    const { WEBGPU } = await loadLib(['read', 'resize'], '..');   // ?lib=min|tiny switches the build
+    const { WEBGPU } = await loadLib(['read', 'resize', 'depth'], '..');   // ?lib=min|tiny switches the build
 
     const N = 128;                       // cells per side
     const VN = N + 1;                    // grid vertices per side
@@ -83,15 +84,19 @@
 
         @vertex fn vs_main(@builtin(vertex_index) v: u32,
                            @builtin(instance_index) i: u32) -> VSOut {
-          // Cell order is back-to-front, so the painter's algorithm does the hiding — kept on
-          // purpose even though makeDraw({depth: true}) now exists, because for a height field
-          // with the camera outside its footprint it is exact and costs nothing. Walking the
-          // grid away-from-camera on both axes is that exact ordering, and UB.flip says which
-          // way that is for the current orbit angle.
-          var cx = i % ${N}u;
-          var cy = i / ${N}u;
-          if (UB.flip.x > 0.5) { cx = ${N - 1}u - cx; }
-          if (UB.flip.y > 0.5) { cy = ${N - 1}u - cy; }
+          // One instance per cell, in grid order — the depth option below resolves what hides
+          // what, per fragment, at any camera angle.
+          //
+          // This used to walk the grid back-to-front instead and let the painter's algorithm do
+          // the hiding. For a height field that is exact only while every cell lies on the same
+          // side of the camera along *both* grid axes; a single reversal flag per axis cannot
+          // express anything else. This orbit (R = 3.1, grid half-extent 1) passes inside the
+          // grid's own Z span for ±18.8° around two of the four cardinal angles, and there the
+          // two halves want opposite sweep directions — so twice a turn a few percent of the
+          // terrain was painted in the wrong order and showed through. A depth buffer has no
+          // such angle, which is the honest reason to reach for one.
+          let cx = i % ${N}u;
+          let cy = i / ${N}u;
 
           // Two triangles: (0,0)(1,0)(0,1) and (1,0)(1,1)(0,1).
           var OX = array<u32, 6>(0u, 1u, 0u,  1u, 1u, 0u);
@@ -122,12 +127,16 @@
         @fragment fn fs_main(vs: VSOut) -> @location(0) vec4<f32> {
           return vec4<f32>(vs.tint, 1.0);
         }`,
-      uniforms:  { mvp: 'mat4x4<f32>', flip: 'vec2<f32>' },
+      uniforms:  { mvp: 'mat4x4<f32>' },
       resources: { heights: 'array<f32>' },
       // The one thing worth remembering about makeDraw: WebGPU will not let the vertex stage see
       // a read_write storage binding, and read_write is what the schema emits by default. Drop
       // this line and pipeline creation fails with a bind-group layout error.
       readOnly:  ['heights'],
+      // depth24plus, `less`, depth writes on. The texture is allocated to match the render
+      // target and shared by every depth-enabled pipeline drawing into it, so a second pass
+      // would depth-test against this one with nothing else to wire up.
+      depth: true,
       count: 6, instances: N * N,
     });
     land.setResources({ heights });
@@ -184,6 +193,7 @@
     document.getElementById('out').textContent =
       `${N}×${N} cells · ${tris.toLocaleString()} triangles · ${(N * N).toLocaleString()} instances × 6 vertices\n`
       + `heights: one compute pass into a storage buffer, read back in the vertex stage (readOnly)\n`
+      + `hidden surfaces: depth: true — an auto-managed depth24plus buffer sized to the canvas\n`
       + `worst |GPU − CPU| height error: ${worst.toExponential(2)}  ${ok ? 'PASS' : 'FAIL'}`;
     window.__result = { ok, msg: `worst height error ${worst.toExponential(2)}` };
 
@@ -200,8 +210,7 @@
       G.beginFrame();                                  // reshape + draw, one submit
       shape.setUniforms({ time: t });
       shape.run(VN * VN);
-      // Cells nearest the camera must be drawn last, so walk away from it on both axes.
-      land.setUniforms({ mvp, flip: [eye[0] < 0 ? 1 : 0, eye[2] < 0 ? 1 : 0] });
+      land.setUniforms({ mvp });
       land.drawTo(undefined, [0.043, 0.051, 0.071, 1]);
       G.endFrame();
 

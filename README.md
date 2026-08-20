@@ -97,8 +97,8 @@ tiny build; pages that use features the tiny build drops say so instead of faili
 7. `7_particles.html` — a few hundred thousand particles with no vertex buffers: each one splats
    into a density grid with an `atomicAdd`, and a fullscreen pass colours it
 8. `8_heightmap.html` — a flat-shaded 3D terrain drawn with `makeDraw`: a compute pass writes the
-   heights, the vertex stage reads them back out of the same storage buffer, and each facet
-   derives its own normal
+   heights, the vertex stage reads them back out of the same storage buffer, each facet derives
+   its own normal, and `depth: true` does the hiding
 
 Every page is laid out for a phone as much as a desktop, and examples 5, 6, 7 and 8 check their own
 arithmetic on load rather than asking you to judge it by eye — example 6 holds its WGSL objectives
@@ -276,8 +276,13 @@ same target — so multi-pipeline scenes depth-test against each other with noth
 attachment. One footnote: the auto-managed texture needs to know the target's size, so draw to
 the canvas or pass a `GPUTexture` to `drawTo` (not a raw view), or supply `depth.texture`.
 
-You do not always need it: for a height field, drawing the cells back-to-front makes the
-painter's algorithm exact and free, which is what [example 8](examples/8_heightmap.html) does.
+You do not always need it — drawing back-to-front makes the painter's algorithm exact and free
+— but a fixed draw order is easier to over-trust than it looks.
+[Example 8](examples/8_heightmap.html) used to sweep its grid away from the camera on both axes,
+which is exact only while every cell lies on the same side of the camera along *both* of them.
+Its orbit passes inside the grid's own Z span twice a turn, and there the two halves want
+opposite sweep directions: a few percent of the terrain came out in the wrong order and showed
+through. It uses `depth: true` now, which has no such angle.
 
 [Example 8](examples/8_heightmap.html) is the whole pattern on one page: a compute pass writes a
 terrain into a storage buffer, the vertex stage reads it straight back out with `readOnly`, and

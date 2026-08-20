@@ -4,6 +4,21 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Fixed — example 8 hides surfaces with `depth: true`, not a back-to-front sweep**
+
+`8_heightmap.html` walked its grid away from the camera on both axes and let the painter's
+algorithm do the hiding. For a height field that ordering is exact only while every cell lies
+on the same side of the camera along *both* grid axes — a single reversal flag per axis cannot
+express anything else. The example's orbit (R = 3.1 around a grid of half-extent 1) passes
+inside the grid's own Z span for ±18.8° around two of the four cardinal angles, and there the
+two halves of the grid want opposite sweep directions: measured against a depth-buffer render,
+up to 6.6% of the terrain pixels came out in the wrong order, twice per revolution. The page
+now passes `depth: true` and drops the `flip` uniform with its two reversal branches; it is the
+first example to use the depth option, so it declares `depth` in its `loadLib` needs and the
+stock tiny build (which strips the option) is flagged in the build picker. README's claim that
+the painter's algorithm is "exact and free" for a height field is corrected to say what the
+ordering actually requires.
+
 **Changed — `G.pre` is gone; `G.defines` is WGSL's missing `#define`, built into the core**
 (min +149 B → 15.8 KB, tiny +140 B → 8.9 KB)
 
