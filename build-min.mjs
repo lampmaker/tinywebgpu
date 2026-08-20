@@ -30,9 +30,10 @@
 //   4. The F_* switches drop whole entry points — the config's `features` true/false map
 //      (plus --with / --without per run) says which stay; each entry carries a one-line
 //      description of what it guards.
-//   5. `shorthand` (a token table, wgsl_shorthand.js format) swaps the `const SHORTHAND = 0;`
-//      seam in the source for an expander that runs on every shader at compile time, then
-//      compresses the library's own WGSL template literals to the same tokens.
+//   5. `shorthand` (a token table, wgsl_shorthand.js format) seeds the `defines: ''` default —
+//      the core's always-on G.defines expander serves the tokens at compile time — then
+//      compresses the library's own WGSL template literals to the same tokens. The seeded
+//      tokens are load-bearing in such a build: append to G.defines, never replace it.
 //   6. `pack` rewrites repeated long WebGPU member names to bracket reads from one packed
 //      string table (`packNames` picks mnemonic codes, e.g. cRP for createRenderPipeline);
 //      `packComment` appends a legend naming them. Platform names can only be aliased this
@@ -278,12 +279,15 @@ for (const [sw, value] of Object.entries(switches)) {
   if (!value) source = source.replace(needle, `const ${sw} = false;`);
 }
 
-// ── shorthand: swap the SHORTHAND seam for an expander, remember the compressible tokens ──────
+// ── shorthand: seed the G.defines default, remember the compressible tokens ──────────────────
 // The table is a wgsl_shorthand.js-format string: entries split on commas/newlines, each
-// `TOKEN replacement`. The expander built from it runs in compileShader on every shader.
-// Only tokens whose replacement is a generic type (contains `<`) are also *compressed* out of
-// the library's own WGSL below — bare words like `f32` appear in regexes and messages too, and
-// rewriting those would corrupt them; the expander still serves them for the piece's WGSL.
+// `TOKEN replacement`. The expander lives in the core now (G.defines, always on); building a
+// table in just replaces the `defines: ''` default with it, normalized to one comma-joined
+// string. Only tokens whose replacement is a generic type (contains `<`) are also *compressed*
+// out of the library's own WGSL below — bare words like `f32` appear in regexes and messages
+// too, and rewriting those would corrupt them; the runtime expander still serves them for the
+// piece's WGSL. The seeded tokens are load-bearing: the library's own shaders need them at
+// compile time, so a piece must append to G.defines (`+=`), never replace it.
 let compressTokens = [];
 if (config.shorthand) {
   const map = {};
@@ -291,10 +295,9 @@ if (config.shorthand) {
     const m = /^(\S+)\s+(.+)/.exec(e.trim());
     if (m) map[m[1]] = m[2];
   }
-  const keys = Object.keys(map).sort((a, b) => b.length - a.length);
-  replaceOnce('const SHORTHAND = 0;',
-    `const SHORTHAND = s => s.replace(/\\b(?:${keys.map(escapeRe).join('|')})\\b/g, t => (${JSON.stringify(map)})[t]);`,
-    'The SHORTHAND seam moved or changed shape');
+  replaceOnce(`defines: '',`,
+    `defines: ${JSON.stringify(Object.entries(map).map(([t, r]) => `${t} ${r}`).join(','))},`,
+    'The defines seam moved or changed shape');
   compressTokens = Object.entries(map).filter(([, v]) => v.includes('<'))
     .sort((a, b) => b[1].length - a[1].length);
 }
@@ -396,7 +399,7 @@ if (compressTokens.length) {
     for (const [token, long] of compressTokens) s = s.replaceAll(long, token);
     return s;
   });
-  console.log(`  shorthand: ${compressTokens.length} token(s) compressed (-${before - packed.length}B strings, +expander)`);
+  console.log(`  shorthand: ${compressTokens.length} token(s) compressed (-${before - packed.length}B strings, +table)`);
 }
 
 // ── name-table compression ────────────────────────────────────────────────────────────────────

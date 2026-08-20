@@ -77,11 +77,12 @@ export default {
   // The legend comments (pack/renamed) then sit on their own lines below it.
   singleLine: true,
 
-  // Set to SHORT_TOKENS to build the one-letter WGSL tokens in: the library's own WGSL ships
-  // compressed (V for vec2<f32>, X for vec4<f32>, …) and the piece's WGSL may use the same
-  // tokens without shipping wgsl_shorthand.js. Measured on the bare build: the expander costs
-  // ~145 B and the library's own strings save 93 B, a ~50 B net loss — so this pays once your
-  // piece's WGSL uses ~7 or more tokens (each V saves 8 B). Schema type strings are never
-  // expanded; spell those out.
+  // Set to SHORT_TOKENS to seed G.defines with the one-letter WGSL tokens: the library's own
+  // WGSL ships compressed (V for vec2<f32>, X for vec4<f32>, …) and the piece's WGSL may use
+  // the same tokens without shipping wgsl_shorthand.js. The expander is always in the core
+  // (G.defines) — building the table in costs only the table string itself, offset by what the
+  // library's own strings save. The seeded tokens are load-bearing: the library's shaders need
+  // them at compile time, so the piece must append to G.defines (`+=`), never replace it.
+  // Schema type strings are never expanded; spell those out.
   shorthand: '',   // e.g. SHORT_TOKENS
 };

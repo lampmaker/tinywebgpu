@@ -1,4 +1,4 @@
-// Regression tests for the uniform packer and the WGSL shorthand module.
+// Regression tests for the uniform packer and the G.defines WGSL expander.
 // Runs in plain node — the GPU device is stubbed, only the JS-side layout logic is tested.
 // Usage: node test/layout.test.mjs
 //        TWG_ENTRY=<path> node test/layout.test.mjs   ← run against another build
@@ -6,7 +6,7 @@
 
 const ENTRY = process.env.TWG_ENTRY ?? '../tinywebgpu.js';
 const { WEBGPU } = await import(ENTRY);
-import { shorthand, TOKENS, SHORT_TOKENS } from '../wgsl_shorthand.js';
+import { TOKENS, SHORT_TOKENS } from '../wgsl_shorthand.js';
 
 let failures = 0;
 const check = (name, got, want) => {
@@ -637,21 +637,29 @@ const layoutOf = uniforms => {
   if (realNav) Object.defineProperty(globalThis, 'navigator', realNav);
 }
 
-// --- wgsl_shorthand ---------------------------------------------------------
+// --- G.defines: WGSL's missing #define --------------------------------------
 {
-  const full = shorthand(TOKENS + SHORT_TOKENS);
-  check('shorthand expands long tokens', full('fn f(a: VEC3) -> FLOAT'), 'fn f(a: vec3<f32>) -> f32');
-  check('shorthand expands short tokens', full('var x: X = X(F(1), 2., 3., PI);'),
+  // Earlier blocks Object.assign their own createShaderModule stubs over S.device;
+  // this one captures the (expanded) source the compiler was handed.
+  let lastCode = null;
+  S.device.createShaderModule = ({ code }) => (lastCode = code, { getCompilationInfo: async () => ({ messages: [] }) });
+  const expand = src => (S.makeShader(src), lastCode);
+  S.defines = TOKENS + SHORT_TOKENS;
+  check('defines expands long tokens', expand('fn f(a: VEC3) -> FLOAT'), 'fn f(a: vec3<f32>) -> f32');
+  check('defines expands short tokens', expand('var x: X = X(F(1), 2., 3., PI);'),
     'var x: vec4<f32> = vec4<f32>(f32(1), 2., 3., 3.14159265359);');
-  check('U3 wins over U', full('var a: U3; var b: U;'), 'var a: vec3<u32>; var b: u32;');
-  check('identifiers untouched', full('let Fresnel = myF + PIx;'), 'let Fresnel = myF + PIx;');
-  const safe = shorthand();
-  check('default set leaves one-letter names alone', safe('let F = 1.0; let v: VEC2;'),
+  check('U3 wins over U', expand('var a: U3; var b: U;'), 'var a: vec3<u32>; var b: u32;');
+  check('identifiers untouched', expand('let Fresnel = myF + PIx;'), 'let Fresnel = myF + PIx;');
+  S.defines = TOKENS;
+  check('default set leaves one-letter names alone', expand('let F = 1.0; let v: VEC2;'),
     'let F = 1.0; let v: vec2<f32>;');
-  const custom = shorthand('RAY MyRayStruct\n' + TOKENS);
-  check('custom entries prepend as one string', custom('var r: RAY; var p: VEC2;'),
+  S.defines = 'RAY MyRayStruct\n' + TOKENS;
+  check('custom entries prepend as one string', expand('var r: RAY; var p: VEC2;'),
     'var r: MyRayStruct; var p: vec2<f32>;');
-  check('comma and newline separators both work', shorthand('A aa, B bb\nC cc')('A B C'), 'aa bb cc');
+  S.defines = 'A aa, B bb\nC cc';
+  check('comma and newline separators both work', expand('A B C'), 'aa bb cc');
+  S.defines = '';
+  check('empty defines rewrites nothing', expand('let PI = F;'), 'let PI = F;');
 }
 
 if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1); }

@@ -1,15 +1,13 @@
-// WGSL shorthand token expander — optional companion to tinywebgpu.js.
-// The core never rewrites user WGSL; opt in via the G.pre hook:
-//
-//   import { shorthand, TOKENS, SHORT_TOKENS } from './wgsl_shorthand.js';
-//   G.pre = shorthand();                          // the safe stock set (TOKENS)
-//   G.pre = shorthand(TOKENS + SHORT_TOKENS);     // + the one-letter aliases
-//   G.pre = shorthand('RAY MyRayStruct\n' + TOKENS);          // custom additions
-//   G.pre = s => shorthand()(myMacros(s));                    // compose freely
-//
+// Ready-made WGSL define tables — optional companion to tinywebgpu.js.
+// The core expands `G.defines` — WGSL's missing #define — in every shader it compiles.
 // A table is one string: entries separated by commas or newlines, each entry
-// `TOKEN replacement` — so replacements may contain spaces, but not commas.
-// The returned function is deterministic, as G.pre requires.
+// `TOKEN replacement` — so replacements may contain spaces, but not commas, and
+// composing tables is string concatenation:
+//
+//   import { TOKENS, SHORT_TOKENS } from './wgsl_shorthand.js';
+//   G.defines = TOKENS;                     // the safe stock set
+//   G.defines = TOKENS + SHORT_TOKENS;      // + the one-letter aliases
+//   G.defines += '\nRAY MyRayStruct';       // custom additions
 
 export let TOKENS = `
 FLOAT f32
@@ -30,16 +28,3 @@ F f32, I i32, U u32
 V vec2<f32>, W vec3<f32>, X vec4<f32>
 U3 vec3<u32>
 `;
-
-export let shorthand = (defs = TOKENS) => {
-  let map = {};
-  for (let e of defs.split(/[,\n]/)) {
-    let m = /^(\S+)\s+(.+)/.exec(e.trim());
-    if (m) map[m[1]] = m[2];
-  }
-  // longest token first so e.g. U3 wins over U
-  let keys = Object.keys(map).sort((a, b) => b.length - a.length)
-    .map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  let re = new RegExp(`\\b(?:${keys.join('|')})\\b`, 'g');
-  return src => src.replace(re, t => map[t]);
-};

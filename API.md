@@ -50,12 +50,11 @@ reporting is always on in the source build: errors and warnings are logged async
 a pretty source-window log, and a bad module also fails pipeline creation (reported through the
 validation scope), so nothing fails silently.
 
-### `G.pre = 0 | (src: string) => string` (default 0)
-Optional WGSL preprocessing hook, applied in `makeShader` before compiling. Any falsy
-value (the default is `0`) means user WGSL is never rewritten. `show()` and `generateMipmaps`
-memoize their blit pipelines per `pre` (compared by identity), so swap in a new function
-rather than mutating one they captured. See “WGSL preprocessing” below for the stock
-token expander.
+### `G.defines = ''` (string)
+WGSL's missing `#define`: a string of `TOKEN replacement` entries separated by commas or
+newlines, expanded in every shader compiled. Empty (the default) rewrites nothing. `show()`
+and `generateMipmaps` memoize their blit pipelines per `defines` value, so changing the table
+recompiles them on next use. See “WGSL defines” below for the format and the stock tables.
 
 ### `G.onDeviceLost = 0 | (info: GPUDeviceLostInfo) => void` (default 0)
 Called if the GPU device is lost (driver reset, context crash). The library always logs the
@@ -307,30 +306,29 @@ holding someone else's pipeline.
 
 ## Lower-level escape hatches
 
-`G.makeShader(code)` (compiles and returns the module synchronously; applies `G.pre`),
+`G.makeShader(code)` (compiles and returns the module synchronously; applies `G.defines`),
 `G.bindGroup(pipeline, groupIndex, entries)`,
 `G.makeSchema(uniforms, resources, opts?)` (the schema engine itself; its result carries `wgsl`,
 `uniformBuffer` and `uniformWrite`, plus `_`-prefixed internals the minified build renames).
 For anything lower than that, `G.device` is the raw `GPUDevice`.
 
-## WGSL preprocessing
+## WGSL defines
 
-The core does **no rewriting by default**. `G.pre` is an optional `(src) => src` hook applied
-before compiling. The token expander is a separate optional module
-`wgsl_shorthand.js`:
+WGSL has no `#define`; `G.defines` is one. It is **one string**: entries separated by commas
+or newlines, each one `TOKEN replacement` (tokens are identifier-like words; replacements may
+contain spaces, not commas — they are the entry separator). Every shader the instance compiles
+is expanded against it — whole words only, longest token first. The default is `''`, which
+rewrites nothing. Composing tables is string concatenation; ready-made tables live in the
+optional module `wgsl_shorthand.js`:
 
 ```js
-import { shorthand, TOKENS, SHORT_TOKENS } from './wgsl_shorthand.js';
-G.pre = shorthand();                          // safe stock set: FLOAT INT VEC2/3/4 MAT4 PI TAU EPS
-G.pre = shorthand(TOKENS + SHORT_TOKENS);     // + one-letter legacy aliases F V W X I U U3
-G.pre = shorthand('RAY MyRay\n' + TOKENS);    // custom additions
-G.pre = s => shorthand()(myMacros(s));        // compose freely
+import { TOKENS, SHORT_TOKENS } from './wgsl_shorthand.js';
+G.defines = TOKENS;                      // safe stock set: FLOAT INT VEC2/3/4 MAT4 PI TAU EPS
+G.defines = TOKENS + SHORT_TOKENS;       // + one-letter legacy aliases F V W X I U U3
+G.defines += '\nRAY MyRay';              // custom additions
 ```
 
-`shorthand(defs = TOKENS)` takes **one string**: entries separated by commas or newlines, each
-one `TOKEN replacement` (replacements may contain spaces, not commas — they are the entry
-separator). It compiles one word-boundary alternation regex (longest token wins) and returns a
-deterministic `src => src` function. Composing tables is string concatenation.
+Schema *type strings* are never expanded (they are parsed, not compiled); spell those out.
 
 Careful with `SHORT_TOKENS`: one-letter aliases collide with natural identifier names, so
 `let F = fresnel(...)` becomes `let f32 = ...` and won't compile. They are opt-in for exactly

@@ -4,6 +4,31 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Changed — `G.pre` is gone; `G.defines` is WGSL's missing `#define`, built into the core**
+(min +149 B → 15.8 KB, tiny +140 B → 8.9 KB)
+
+The optional `G.pre` hook and the `shorthand()` expander module are folded into one always-on
+mechanism. `G.defines` is a string of `TOKEN replacement` entries (commas or newlines between
+entries; replacements may contain spaces, not commas), expanded whole-word, longest token
+first, in every shader compiled — the default `''` rewrites nothing, so stock behavior is
+unchanged. Compose by appending: `G.defines += '\nRAY MyRay'`. `wgsl_shorthand.js` now exports
+only the ready-made tables (`G.defines = TOKENS`); its `shorthand()` function is gone.
+`show()`/`generateMipmaps` memoize per defines *value* (a string compare — previously `G.pre`
+was tracked by function identity). The build-time `shorthand` option now seeds the `defines`
+default instead of splicing in a second expander; in such a build the seeded tokens are
+load-bearing (the library's own WGSL ships compressed to them), so append to `G.defines`
+rather than replacing it.
+
+**Build — the artifacts export the factory directly, and shed a few more bytes**
+
+esbuild's `let yt=…;export{yt as WEBGPU}` alias is spliced out after minifying — the artifacts
+now read `export let WEBGPU=()=>{…}` (the `--iife` flavour assigns `globalThis.WEBGPU`
+directly). The name-table pack's `let[$a,…]` declaration moved inside the factory body, so
+nothing leaks into module or script scope. Three internal option keys that had missed the `_`
+prefix (`emitUniform`, `isCompute`, `targetNames`) now mangle away, the pack no longer
+miscounts `dispatchWorkgroups` inside `dispatchWorkgroupsIndirect`, and the opt-in RENAMES
+table gained `pipeline`, `count`, `instances`, `wgsl`, `uniformBuffer`, `uniformWrite`.
+
 **Changed — pipeline creation is synchronous; the shader and pipeline caches are gone**
 (min −626 B → 15.7 KB, tiny −592 B → 8.8 KB)
 
