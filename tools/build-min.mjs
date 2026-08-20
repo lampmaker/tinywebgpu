@@ -1,10 +1,10 @@
-// Builds the minified artifacts from tinywebgpu.js.
+// Builds the minified artifacts from src/tinywebgpu.js.
 //
-//   npm run build:min    → tinywebgpu.min.js    settings in build.min.config.mjs
-//   npm run build:tiny   → tinywebgpu.tiny.js   settings in build.tiny.config.mjs
+//   npm run build:min    → dist/tinywebgpu.min.js    settings in tools/build.min.config.mjs
+//   npm run build:tiny   → dist/tinywebgpu.tiny.js   settings in tools/build.tiny.config.mjs
 //
-// The *settings* of a build live in a config file, build.<name>.config.mjs — pick one with a
-// positional argument (`node build-min.mjs tiny`; default `min`) or point anywhere with
+// The *settings* of a build live in a config file, tools/build.<name>.config.mjs — pick one with
+// a positional argument (`node tools/build-min.mjs tiny`; default `min`) or point anywhere with
 // --config=path. What lives here is the *machinery*: the feature registry (FEATURES /
 // REQUIRES), the numbered-error table (ERRORS), and the transforms. CLI flags override the
 // chosen config per run: --out=, --with=, --without=, --iife, --pack / --no-pack, --no-banner.
@@ -49,23 +49,27 @@
 // a sentence; the numbers are listed in ERRORS below.
 //
 // Usage:
-//   node build-min.mjs                                  the stock build (build.min.config.mjs)
-//   node build-min.mjs tiny                              build.tiny.config.mjs
-//   node build-min.mjs tiny --with=show,blend            ...plus these features
-//   node build-min.mjs min --without=pingpong            ...minus one
-//   node build-min.mjs tiny --out=dist/twg.js            write somewhere else
-//   node build-min.mjs tiny --iife                       a plain <script>: globalThis.WEBGPU
-//   node build-min.mjs tiny --rename                     apply the config's RENAMES table
-//   node build-min.mjs tiny --rename=drawTo:dT,setResources:sR   exactly these renames
-//   node build-min.mjs --config=my.config.mjs            a config of your own
+//   node tools/build-min.mjs                                  the stock build (build.min.config.mjs)
+//   node tools/build-min.mjs tiny                              build.tiny.config.mjs
+//   node tools/build-min.mjs tiny --with=show,blend            ...plus these features
+//   node tools/build-min.mjs min --without=pingpong            ...minus one
+//   node tools/build-min.mjs tiny --out=twg.js                 write somewhere else
+//   node tools/build-min.mjs tiny --iife                       a plain <script>: globalThis.WEBGPU
+//   node tools/build-min.mjs tiny --rename                     apply the config's RENAMES table
+//   node tools/build-min.mjs tiny --rename=drawTo:dT,setResources:sR   exactly these renames
+//   node tools/build-min.mjs --config=my.config.mjs            a config of your own
 //   (--tiny is accepted as an alias for the tiny config.)
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, relative, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { transform } from 'esbuild';
 
-const SRC = 'tinywebgpu.js';
+// Repo paths are anchored to the root (the directory above this file), so a build behaves the
+// same whatever directory you launch it from. Only --config= and --out= follow your cwd.
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const SRC = resolve(ROOT, 'src/tinywebgpu.js');
+const rel = p => relative(process.cwd(), p) || p;
 
 // Switch name → what a config's `features` map (and --with/--without) calls it. `msg` is
 // listed so a tiny build can keep its error text; DIAG is not, because no build ships with it.
@@ -156,11 +160,13 @@ const args = process.argv.slice(2);
 const flag = name => args.find(a => a.startsWith(`--${name}=`))?.split('=').slice(1).join('=');
 const list = name => (flag(name) ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 
-// `node build-min.mjs tiny` picks build.tiny.config.mjs; --config=path wins; --tiny is the
+// `node tools/build-min.mjs tiny` picks build.tiny.config.mjs; --config=path wins; --tiny is the
 // legacy spelling of `tiny`; no argument means `min`.
 const name = args.find(a => !a.startsWith('--')) ?? (args.includes('--tiny') ? 'tiny' : 'min');
-const configPath = flag('config') ?? `build.${name}.config.mjs`;
-const config = (await import(pathToFileURL(resolve(configPath)).href)).default;
+const configPath = flag('config')
+  ? resolve(flag('config'))
+  : resolve(ROOT, 'tools', `build.${name}.config.mjs`);
+const config = (await import(pathToFileURL(configPath).href)).default;
 // `features` is a {name: true|false} map (the stock configs annotate each entry); a plain
 // array of names, meaning "these on, the rest off", is accepted too.
 const cfgFeatures = config.features ?? {};
@@ -169,7 +175,7 @@ const cfgOn = Array.isArray(cfgFeatures) ? cfgFeatures : cfgNames.filter(f => cf
 
 const unknown = [...cfgNames, ...list('with'), ...list('without')].filter(f => !(f in FEATURES));
 if (unknown.length) {
-  console.error(`build-min: unknown feature ${unknown.map(f => `'${f}'`).join(', ')} (${configPath} / flags).`);
+  console.error(`build-min: unknown feature ${unknown.map(f => `'${f}'`).join(', ')} (${rel(configPath)} / flags).`);
   console.error(`Known: ${Object.keys(FEATURES).join(', ')}.`);
   process.exit(1);
 }
@@ -186,7 +192,7 @@ for (const f of [...on]) for (const dep of REQUIRES[f] ?? []) {
 const switches = { DIAG: false };
 for (const [feature, sw] of Object.entries(FEATURES)) switches[sw] = on.has(feature);
 
-const OUT = flag('out') ?? config.out;
+const OUT = flag('out') ? resolve(flag('out')) : resolve(ROOT, config.out);
 const iife = args.includes('--iife') || (config.iife && !args.includes('--no-iife'));
 const pack = args.includes('--pack') || (config.pack && !args.includes('--no-pack'));
 const banner = config.banner !== false && !args.includes('--no-banner');
@@ -254,14 +260,14 @@ const mapTemplateText = (code, fn) => {
 const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // ── flip the switches ─────────────────────────────────────────────────────────────────────────
-const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+const pkg = JSON.parse(await readFile(resolve(ROOT, 'package.json'), 'utf8'));
 let source = await readFile(SRC, 'utf8');
 
 const replaceOnce = (needle, replacement, why) => {
   const hits = source.split(needle).length - 1;
   // Fail loudly rather than silently shipping a build that still carries what the line guards.
   if (hits !== 1) {
-    console.error(`build-min: expected exactly one \`${needle}\` in ${SRC}, found ${hits}.`);
+    console.error(`build-min: expected exactly one \`${needle}\` in ${rel(SRC)}, found ${hits}.`);
     console.error(`${why} — fix the anchor before releasing.`);
     process.exit(1);
   }
@@ -272,7 +278,7 @@ for (const [sw, value] of Object.entries(switches)) {
   const needle = `const ${sw} = true;`;
   const hits = source.split(needle).length - 1;
   if (hits !== 1) {
-    console.error(`build-min: expected exactly one \`${needle}\` in ${SRC}, found ${hits}.`);
+    console.error(`build-min: expected exactly one \`${needle}\` in ${rel(SRC)}, found ${hits}.`);
     console.error('A switch declaration moved or changed shape — fix the anchor before releasing.');
     process.exit(1);
   }
@@ -353,7 +359,7 @@ const guards = [
 ];
 for (const [what, re, shouldBeGone] of guards) {
   if (shouldBeGone && re.test(code)) {
-    console.error(`build-min: ${what} survived into ${OUT} — the strip did not work.`);
+    console.error(`build-min: ${what} survived into ${rel(OUT)} — the strip did not work.`);
     process.exit(1);
   }
 }
@@ -491,7 +497,7 @@ if (renameEntries.length) {
 // The transforms above edit minified output textually — prove the result still parses before
 // shipping it. (The real behavioral guard is the test suite, which runs against the artifacts.)
 await transform(packed, { loader: 'js' }).catch(e => {
-  console.error(`build-min: ${OUT} no longer parses after post-processing:\n${e.message}`);
+  console.error(`build-min: ${rel(OUT)} no longer parses after post-processing:\n${e.message}`);
   process.exit(1);
 });
 
@@ -500,5 +506,5 @@ await writeFile(OUT, packed);
 
 const kb = n => (n / 1024).toFixed(1) + ' KB';
 const dropped = Object.keys(FEATURES).filter(f => !on.has(f));
-console.log(`${OUT}  ${kb(Buffer.byteLength(packed))}  (from ${kb(Buffer.byteLength(await readFile(SRC, 'utf8')))})`
+console.log(`${rel(OUT)}  ${kb(Buffer.byteLength(packed))}  (from ${kb(Buffer.byteLength(await readFile(SRC, 'utf8')))})`
   + (dropped.length ? `\n  without: ${dropped.join(', ')}` : ''));

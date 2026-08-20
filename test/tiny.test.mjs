@@ -6,7 +6,7 @@
 // a feature guard drawn one line too wide would take a chunk of makePipeline with it and the
 // suite would otherwise never notice.
 //
-// Usage: node build-min.mjs --tiny --out=test/.tiny.js && TWG_ENTRY=./.tiny.js node test/tiny.test.mjs
+// Usage: node tools/build-min.mjs --tiny --out=test/.tiny.js && TWG_ENTRY=./.tiny.js node test/tiny.test.mjs
 
 const ENTRY = process.env.TWG_ENTRY ?? './.tiny.js';
 const { WEBGPU } = await import(ENTRY);

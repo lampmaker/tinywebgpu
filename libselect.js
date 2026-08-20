@@ -1,4 +1,4 @@
-// Build picker shared by the demo pages (index.html, tutorial.html, examples/*).
+// Build picker shared by the demo pages (index.html, docs/tutorial.html, examples/*).
 //
 // The library ships three ways — the readable source, the minified build, and the tiny build
 // with the optional entry points removed. Every demo page reads `?lib=full|min|tiny` and imports
@@ -9,13 +9,13 @@
 // say "not in this build" instead of dying on a TypeError.
 
 export const BUILDS = {
-  full: { file: 'tinywebgpu.js',      note: 'readable source — all features, warnings on' },
-  min:  { file: 'tinywebgpu.min.js',  note: 'minified — all features, console-free' },
-  tiny: { file: 'tinywebgpu.tiny.js', note: 'minified — optional entry points removed, numbered errors' },
+  full: { file: 'src/tinywebgpu.js',       note: 'readable source — all features, warnings on' },
+  min:  { file: 'dist/tinywebgpu.min.js',  note: 'minified — all features, console-free' },
+  tiny: { file: 'dist/tinywebgpu.tiny.js', note: 'minified — optional entry points removed, numbered errors' },
 };
 
 // What the stock tiny build (`npm run build:tiny`, no --with) leaves out, keyed by the feature
-// names build-min.mjs uses, with the text a reader of a demo page should see.
+// names tools/build-min.mjs uses, with the text a reader of a demo page should see.
 export const TINY_DROPS = {
   read:     'GPU→CPU readback (buf.r(), readTexture)',
   texio:    'writeTexture / loadTexture',
@@ -30,7 +30,7 @@ export const TINY_DROPS = {
 };
 
 // The tiny build also drops its error text (MSG=false): errors throw a number. This mirrors
-// ERRORS in build-min.mjs so the tutorial can translate them back.
+// ERRORS in tools/build-min.mjs so the tutorial can translate them back.
 export const TINY_ERRORS = {
   1: 'WebGPU not supported',
   2: 'No GPU adapter',
@@ -146,7 +146,7 @@ export const initPicker = (needs = []) => {
 };
 
 // One call for the example pages: draw the picker and import the chosen build.
-// `base` is the path from the page to the repo root (examples pass '..').
+// `base` is the path from the page to the repo root (pages one level down pass '..').
 export const loadLib = async (needs = [], base = '.') => {
   const lib = initPicker(needs);
   const { WEBGPU } = await import(`${base}/${BUILDS[lib].file}`);

@@ -1,18 +1,18 @@
 // Regression test for the `rename` build option in build-min.mjs.
 //
-// Runs against a tiny build with the RENAMES table from build.tiny.config.mjs applied, and
+// Runs against a tiny build with the RENAMES table from tools/build.tiny.config.mjs applied, and
 // asserts three things: the long API names are really gone, the short codes drive the same
 // behavior the other suites pin down under the long names, and the /*renamed:…*/ legend in the
 // output documents the whole table — the legend is the renamed build's API contract.
 //
-// Usage: node build-min.mjs tiny --with=msg --rename --out=test/.tiny-renamed.js &&
+// Usage: node tools/build-min.mjs tiny --with=msg --rename --out=test/.tiny-renamed.js &&
 //        TWG_ENTRY=./.tiny-renamed.js node test/rename.test.mjs
 
 import { readFile } from 'node:fs/promises';
 
 const ENTRY = process.env.TWG_ENTRY ?? './.tiny-renamed.js';
 const { WEBGPU } = await import(ENTRY);
-const { RENAMES } = await import('../build.tiny.config.mjs');
+const { RENAMES } = await import('../tools/build.tiny.config.mjs');
 
 let failures = 0;
 const check = (name, got, want) => {

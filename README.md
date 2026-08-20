@@ -73,7 +73,7 @@ work.dispatchIndirect(indirect.b, 0);   // no CPU round-trip
 
 ## Tutorial
 
-**[tutorial.html](https://lampmaker.github.io/tinywebgpu/tutorial.html)** is the guided path:
+**[the tutorial](https://lampmaker.github.io/tinywebgpu/docs/tutorial.html)** is the guided path:
 sixteen steps from one coloured pixel to a particle system, and every code box on the page is
 live — edit it and it recompiles against your GPU. It covers uniforms and the schema, compute and
 dispatch sizing, ping-pong buffers, the frame API, atomics and reduction, indirect dispatch,
@@ -285,7 +285,7 @@ each facet derives its own normal so the shading is flat.
 
 ## Minified build
 
-`tinywebgpu.min.js` — **15.7 KB** (7.7 KB gzipped), versus 91 KB for the source. Rebuild it with
+`dist/tinywebgpu.min.js` — **15.7 KB** (7.7 KB gzipped), versus 91 KB for the source. Rebuild it with
 `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
 
 It is a **production artifact and it is silent**: every `console` warning is stripped, and so are
@@ -294,7 +294,7 @@ validation error scopes, and the debug `label`s on every GPU object. Failures st
 their messages intact — you just get no diagnostics on the way there, and a bad resource surfaces
 as the driver's own bind-group error rather than a line naming the field.
 
-So: develop against `tinywebgpu.js`, switch to the minified file when you ship. `main` and
+So: develop against `src/tinywebgpu.js`, switch to the minified file when you ship. `main` and
 `exports` point at the readable source on purpose, so you never get the silent build by
 accident.
 
@@ -304,7 +304,7 @@ When the library has to be *inlined* — a single self-contained HTML file, an o
 artwork with a hard byte budget — 15.7 KB of it is still mostly features you are not using. A
 procedural piece renders from a shader and never touches image loading, readback, or PNG export.
 
-`npm run build:tiny` produces **`tinywebgpu.tiny.js` — 8.8 KB** (4.6 KB gzipped) by dropping
+`npm run build:tiny` produces **`dist/tinywebgpu.tiny.js` — 8.8 KB** (4.6 KB gzipped) by dropping
 every optional entry point, and adding `--iife --no-banner` gets a classic
 `<script>` that assigns `globalThis.WEBGPU` for the same size. Two of the dropped switches trade
 *behavior* rather than entry points, so know what you are giving up:
@@ -328,23 +328,23 @@ strings are escaped after minifying.
 A piece build can go further and **rename the library's own API** (`--rename`, or `rename: true`
 in the config): `setResources` becomes `sR`, `createStorageBuffer` becomes `cSB`, and your piece
 calls the short names — the bytes are saved in the library *and* in your inlined code, ~10 B per
-`setResources` call site. The table is `RENAMES` in `build.tiny.config.mjs`; the
+`setResources` call site. The table is `RENAMES` in `tools/build.tiny.config.mjs`; the
 `/*renamed:sR=setResources,…*/` legend at the end of the output is the renamed build's API
 contract (only names that survived the feature strip are listed). The stock artifacts keep the
 long names — the demos, tutorial and tests speak them. Platform names (`createRenderPipeline`,
 `createTexture`, …) can never be renamed — the browser owns those, which is exactly what the
-name-table pack is for — and `build-min.mjs` refuses them loudly, along with WebGPU dictionary
+name-table pack is for — and `tools/build-min.mjs` refuses them loudly, along with WebGPU dictionary
 keys like `format` or `buffer`.
 
-Each build's settings live in a config file — `build.min.config.mjs` / `build.tiny.config.mjs` —
-picked by name; the CLI flags override them per run:
+Each build's settings live in a config file — `tools/build.min.config.mjs` /
+`tools/build.tiny.config.mjs` — picked by name; the CLI flags override them per run:
 
 ```
 npm run build:tiny                                  everything optional removed
-node build-min.mjs tiny --with=show,blend           ...except these
-node build-min.mjs min --without=save,read,texio    start from the full build instead
-node build-min.mjs tiny --iife --no-banner --out=dist/twg.js
-node build-min.mjs --config=my.config.mjs           a config of your own
+node tools/build-min.mjs tiny --with=show,blend           ...except these
+node tools/build-min.mjs min --without=save,read,texio    start from the full build instead
+node tools/build-min.mjs tiny --iife --no-banner --out=twg.js
+node tools/build-min.mjs --config=my.config.mjs           a config of your own
 ```
 
 What each switch is worth, measured against the 15.7 KB build:
@@ -372,11 +372,11 @@ and their one-liners, buffers, textures, samplers, the frame API and frame-order
 
 **Errors in a tiny build.** Dropping `msg` (which the tiny config does) replaces every message
 with a number — `Error: 15` instead of `No resources bound. Call setResources({ … })`. The
-numbers are listed in the `ERRORS` table in `build-min.mjs`. Debug against `tinywebgpu.js` and
-build tiny last; if you want the sentences back, `node build-min.mjs tiny --with=msg`.
+numbers are listed in the `ERRORS` table in `tools/build-min.mjs`. Debug against `src/tinywebgpu.js` and
+build tiny last; if you want the sentences back, `node tools/build-min.mjs tiny --with=msg`.
 
 **How it works, and why it is a build switch and not an option.** The library is one file with a
-row of `const NAME = true;` declarations at the top. `build-min.mjs` rewrites the ones you named
+row of `const NAME = true;` declarations at the top. `tools/build-min.mjs` rewrites the ones you named
 to `false`, and esbuild's dead-code elimination removes everything they guard — the code is gone
 from the bundle, not merely unreachable. A runtime option could not do that: it would have to
 stay in the file to be read.
@@ -419,7 +419,7 @@ A token table is just a string — entries separated by commas or newlines, each
 | Textures | `createTexture(w, h, format?, usage \| {usage, mips}?)` · `createStorageTexture(w, h, format?)` · `generateMipmaps(tex)` · `createSampler(opts)` · `writeTexture(tex, data)` · `loadTexture(src, {mips?, …})` · `readTexture(tex, opts?)` |
 | Escape hatches | `makeShader` · `bindGroup` · `makeSchema` · `writeUniforms` · `device` (the raw `GPUDevice`) |
 
-Full reference: **[API.md](API.md)**. TypeScript declarations ship as `tinywebgpu.d.ts`
+Full reference: **[docs/API.md](docs/API.md)**. TypeScript declarations ship as `src/tinywebgpu.d.ts`
 (wired via `types`/`exports`), so editors autocomplete the whole surface with inline docs —
 no TypeScript build needed, and plain-JS users get it too through their editor.
 
@@ -448,6 +448,23 @@ no TypeScript build needed, and plain-JS users get it too through their editor.
   generated code.
 - **Buffer limits vary wildly across GPUs** (128 MB mobile … GBs desktop). Size buffers from
   `G.device.limits`. Device loss is reported via `G.onDeviceLost`; recovery is up to you.
+
+## Repo layout
+
+```
+src/        tinywebgpu.js — the library — and tinywebgpu.d.ts
+dist/       the built artifacts, committed so the demo pages can load them
+tools/      build-min.mjs, its two configs, and find-repeats.mjs
+docs/       the tutorial, API.md, CHANGELOG.md
+examples/   the eight demo pages
+test/       the test suite
+index.html  the demo index — the site's landing page
+libselect.js  the ?lib=full|min|tiny picker the pages share
+```
+
+To vendor the library, take `src/tinywebgpu.js` (or a file from `dist/`) and drop it next to your
+HTML — there is nothing else to fetch. The site is served straight from the repo root by GitHub
+Pages, which is why `index.html` and `.nojekyll` live there.
 
 ## Browser support
 
