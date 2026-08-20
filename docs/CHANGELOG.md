@@ -4,6 +4,18 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Added — tutorial step 16, "Your own vertex stage, and a depth buffer"**
+
+The tutorial stopped at compute and fullscreen passes; `makeDraw` lived only in a "where to go
+next" bullet. It is now a live step of its own between the particle system and *Sharp edges*
+(the two steps after it shift to 17 and 18): a flat-shaded height map, one compute pass writing
+the geometry a draw reads with no CPU in between, `count: 6, instances: N * N` for two triangles
+per grid cell, `@interpolate(flat)`, the `readOnly` rule as a callout because it is the one that
+bites, and `depth: true` — with a *Try* that deletes the depth line and watches the terrain fail
+for half of every rotation. The box spells its types with the step 03 defines (`VEC3`, `MAT4`,
+`array<UINT, 6>`, …) like every other box, and the tiny-build check learned the `depth` pattern,
+so the box says "not in tiny" instead of silently drawing without a depth buffer.
+
 **Fixed — example 8 hides surfaces with `depth: true`, not a back-to-front sweep**
 
 `8_heightmap.html` walked its grid away from the camera on both axes and let the painter's

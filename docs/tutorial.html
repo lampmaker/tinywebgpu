@@ -180,8 +180,9 @@
 
   <main>
     <h1>TinyWebGPU, step by step</h1>
-    <p class="lede">From one coloured pixel to a few hundred thousand particles. Every code box
-      below is live: edit it, press <b>Run</b>, and it recompiles against your actual GPU.</p>
+    <p class="lede">From one coloured pixel to a few hundred thousand particles and a 3D
+      terrain. Every code box below is live: edit it, press <b>Run</b>, and it recompiles against
+      your actual GPU.</p>
 
     <div id="unsupported">
       <strong>WebGPU isn’t available in this browser.</strong> The text still reads fine, but no
@@ -1160,8 +1161,173 @@ G.endFrame();</code></pre>
       </div>
     </section>
 
+    <section class="step" id="draw">
+      <h2><span class="num">16</span>Your own vertex stage, and a depth buffer</h2>
+      <div class="body">
+        <p>Every box so far has drawn a fullscreen quad. <code>G.makeDraw</code> is the one that
+          hands you the vertex stage: you write <code>@vertex fn vs_main</code> and
+          <code>@fragment fn fs_main</code> yourself, and the schema still generates
+          <code>UB</code> and the bindings exactly as it does for <code>makeFrag</code>. You keep
+          <code>drawTo</code> and the frame API.</p>
+        <p>There are still no vertex buffers. You get two numbers —
+          <code>@builtin(vertex_index)</code> and <code>@builtin(instance_index)</code> — and pull
+          whatever geometry you like out of a storage buffer. Which means a compute pass can write
+          the geometry a draw reads, with nothing uploaded and no CPU in between.</p>
+        <p>This one is a height map. <code>count: 6, instances: N * N</code> is two triangles per
+          grid cell, one instance per cell; the compute pass fills one height per grid vertex and
+          the vertex shader reads them straight back out of the same buffer. Each vertex rebuilds
+          its whole facet, so all three agree on the normal — that is what makes the shading flat
+          rather than smooth — and <code>@interpolate(flat)</code> tells the rasteriser not to
+          interpolate between three identical colours.</p>
+        <div class="warn">
+          <p style="margin:0"><b>The one that bites.</b> A buffer the <i>vertex</i> stage reads
+            must be named in <code>readOnly</code>. The schema binds storage buffers
+            <code>read_write</code> by default, and WebGPU will not make a <code>read_write</code>
+            binding visible to the vertex stage. Drop that line and pipeline creation fails with a
+            bind-group layout error.</p>
+        </div>
+        <div class="demo">
+          <canvas></canvas>
+          <script type="text/plain" class="code">
+            const N = 96, VN = N + 1, SIZE = 2.0;   // cells per side, grid vertices, world extent
+
+            // One f32 per grid vertex. The compute pass writes it read_write, the vertex stage
+            // reads it read-only: same GPUBuffer, two pipelines, two address spaces.
+            const heights = G.createStorageBuffer(VN * VN * 4);
+
+            const shape = G.makeCompute(`
+                fn terrain(p: VEC2, t: FLOAT) -> FLOAT {
+                  var h = 0.30 * sin(p.x * 3.0 + t * 0.6) * cos(p.y * 3.0 - t * 0.4);
+                  h += 0.15 * sin(p.x * 7.0 - t * 0.3) * sin(p.y * 6.0 + t * 0.5);
+                  let r = length(p);
+                  return h * exp(-r * r * 0.9);            // island falloff
+                }`, `
+                let i = gid.x;
+                if (i >= ${VN * VN}u) { return; }
+                let p = (VEC2(FLOAT(i % ${VN}u), FLOAT(i / ${VN}u)) / ${N}.0 - 0.5) * ${SIZE};
+                heights[i] = terrain(p, UB.time);
+              `,
+              { time: FLOAT }, { heights: 'array<f32>' }, { wg: [64, 1, 1] });
+            shape.setResources({ heights: heights.b });
+
+            const land = G.makeDraw({
+              code: `
+                struct VSOut {
+                  @builtin(position) pos: VEC4,
+                  @location(0) @interpolate(flat) tint: VEC3,
+                };
+
+                fn corner(vx: UINT, vy: UINT) -> VEC3 {
+                  let g = VEC2(FLOAT(vx), FLOAT(vy)) / ${N}.0 - 0.5;
+                  return VEC3(g.x * ${SIZE}, heights[vy * ${VN}u + vx], g.y * ${SIZE});
+                }
+
+                @vertex fn vs_main(@builtin(vertex_index) v: UINT,
+                                   @builtin(instance_index) i: UINT) -> VSOut {
+                  let cx = i % ${N}u;                       // which cell this instance is
+                  let cy = i / ${N}u;
+
+                  // Two triangles: (0,0)(1,0)(0,1) and (1,0)(1,1)(0,1).
+                  var OX = array<UINT, 6>(0u, 1u, 0u,  1u, 1u, 0u);
+                  var OY = array<UINT, 6>(0u, 0u, 1u,  0u, 1u, 1u);
+
+                  // Build the whole facet, then pick this vertex out of it — so all three
+                  // vertices compute the same normal, and the facet gets one flat colour.
+                  let t = (v / 3u) * 3u;
+                  let p0 = corner(cx + OX[t],      cy + OY[t]);
+                  let p1 = corner(cx + OX[t + 1u], cy + OY[t + 1u]);
+                  let p2 = corner(cx + OX[t + 2u], cy + OY[t + 2u]);
+                  let nrm = normalize(cross(p2 - p0, p1 - p0));
+
+                  var TRI = array<VEC3, 3>(p0, p1, p2);
+                  let p = TRI[v - t];
+
+                  let lam = 0.15 + 0.85 * max(dot(nrm, normalize(VEC3(0.45, 0.8, 0.35))), 0.0);
+                  let band = clamp(p.y * 2.4 + 0.45, 0.0, 1.0);
+                  let rock = mix(VEC3(0.16, 0.30, 0.22), VEC3(0.55, 0.47, 0.36), band);
+
+                  var o: VSOut;
+                  o.pos = UB.mvp * VEC4(p, 1.0);
+                  o.tint = mix(rock, VEC3(0.92, 0.94, 0.98), smoothstep(0.72, 0.95, band)) * lam;
+                  return o;
+                }
+
+                @fragment fn fs_main(vs: VSOut) -> @location(0) VEC4 {
+                  return VEC4(vs.tint, 1.0);
+                }`,
+              uniforms:  { mvp: MAT4 },
+              resources: { heights: 'array<f32>' },
+              readOnly:  ['heights'],   // without this, pipeline creation fails
+              depth:     true,          // the hidden-surface handling, entire
+              count: 6, instances: N * N,
+            });
+            land.setResources({ heights: heights.b });
+
+            // Ordinary 3D maths, nothing WebGPU about it except the convention: column-major,
+            // and clip-space z runs 0 (near) to 1 (far). This is perspective x lookAt-the-origin,
+            // multiplied out — example 8 spells both matrices in full if you want them separate.
+            const camera = (eye, aspect, fov = 0.9, near = 0.1, far = 100) => {
+              const unit = v => { const l = Math.hypot(...v); return v.map(c => c / l); };
+              const cross = (a, b) => [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]];
+              const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+              const z = unit(eye), x = unit(cross([0, 1, 0], z)), y = cross(z, x);
+              const f = 1 / Math.tan(fov / 2), d = 1 / (near - far), fa = far * d;
+              return new Float32Array([
+                f / aspect * x[0], f * y[0], fa * z[0], -z[0],
+                f / aspect * x[1], f * y[1], fa * z[1], -z[1],
+                f / aspect * x[2], f * y[2], fa * z[2], -z[2],
+                -f / aspect * dot(x, eye), -f * dot(y, eye), near * far * d - fa * dot(z, eye), dot(z, eye),
+              ]);
+            };
+
+            const loop = ms => {
+              const { width, height } = G.resizeCanvas(canvas);
+              const t = ms / 1000, a = t * 0.25;
+              const mvp = camera([Math.cos(a) * 3.1, 1.55, Math.sin(a) * 3.1], width / height);
+
+              G.beginFrame();                        // reshape and draw, one submit
+              shape.setUniforms({ time: t });
+              shape.run(VN * VN);
+              land.setUniforms({ mvp });
+              land.drawTo(undefined, [0.043, 0.051, 0.071, 1]);
+              G.endFrame();
+
+              requestAnimationFrame(loop);
+            };
+            requestAnimationFrame(loop);
+          </script>
+          <div class="bar">
+            <button class="run primary">Run</button>
+            <button class="reset">Reset</button>
+            <span class="status">idle</span>
+          </div>
+          <pre class="out"></pre>
+          <div class="try"><b>Try:</b> delete the <code>depth: true</code> line and watch a full
+            rotation. Half the orbit looks very nearly right — the cells happen to arrive in
+            roughly back-to-front order — and through the other half the ridges behind swallow
+            the peaks in front of them, snow cap and all. Nothing warns you; it just looks wrong
+            some of the time. Then put it back and raise <code>N</code> to 256: 131k triangles
+            from one number, because none of the geometry lives on the CPU.</div>
+        </div>
+        <p><code>depth: true</code> is the whole of the hidden-surface handling here:
+          <code>depth24plus</code>, compare <code>less</code>, depth writes on, and the depth
+          texture is created for you, sized to the render target and shared by every
+          depth-enabled pipeline drawing into it — so a second pass depth-tests against this one
+          with nothing to wire up. Override any field with
+          <code>depth: { format, compare, write, texture }</code>.</p>
+        <p>You can sometimes do without it: draw back-to-front and the painter&rsquo;s algorithm
+          gets the same picture for free. It is a tempting trade and easy to get subtly wrong.
+          <a href="../examples/8_heightmap.html">Example 8</a> used to sweep this grid away from
+          the camera on both axes, which is exact only while every cell lies on the same side of
+          the camera along <em>both</em> of them — and this orbit passes inside the grid&rsquo;s
+          own Z span twice a turn, where the two halves want opposite sweep directions. A few
+          percent of the terrain came out in the wrong order, roughly once a rotation, which is
+          just rare enough to look like a driver glitch. A depth buffer has no such angle.</p>
+      </div>
+    </section>
+
     <section class="step" id="edges">
-      <h2><span class="num">16</span>Sharp edges</h2>
+      <h2><span class="num">17</span>Sharp edges</h2>
       <div class="body">
         <p>The handful of things that will otherwise cost you an evening.</p>
         <h3>A resource your shader never mentions disappears</h3>
@@ -1191,7 +1357,7 @@ G.endFrame();</code></pre>
     </section>
 
     <section class="step" id="shipping">
-      <h2><span class="num">17</span>Shipping it</h2>
+      <h2><span class="num">18</span>Shipping it</h2>
       <div class="body">
         <p>There is no build step. Copy <code>tinywebgpu.js</code> next to your HTML and import it.
           Two things to know:</p>
@@ -1221,18 +1387,9 @@ G.endFrame();</code></pre>
           <li><a href="../examples/7_particles.html">Example 7</a> — the particle system with bouncing
             walls, a grid that follows the window, and up to 800k particles.</li>
           <li><a href="../examples/4_indirect.html">Example 4</a> — indirect dispatch on its own.</li>
-          <li><b>Your own vertex stage.</b> Everything above draws a fullscreen quad.
-            <code>G.makeDraw({ code, count, instances, topology })</code> is the same deal as
-            <code>makeCompute</code> — you write both <code>@vertex fn vs_main</code> and
-            <code>@fragment fn fs_main</code>, the schema still generates <code>UB</code> and the
-            bindings, and you keep <code>drawTo</code> and the frame API. There are no vertex
-            buffers: pull geometry out of a storage buffer with
-            <code>@builtin(instance_index)</code>, which means a compute pass can write the points
-            a draw then reads. One catch worth knowing before you hit it — a buffer the
-            <i>vertex</i> stage reads must be named in <code>readOnly</code>, because WebGPU
-            refuses to make a read-write storage binding visible to that stage.
-            <a href="../examples/8_heightmap.html">Example 8</a> is the whole pattern in one page:
-            a compute pass writes a terrain, the vertex stage reads it straight back out.</li>
+          <li><a href="../examples/8_heightmap.html">Example 8</a> — <a href="#draw">step 16</a>
+            at full size: 128&times;128 cells, a self-check that holds the GPU's heights against
+            the same arithmetic in JS, and both camera matrices spelled out separately.</li>
           <li><a href="https://github.com/lampmaker/tinywebgpu/blob/main/docs/API.md">API.md</a> — the
             complete surface, including the escape hatches for when the schema is not enough.</li>
         </ul>
@@ -1257,7 +1414,7 @@ G.endFrame();</code></pre>
     // resize their canvas or upload textures — features the stock tiny build drops — so under
     // tiny those boxes are skipped with a note instead of failing on a missing function.
     import { loadLib, explain, missing, TINY_DROPS } from '../libselect.js';
-    const { WEBGPU, lib } = await loadLib(['read', 'resize', 'texio'], '..');
+    const { WEBGPU, lib } = await loadLib(['read', 'resize', 'texio', 'depth'], '..');
 
     // What a box's code can use that the tiny build lacks. Checked against the live editor
     // content on every run, so deleting the offending line makes the box runnable again.
@@ -1269,6 +1426,7 @@ G.endFrame();</code></pre>
       [/pingPong|createPingPong/, 'pingpong'],
       [/G\.show\s*\(/, 'show'],
       [/G\.save\s*\(/, 'save'],
+      [/depth:\s*(true|\{)/, 'depth'],
     ];
     const needsOf = code => NEED_PATTERNS.filter(([re]) => re.test(code)).map(([, n]) => n);
 
