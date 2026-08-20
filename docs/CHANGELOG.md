@@ -4,6 +4,51 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Added — tutorial step 16, "Your own vertex stage, and a depth buffer"**
+
+The tutorial stopped at compute and fullscreen passes; `makeDraw` lived only in a "where to go
+next" bullet. It is now a live step of its own between the particle system and *Sharp edges*
+(the two steps after it shift to 17 and 18): a flat-shaded height map, one compute pass writing
+the geometry a draw reads with no CPU in between, `count: 6, instances: N * N` for two triangles
+per grid cell, `@interpolate(flat)`, the `readOnly` rule as a callout because it is the one that
+bites, and `depth: true` — with a *Try* that deletes the depth line and watches the terrain fail
+for half of every rotation. The box spells its types with the step 03 defines (`VEC3`, `MAT4`,
+`array<UINT, 6>`, …) like every other box, and the tiny-build check learned the `depth` pattern,
+so the box says "not in tiny" instead of silently drawing without a depth buffer.
+
+**Fixed — example 8 hides surfaces with `depth: true`, not a back-to-front sweep**
+
+`8_heightmap.html` walked its grid away from the camera on both axes and let the painter's
+algorithm do the hiding. For a height field that ordering is exact only while every cell lies
+on the same side of the camera along *both* grid axes — a single reversal flag per axis cannot
+express anything else. The example's orbit (R = 3.1 around a grid of half-extent 1) passes
+inside the grid's own Z span for ±18.8° around two of the four cardinal angles, and there the
+two halves of the grid want opposite sweep directions: measured against a depth-buffer render,
+up to 6.6% of the terrain pixels came out in the wrong order, twice per revolution. The page
+now passes `depth: true` and drops the `flip` uniform with its two reversal branches; it is the
+first example to use the depth option, so it declares `depth` in its `loadLib` needs and the
+stock tiny build (which strips the option) is flagged in the build picker. README's claim that
+the painter's algorithm is "exact and free" for a height field is corrected to say what the
+ordering actually requires.
+
+The example also gained a `MODE` constant above its draw, covering **all five WebGPU
+topologies** over one unchanged heights buffer: `'solid'` / `'wire'` / `'both'` (triangle-list),
+`'lines'` (line-list, three edges per cell), `'strip'` (triangle-strip, one strip per row),
+`'ribbons'` (line-strip, one polyline per grid row) and `'points'` (point-list). A small table
+maps each to its topology, vertex count, instance count and the four lines of WGSL that turn
+`(v, i)` into a grid point; everything else in the shader is shared.
+
+`'wire'` and `'both'` are not a topology: the edges come from a barycentric coordinate the
+rasteriser interpolates, found in the *fragment* shader, so they are the same single draw as
+`'solid'` — which is also the only way to fill and outline at once, since topology is a pipeline
+property. `'both'` gets hidden-line removal from the depth buffer for free, as the filled facets
+still write depth while `'wire'` discards them; `WIRE_PX` sets the line width. The comments carry
+what a reader coming from WebGL will otherwise assume wrong: there is no `lineWidth` and no
+`gl_PointSize`, and the one pixel you get is a *device* pixel, so visible marks mean a quad per
+vertex. `'strip'` is the vertex-count lesson — a third as many vertices as `'solid'`, paid for in
+flat shading, because sharing vertices leaves `@interpolate(flat)` only the provoking vertex and
+the facets stop matching the triangles.
+
 **Changed — `G.pre` is gone; `G.defines` is WGSL's missing `#define`, built into the core**
 (min +149 B → 15.8 KB, tiny +140 B → 8.9 KB)
 

@@ -3,7 +3,8 @@
      A compute pass writes the heights; makeDraw reads them straight back out of the same
      storage buffer in the vertex shader — no vertex buffers, no CPU in between. Two triangles
      per grid cell, one instance per cell, and the face normal is derived in the vertex shader
-     so every facet gets a single flat colour.
+     so every facet gets a single flat colour. Hidden surfaces are makeDraw({depth: true}): one
+     option, and the depth texture is created, sized and pooled for you.
      Serve this folder (python3 -m http.server) and open /examples/8_heightmap.html -->
 <html lang="en">
 
@@ -32,7 +33,7 @@
   <pre id="out">running…</pre>
   <script type="module">
     import { loadLib } from '../libselect.js';
-    const { WEBGPU } = await loadLib(['read', 'resize'], '..');   // ?lib=min|tiny switches the build
+    const { WEBGPU } = await loadLib(['read', 'resize', 'depth'], '..');   // ?lib=min|tiny switches the build
 
     const N = 128;                       // cells per side
     const VN = N + 1;                    // grid vertices per side
@@ -66,14 +67,128 @@
       { time: 'f32' }, { heights: 'array<f32>' }, { wg: [64, 1, 1] });
     shape.setResources({ heights });
 
-    // ── the draw: one instance per cell, six vertices each ───────────────────────────────────
+    // ── what to draw: every topology WebGPU has, over the same heights buffer ────────────────
+    // WebGPU has five primitive topologies and `topology` on makeDraw takes any of them. The
+    // geometry never moves: each mode only changes which grid points a vertex maps to, and how
+    // many vertices and instances the draw asks for.
+    //
+    //   'solid'   triangle-list   two triangles per cell            6 × N·N
+    //   'wire'    triangle-list   the same, edges found in the fragment shader, interiors gone
+    //   'both'    triangle-list   the same, edges drawn *over* the surface
+    //   'lines'   line-list       three edges per cell              6 × N·N
+    //   'strip'   triangle-strip  one strip per row of cells        2·VN × N
+    //   'ribbons' line-strip      one polyline per grid row         VN × VN
+    //   'points'  point-list      one point per grid vertex         1 × VN·VN
+    //
+    // Three things are worth knowing before you pick one:
+    //
+    // 'wire' and 'both' are not a topology at all. The edges come out of the *fragment* shader,
+    // from a barycentric coordinate the rasteriser interpolates for free, so they are the same
+    // single triangle-list draw as 'solid' — which is also why 'both' can fill and outline at
+    // once. 'lines' is the honest version with real line primitives, and it cannot: topology
+    // belongs to the pipeline, so surface-plus-outline there means a second makeDraw over the
+    // same buffer. Cheap — same heights, same readOnly — but a second pipeline.
+    //
+    // Lines and points are always exactly one pixel. WebGPU has no lineWidth and no
+    // gl_PointSize, and that is one *device* pixel: resizeCanvas sizes the backing store to the
+    // CSS box times devicePixelRatio, so on a 2× display a dot is half a CSS pixel. When you
+    // want marks you can see, draw a small quad per vertex instead (count: 6, corners nudged
+    // apart in clip space by a size you pass in) — the usual billboard, any size, and round if
+    // you like.
+    //
+    // The strips are where the vertex count goes. 'solid' sends six vertices per cell because
+    // every facet wants its own normal; 'strip' shares them along the row and sends a third as
+    // many. You pay for it in shading: with vertices shared between neighbouring triangles,
+    // @interpolate(flat) can only hand each triangle the value of its provoking vertex, so the
+    // facets stop lining up with the triangles. Compare 'solid' and 'strip' side by side — same
+    // surface, visibly different faceting. That trade is the whole reason strips exist.
+    //
+    // And at N = 128 the mesh is finer than the pixels, so any of the line modes cover ~95% of
+    // the terrain and give you a white blob. Drop N to 24–32 as well and they read properly.
+    const MODE = 'solid';        // ← 'solid' | 'wire' | 'both' | 'lines' | 'strip' | 'ribbons' | 'points'
+    const WIRE_PX = 1.0;         // ← 'wire'/'both' line half-width, in pixels
+
+    // topology, vertices per instance, instances — and the WGSL that turns (v, i) into a grid
+    // point. Everything below this table is shared by all seven.
+    const DRAW = {
+      solid:   ['triangle-list',  6,      N * N,   'cellTriangles'],
+      wire:    ['triangle-list',  6,      N * N,   'cellTriangles'],
+      both:    ['triangle-list',  6,      N * N,   'cellTriangles'],
+      lines:   ['line-list',      6,      N * N,   'cellEdges'],
+      strip:   ['triangle-strip', VN * 2, N,       'rowStrip'],
+      ribbons: ['line-strip',     VN,     VN,      'rowLine'],
+      points:  ['point-list',     1,      VN * VN, 'gridPoint'],
+    };
+    const [TOPOLOGY, COUNT, INSTANCES, LAYOUT] = DRAW[MODE];
+
+    // Each of these sets `p` (where this vertex goes), `nrm` (which facet lights it) and `bary`
+    // (only 'wire'/'both' read it; the rest hand back 1s, which means "not near any edge").
+    const LAYOUTS = {
+      cellTriangles: `
+          let cx = i % ${N}u;
+          let cy = i / ${N}u;
+          // Two triangles: (0,0)(1,0)(0,1) and (1,0)(1,1)(0,1).
+          var OX = array<u32, 6>(0u, 1u, 0u,  1u, 1u, 0u);
+          var OY = array<u32, 6>(0u, 0u, 1u,  0u, 1u, 1u);
+          let p = corner(cx + OX[v], cy + OY[v]);
+          let nrm = facet(cx, cy, v >= 3u);          // its own facet: flat shading, per triangle
+          var BARY = array<vec3<f32>, 3>(vec3<f32>(1.0, 0.0, 0.0),
+                                         vec3<f32>(0.0, 1.0, 0.0),
+                                         vec3<f32>(0.0, 0.0, 1.0));
+          let bary = BARY[v % 3u];`,
+
+      cellEdges: `
+          let cx = i % ${N}u;
+          let cy = i / ${N}u;
+          // Three edges per cell: bottom, left, and the diagonal the two triangles share. The
+          // cell to the right draws this one's right edge and the cell above draws its top, so
+          // nothing is drawn twice — at the cost of the grid's far border, which has no
+          // neighbour to draw it.
+          var EX = array<u32, 6>(0u, 1u,   0u, 0u,   1u, 0u);
+          var EY = array<u32, 6>(0u, 0u,   0u, 1u,   0u, 1u);
+          let p = corner(cx + EX[v], cy + EY[v]);
+          let nrm = facet(cx, cy, false);
+          let bary = vec3<f32>(1.0);`,
+
+      rowStrip: `
+          // A strip marches along x, alternating between this row and the next, so 2·VN
+          // vertices cover a whole row of cells and every vertex but the first two is the third
+          // corner of another triangle.
+          let gx = v / 2u;
+          let gy = i + (v & 1u);
+          let p = corner(gx, gy);
+          let nrm = facet(min(gx, ${N - 1}u), i, false);
+          let bary = vec3<f32>(1.0);`,
+
+      rowLine: `
+          // One polyline per grid row: VN points, VN of them.
+          let p = corner(v, i);
+          let nrm = facet(min(v, ${N - 1}u), min(i, ${N - 1}u), false);
+          let bary = vec3<f32>(1.0);`,
+
+      gridPoint: `
+          // One point per grid vertex — no cells involved, so the instance index *is* the vertex.
+          let gx = i % ${VN}u;
+          let gy = i / ${VN}u;
+          let p = corner(gx, gy);
+          let nrm = facet(min(gx, ${N - 1}u), min(gy, ${N - 1}u), false);
+          let bary = vec3<f32>(1.0);`,
+    };
+
+    // ── the draw ─────────────────────────────────────────────────────────────────────────────
     const land = G.makeDraw({
       code: `
+        const EDGES     = ${MODE === 'wire' || MODE === 'both'};   // folded away when false
+        const WIRE_ONLY = ${MODE === 'wire'};
+        const POINTS    = ${MODE === 'points'};
+
         struct VSOut {
           @builtin(position) pos: vec4<f32>,
           // flat: all three vertices of a facet compute the same value, and saying so keeps the
           // rasteriser from interpolating between three identical numbers.
           @location(0) @interpolate(flat) tint: vec3<f32>,
+          // This one *is* interpolated — that is the whole point. See fs_main.
+          @location(1) bary: vec3<f32>,
         };
 
         fn corner(vx: u32, vy: u32) -> vec3<f32> {
@@ -81,32 +196,30 @@
           return vec3<f32>(g.x * ${SIZE}, heights[vy * ${VN}u + vx], g.y * ${SIZE});
         }
 
+        // The normal of one of a cell's two triangles — lower is (0,0)(1,0)(0,1), upper is
+        // (1,0)(1,1)(0,1). Built whole here rather than per vertex, so all three vertices of a
+        // facet get the same answer: that is what makes this flat shading rather than smooth.
+        fn facet(cx: u32, cy: u32, upper: bool) -> vec3<f32> {
+          let c = corner(cx, cy + 1u);                                        // both share this
+          let a = select(corner(cx, cy),      corner(cx + 1u, cy),      upper);
+          let b = select(corner(cx + 1u, cy), corner(cx + 1u, cy + 1u), upper);
+          return normalize(cross(c - a, b - a));
+        }
+
         @vertex fn vs_main(@builtin(vertex_index) v: u32,
                            @builtin(instance_index) i: u32) -> VSOut {
-          // Cell order is back-to-front, so the painter's algorithm does the hiding — kept on
-          // purpose even though makeDraw({depth: true}) now exists, because for a height field
-          // with the camera outside its footprint it is exact and costs nothing. Walking the
-          // grid away-from-camera on both axes is that exact ordering, and UB.flip says which
-          // way that is for the current orbit angle.
-          var cx = i % ${N}u;
-          var cy = i / ${N}u;
-          if (UB.flip.x > 0.5) { cx = ${N - 1}u - cx; }
-          if (UB.flip.y > 0.5) { cy = ${N - 1}u - cy; }
-
-          // Two triangles: (0,0)(1,0)(0,1) and (1,0)(1,1)(0,1).
-          var OX = array<u32, 6>(0u, 1u, 0u,  1u, 1u, 0u);
-          var OY = array<u32, 6>(0u, 0u, 1u,  0u, 1u, 1u);
-
-          // Every vertex builds its whole facet, so all three agree on the normal — that is what
-          // makes this flat shading rather than smooth.
-          let t = (v / 3u) * 3u;
-          let p0 = corner(cx + OX[t],      cy + OY[t]);
-          let p1 = corner(cx + OX[t + 1u], cy + OY[t + 1u]);
-          let p2 = corner(cx + OX[t + 2u], cy + OY[t + 2u]);
-          let nrm = normalize(cross(p2 - p0, p1 - p0));
-
-          var TRI = array<vec3<f32>, 3>(p0, p1, p2);
-          let p = TRI[v - t];
+          // Instances go out in plain grid order — the depth option below resolves what hides
+          // what, per fragment, at any camera angle.
+          //
+          // This used to walk the grid back-to-front instead and let the painter's algorithm do
+          // the hiding. For a height field that is exact only while every cell lies on the same
+          // side of the camera along *both* grid axes; a single reversal flag per axis cannot
+          // express anything else. This orbit (R = 3.1, grid half-extent 1) passes inside the
+          // grid's own Z span for ±18.8° around two of the four cardinal angles, and there the
+          // two halves want opposite sweep directions — so twice a turn a few percent of the
+          // terrain was painted in the wrong order and showed through. A depth buffer has no
+          // such angle, which is the honest reason to reach for one.
+          ${LAYOUTS[LAYOUT]}
 
           let lam = 0.15 + 0.85 * max(dot(nrm, normalize(vec3<f32>(0.45, 0.8, 0.35))), 0.0);
           let band = clamp(p.y * 2.4 + 0.45, 0.0, 1.0);
@@ -116,19 +229,43 @@
           var o: VSOut;
           o.pos = UB.mvp * vec4<f32>(p, 1.0);
           o.tint = snow * lam;
+          // 1 at this vertex's own corner, 0 at the other two. Interpolated across the facet it
+          // becomes "how far along am I", and its smallest component is the distance to the
+          // nearest edge — which is what fs_main turns into a wireframe.
+          o.bary = bary;
           return o;
         }
 
         @fragment fn fs_main(vs: VSOut) -> @location(0) vec4<f32> {
-          return vec4<f32>(vs.tint, 1.0);
+          // One dark pixel on a dark background is not a debugging aid, so the points ignore the
+          // terrain's shading and come out bright. Depth still hides the ones round the back.
+          if (POINTS) { return vec4<f32>(1.0, 0.83, 0.35, 1.0); }
+
+          var col = vs.tint;
+          if (EDGES) {
+            let b = min(min(vs.bary.x, vs.bary.y), vs.bary.z);
+            // fwidth is how fast b changes from one pixel to the next, so b / fwidth(b) is the
+            // distance to the edge measured in *pixels* — which is what keeps the line the same
+            // width whether the facet faces you or is tilted almost edge-on.
+            let px = b / max(fwidth(b), 1e-6);
+            let line = 1.0 - smoothstep(0.0, ${WIRE_PX.toFixed(2)}, px);
+            if (WIRE_ONLY && line < 0.5) { discard; }
+            col = mix(col, vec3<f32>(0.75, 0.85, 1.0), line);
+          }
+          return vec4<f32>(col, 1.0);
         }`,
-      uniforms:  { mvp: 'mat4x4<f32>', flip: 'vec2<f32>' },
+      uniforms:  { mvp: 'mat4x4<f32>' },
       resources: { heights: 'array<f32>' },
       // The one thing worth remembering about makeDraw: WebGPU will not let the vertex stage see
       // a read_write storage binding, and read_write is what the schema emits by default. Drop
       // this line and pipeline creation fails with a bind-group layout error.
       readOnly:  ['heights'],
-      count: 6, instances: N * N,
+      topology:  TOPOLOGY,
+      // depth24plus, `less`, depth writes on. The texture is allocated to match the render
+      // target and shared by every depth-enabled pipeline drawing into it, so a second pass
+      // would depth-test against this one with nothing else to wire up.
+      depth: true,
+      count: COUNT, instances: INSTANCES,
     });
     land.setResources({ heights });
 
@@ -184,6 +321,7 @@
     document.getElementById('out').textContent =
       `${N}×${N} cells · ${tris.toLocaleString()} triangles · ${(N * N).toLocaleString()} instances × 6 vertices\n`
       + `heights: one compute pass into a storage buffer, read back in the vertex stage (readOnly)\n`
+      + `hidden surfaces: depth: true — an auto-managed depth24plus buffer sized to the canvas\n`
       + `worst |GPU − CPU| height error: ${worst.toExponential(2)}  ${ok ? 'PASS' : 'FAIL'}`;
     window.__result = { ok, msg: `worst height error ${worst.toExponential(2)}` };
 
@@ -200,8 +338,7 @@
       G.beginFrame();                                  // reshape + draw, one submit
       shape.setUniforms({ time: t });
       shape.run(VN * VN);
-      // Cells nearest the camera must be drawn last, so walk away from it on both axes.
-      land.setUniforms({ mvp, flip: [eye[0] < 0 ? 1 : 0, eye[2] < 0 ? 1 : 0] });
+      land.setUniforms({ mvp });
       land.drawTo(undefined, [0.043, 0.051, 0.071, 1]);
       G.endFrame();
 
