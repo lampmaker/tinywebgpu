@@ -1315,6 +1315,15 @@ G.endFrame();</code></pre>
           depth-enabled pipeline drawing into it — so a second pass depth-tests against this one
           with nothing to wire up. Override any field with
           <code>depth: { format, compare, write, texture }</code>.</p>
+        <p>One more knob comes free with <code>makeDraw</code>: <code>topology</code>, which
+          defaults to <code>'triangle-list'</code>. Setting it to <code>'line-list'</code> reads
+          the same six vertices as three lines rather than two triangles — though that particular
+          pairing is not the wireframe you want here, since a cell&rsquo;s vertical edges never
+          come up in it. For a wireframe you generally keep the triangles and find the edges in
+          the <em>fragment</em> shader instead, from a barycentric coordinate the rasteriser
+          interpolates for you: one draw gives you the surface, the edges, or both at once.
+          <a href="../examples/8_heightmap.html">Example 8</a> has exactly that behind a
+          <code>MODE</code> constant above its draw.</p>
         <p>You can sometimes do without it: draw back-to-front and the painter&rsquo;s algorithm
           gets the same picture for free. It is a tempting trade and easy to get subtly wrong.
           <a href="../examples/8_heightmap.html">Example 8</a> used to sweep this grid away from

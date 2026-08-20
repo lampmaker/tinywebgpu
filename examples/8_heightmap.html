@@ -67,14 +67,37 @@
       { time: 'f32' }, { heights: 'array<f32>' }, { wg: [64, 1, 1] });
     shape.setResources({ heights });
 
+    // ── what to draw: filled facets, the triangle edges, or both ─────────────────────────────
+    // 'solid' — the surface. 'wire' — only the triangle edges. 'both' — the wireframe over the
+    // surface, which is also the one that hides the edges round the back: the facets are still
+    // filled, so they still write depth. In 'wire' the facet interiors are discarded, and a
+    // discarded fragment writes no depth, so you see the far side of the terrain through it.
+    //
+    // All three are one draw. The edges come out of the fragment shader, from a barycentric
+    // coordinate the rasteriser interpolates for free, so switching costs no second pipeline and
+    // no second pass. The other route is real line primitives — `topology: 'line-list'` with a
+    // table of edge endpoints instead of corners — which draws honest lines, but only ever 1 px
+    // wide (that is all WebGPU offers), and cannot fill and outline in the same pass.
+    //
+    // One caveat worth knowing before you flip it: at N = 128 the mesh is finer than the pixels,
+    // so the lines cover ~95% of the terrain and you get a white blob. Drop N to 24–32 as well
+    // and the wireframe reads properly — and in 'both' the surface hides the edges behind it.
+    const MODE = 'solid';                // ← 'solid' | 'wire' | 'both'
+    const WIRE_PX = 1.0;                 // ← line half-width, in pixels
+
     // ── the draw: one instance per cell, six vertices each ───────────────────────────────────
     const land = G.makeDraw({
       code: `
+        const EDGES     = ${MODE !== 'solid'};   // folded away at compile time when false
+        const WIRE_ONLY  = ${MODE === 'wire'};
+
         struct VSOut {
           @builtin(position) pos: vec4<f32>,
           // flat: all three vertices of a facet compute the same value, and saying so keeps the
           // rasteriser from interpolating between three identical numbers.
           @location(0) @interpolate(flat) tint: vec3<f32>,
+          // This one *is* interpolated — that is the whole point. See fs_main.
+          @location(1) bary: vec3<f32>,
         };
 
         fn corner(vx: u32, vy: u32) -> vec3<f32> {
@@ -121,11 +144,28 @@
           var o: VSOut;
           o.pos = UB.mvp * vec4<f32>(p, 1.0);
           o.tint = snow * lam;
+          // 1 at this corner, 0 at the other two. Interpolated across the facet it becomes
+          // "how far along am I", and its smallest component is the distance to the nearest edge.
+          var BARY = array<vec3<f32>, 3>(vec3<f32>(1.0, 0.0, 0.0),
+                                         vec3<f32>(0.0, 1.0, 0.0),
+                                         vec3<f32>(0.0, 0.0, 1.0));
+          o.bary = BARY[v - t];
           return o;
         }
 
         @fragment fn fs_main(vs: VSOut) -> @location(0) vec4<f32> {
-          return vec4<f32>(vs.tint, 1.0);
+          var col = vs.tint;
+          if (EDGES) {
+            let b = min(min(vs.bary.x, vs.bary.y), vs.bary.z);
+            // fwidth is how fast b changes from one pixel to the next, so b / fwidth(b) is the
+            // distance to the edge measured in *pixels* — which is what keeps the line the same
+            // width whether the facet faces you or is tilted almost edge-on.
+            let px = b / max(fwidth(b), 1e-6);
+            let line = 1.0 - smoothstep(0.0, ${WIRE_PX.toFixed(2)}, px);
+            if (WIRE_ONLY && line < 0.5) { discard; }
+            col = mix(col, vec3<f32>(0.75, 0.85, 1.0), line);
+          }
+          return vec4<f32>(col, 1.0);
         }`,
       uniforms:  { mvp: 'mat4x4<f32>' },
       resources: { heights: 'array<f32>' },

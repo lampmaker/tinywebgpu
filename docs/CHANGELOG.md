@@ -31,6 +31,12 @@ stock tiny build (which strips the option) is flagged in the build picker. READM
 the painter's algorithm is "exact and free" for a height field is corrected to say what the
 ordering actually requires.
 
+The example also gained a `MODE` constant above its draw — `'solid'`, `'wire'` or `'both'`. The
+triangle edges are found in the *fragment* shader, from a barycentric coordinate the rasteriser
+interpolates, so all three modes are the same single draw with no second pipeline and no line
+primitives; `'both'` gets hidden-line removal from the depth buffer for free, since the filled
+facets still write depth while `'wire'` discards them. `WIRE_PX` sets the line width.
+
 **Changed — `G.pre` is gone; `G.defines` is WGSL's missing `#define`, built into the core**
 (min +149 B → 15.8 KB, tiny +140 B → 8.9 KB)
 
