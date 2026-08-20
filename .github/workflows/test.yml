@@ -1,0 +1,21 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run test:all
+      # the built artifacts are committed (the demo pages load them) — fail if a
+      # change to src/ or tools/ was pushed without rebuilding dist/
+      - run: npm run build
+      - run: git diff --exit-code -- dist

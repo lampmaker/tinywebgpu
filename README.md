@@ -290,7 +290,7 @@ each facet derives its own normal so the shading is flat.
 
 ## Minified build
 
-`dist/tinywebgpu.min.js` — **15.7 KB** (7.7 KB gzipped), versus 91 KB for the source. Rebuild it with
+`dist/tinywebgpu.min.js` — **15.5 KB** (7.4 KB gzipped), versus 91 KB for the source. Rebuild it with
 `npm run build:min` (esbuild is the only dev dependency; consumers still install nothing).
 
 It is a **production artifact and it is silent**: every `console` warning is stripped, and so are
@@ -306,10 +306,10 @@ accident.
 ## Tiny build (inline / on-chain embedding)
 
 When the library has to be *inlined* — a single self-contained HTML file, an on-chain generative
-artwork with a hard byte budget — 15.7 KB of it is still mostly features you are not using. A
+artwork with a hard byte budget — 15.5 KB of it is still mostly features you are not using. A
 procedural piece renders from a shader and never touches image loading, readback, or PNG export.
 
-`npm run build:tiny` produces **`dist/tinywebgpu.tiny.js` — 8.8 KB** (4.6 KB gzipped) by dropping
+`npm run build:tiny` produces **`dist/tinywebgpu.tiny.js` — 8.5 KB** (4.5 KB gzipped) by dropping
 every optional entry point, and adding `--iife --no-banner` gets a classic
 `<script>` that assigns `globalThis.WEBGPU` for the same size. Two of the dropped switches trade
 *behavior* rather than entry points, so know what you are giving up:
@@ -352,7 +352,7 @@ node tools/build-min.mjs tiny --iife --no-banner --out=twg.js
 node tools/build-min.mjs --config=my.config.mjs           a config of your own
 ```
 
-What each switch is worth, measured against the 15.7 KB build:
+What each switch is worth, measured against the 15.5 KB build:
 
 | `--without=` | Removes | Saves |
 |---|---|---|
