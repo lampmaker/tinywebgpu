@@ -27,6 +27,12 @@ export default {
   banner: true,        // the /*! version | MIT */ header
   iife: false,         // false = ESM export; true = classic <script> assigning globalThis.WEBGPU
 
+  // The terser second pass: esbuild never deletes an unused binding inside the WEBGPU factory
+  // (its dead-code removal is module-top-level only), so the `helper = 0` husks of stripped
+  // features — and helpers only they called — survive without it. Off only for debugging the
+  // esbuild output itself (also per run: --no-terser).
+  terser: true,
+
   // The name-table rewrite only pays in raw bytes, and this build is HTTP-delivered (gzipped),
   // so it stays off. packComment appends a /*pack:$a=…*/ legend when pack is on, and packNames
   // picks mnemonic codes for chosen names ({ createRenderPipeline: 'cRP' }).

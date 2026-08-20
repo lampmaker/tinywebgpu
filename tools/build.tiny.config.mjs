@@ -56,6 +56,11 @@ export default {
   banner: true,
   iife: false,         // pass --iife for the classic-<script> flavour
 
+  // The terser second pass (see build.min.config.mjs). This build strips almost everything, so
+  // it's where the pass earns most: the stripped features' `helper = 0` husks and the helpers
+  // only they called all go. Off only for debugging the esbuild output (--no-terser per run).
+  terser: true,
+
   // Raw bytes are the target here — inline builds never gzip — so the name-table pack is on,
   // and the legend comment makes the packed output readable ($a=beginComputePass, …).
   pack: true,
