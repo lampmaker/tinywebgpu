@@ -30,6 +30,9 @@ export const RENAMES = {
   setUniforms: 'sU', setUniform: 'sU1', setResources: 'sR', uniforms: 'uS', resources: 'rS',
   drawTo: 'dT', dispatchIndirect: 'dI', bindTo: 'bT',
   uniformFields: 'uF', resourceFields: 'rF',
+  pipeline: 'pl', count: 'cN', instances: 'iN',
+  // the makeSchema result shape (wgsl / uniformBuffer / uniformWrite are its documented keys)
+  wgsl: 'wG', uniformBuffer: 'uB', uniformWrite: 'uW',
 };
 
 export default {

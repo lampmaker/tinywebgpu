@@ -433,7 +433,9 @@ if (pack) {
       id = undefined;
     }
     if (!id) { if (!ids.length) continue; id = ids[0]; }
-    const total = packed.split(name).length - 1;
+    // \b-bounded on both sides: a plain substring count would see `dispatchWorkgroups` inside
+    // `dispatchWorkgroupsIndirect` and wrongly disqualify it as a non-member occurrence.
+    const total = (packed.match(new RegExp(`\\b${escapeRe(name)}\\b`, 'g')) ?? []).length;
     const uses = [...packed.matchAll(new RegExp(`(\\?\\.|\\.)${name}\\b`, 'g'))];
     if (total === 0 || uses.length !== total) continue;   // key/string appearance → unsafe, skip
     // profit: each `.name` (1+len) → `[id]` (2+id.len); `?.name` → `?.[id]` costs 2 more.

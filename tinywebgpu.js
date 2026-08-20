@@ -318,7 +318,7 @@ ${frag}
       names = opts.targets ? OK(opts.targets) : 0,
       makePipeline({
         ...opts,
-        isCompute: false, targetNames: names,
+        _isCompute: false, _targetNames: names,
         code: names ? `struct FSOut {${names.map((n, i) => `@location(${i}) ${n}: ${V4}`).join(', ')}};\n${opts.code}` : opts.code,
         format: names ? OV(opts.targets) : opts.format,
       })),
@@ -342,7 +342,7 @@ ${frag}
 fn main(${BI}global_invocation_id) gid: ${V3U}, ${BI}local_invocation_id) lid: ${V3U}, ${BI}workgroup_id) wid: ${V3U}) {
 ${main}
 }
-`.trim(), uniforms, resources, isCompute: true, wg
+`.trim(), uniforms, resources, _isCompute: true, wg
     })),
 
     /**
@@ -1134,7 +1134,7 @@ ${main}
     let readOnly = opts.readOnly ?? [];
     // Uniforms whose var the shader never mentions still get a buffer and setters — only the
     // @binding is left out, so `p.uniforms = {…}` keeps working against a shader that ignores UB.
-    let emit = opts.emitUniform ?? true;
+    let emit = opts._emitUniform ?? true;
     let binding = opts.startBinding ?? 0;
     // The @group/@binding prefix of every generated var line, spelled once.
     let gb = b => `@group(${group}) @binding(${b}) var`;
@@ -1264,7 +1264,7 @@ ${structFields.join('\n')}
   // is usable on the next line and pieces never await a factory.
   // `wg` has no default: makeCompute always normalizes and passes it, and render never reads it.
   let makePipeline = ({ code, uniforms = {}, resources = {}, format = S.format,
-    isCompute = false, blend, wg, targetNames,
+    _isCompute: isCompute = false, blend, wg, _targetNames: targetNames,
     topology = 'triangle-list', count = 3, instances = 1, readOnly = [], depth }) => {
     // The resolved depth config: defaults, overridable field by field. `texture` is the caller's
     // own depth attachment; without it drawTo manages one sized to the target.
@@ -1289,7 +1289,7 @@ ${structFields.join('\n')}
         `[TinyWebGPU] Schema declares ${unused.map(n => `'${n}'`).join(', ')} but the shader never references ${unused.length > 1 ? 'them' : 'it'}; ` +
         `${unused.length > 1 ? 'they are' : 'it is'} left out of the generated WGSL and the bind group.`);
     }
-    let schema = buildSchema(uniforms, usedResources, { group: 0, startBinding: 0, emitUniform: usesUB, readOnly });
+    let schema = buildSchema(uniforms, usedResources, { group: 0, startBinding: 0, _emitUniform: usesUB, readOnly });
     // Destructured once: these are read on every setResources() and every dispatch, and a local is
     // both faster and — since the minifier renames it — a great deal shorter than the path.
     let { _resourceFields: rFields, _resourceLayout: rLayout, _uniformBinding: uBinding, uniformWrite: uWrite } = schema;
