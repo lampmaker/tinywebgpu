@@ -44,6 +44,13 @@
 //      stock artifacts keep the long names, since the demos and tests speak them.
 //   8. `singleLine` escapes the raw newlines esbuild leaves inside template literals, so the
 //      output file is a single line.
+//   9. A terser second pass picks up what esbuild's minifier leaves behind by design: esbuild
+//      removes dead code at module top level only, so a feature-gated helper folded to
+//      `let helper = 0` inside the WEBGPU factory survives as an unused binding — as does an
+//      unconditional one-liner whose only callers were stripped, and its body's captures in
+//      turn. terser eliminates unused function-scope locals (cascading), and `pure_getters`
+//      also prunes the unused entries of the `{min,max,…} = Math` destructure — safe here
+//      because nothing the library reads has a side-effecting getter. ~5% off the tiny build.
 //
 // Errors still throw in every build. With the `msg` feature off they carry a number instead of
 // a sentence; the numbers are listed in ERRORS below.
@@ -64,6 +71,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { transform } from 'esbuild';
+import { minify as terserMinify } from 'terser';
 
 // Repo paths are anchored to the root (the directory above this file), so a build behaves the
 // same whatever directory you launch it from. Only --config= and --out= follow your cwd.
@@ -196,6 +204,7 @@ const OUT = flag('out') ? resolve(flag('out')) : resolve(ROOT, config.out);
 const iife = args.includes('--iife') || (config.iife && !args.includes('--no-iife'));
 const pack = args.includes('--pack') || (config.pack && !args.includes('--no-pack'));
 const banner = config.banner !== false && !args.includes('--no-banner');
+const scrub = config.terser !== false && !args.includes('--no-terser');
 
 // ── the rename table: truly rename the library's own API names ────────────────────────────────
 // `--rename=setResources:sR,drawTo:dT` applies exactly those pairs; bare `--rename` (or
@@ -394,6 +403,35 @@ if (!packed.includes(OPEN)) {
     process.exit(1);
   }
   packed = packed.replace(alias[0], '').replace(decl, OPEN);
+}
+
+// ── terser second pass: remove what esbuild leaves behind by design ──────────────────────────
+// esbuild's dead-code elimination stops at module top level; inside the WEBGPU factory it
+// constant-folds a stripped feature's `let helper = !F_X ? 0 : (…) => {…}` down to `helper = 0`
+// (dropping the body — the real savings) but never deletes an unused local binding. terser
+// does, and the removal cascades: a helper only the stripped code called goes too, then
+// whatever only it referenced. `pure_getters` additionally prunes the unused entries of the
+// `{min,max,…} = Math` destructure — a promise that no property the library reads has a
+// side-effecting getter, which holds: its own accessors (S.device) are plain, and the WebGPU
+// platform objects' getters don't observably care whether they are read. Property names are
+// esbuild's territory (mangleProps/mangleCache, above) — terser's property mangling stays off.
+// Sits after the export rewrite, whose `export let WEBGPU=()=>{`/`globalThis.WEBGPU=()=>{`
+// shape terser preserves (an alias split back out would re-fail the splice's two-use check),
+// and before the shorthand/pack/legend transforms so those see the final identifiers. The
+// `/*!` banner survives terser's default comment filter. --no-terser / `terser: false` skips.
+if (scrub) {
+  const before = packed.length;
+  const t = await terserMinify(packed, {
+    module: !iife,
+    compress: { passes: 3, pure_getters: true },
+    mangle: true,
+  });
+  packed = t.code;
+  if (!packed.includes(OPEN)) {
+    console.error(`build-min: the terser pass rewrote the \`${OPEN}\` opening — output shape changed, refusing to continue.`);
+    process.exit(1);
+  }
+  console.log(`  terser: unused-binding scrub (-${before - packed.length}B)`);
 }
 
 // ── shorthand compression: the library's own WGSL uses the short tokens too ──────────────────
