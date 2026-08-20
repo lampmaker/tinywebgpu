@@ -1,6 +1,6 @@
 # TinyWebGPU — API reference
 
-Complete surface of `tinywebgpu.js`. Pre-1.0: minor versions may still break API.
+Complete surface of `src/tinywebgpu.js`. Pre-1.0: minor versions may still break API.
 
 ```js
 import { WEBGPU } from './tinywebgpu.js';
@@ -40,7 +40,7 @@ and live-coding pages — the environments that otherwise leak a device per relo
 destruction does not fire `onDeviceLost`. The instance is not reusable afterwards.
 
 ### TypeScript
-`tinywebgpu.d.ts` ships with the package and is wired through `types`/`exports`, so editors
+`src/tinywebgpu.d.ts` ships with the package and is wired through `types`/`exports`, so editors
 autocomplete the whole surface with inline docs — in TypeScript *and* plain JavaScript projects.
 The `GPU*` names come from TypeScript's own `lib.dom`; on an older TS add `@webgpu/types`.
 
@@ -338,13 +338,13 @@ the longer spellings above.
 
 | File | Size | What it is |
 |---|---|---|
-| `tinywebgpu.js` | 91 KB | the source, with comments and every diagnostic. `main`/`exports` point here. |
-| `tinywebgpu.min.js` | 15.7 KB (7.7 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
-| `tinywebgpu.tiny.js` | 8.8 KB (4.6 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
+| `src/tinywebgpu.js` | 91 KB | the source, with comments and every diagnostic. `main`/`exports` point here. |
+| `dist/tinywebgpu.min.js` | 15.7 KB (7.7 gz) | `npm run build:min`. Silent: no console output, no compile-error window, no resource validator, no debug labels. Errors still throw with their messages. |
+| `dist/tinywebgpu.tiny.js` | 8.8 KB (4.6 gz) | `npm run build:tiny`. The above, plus every optional entry point removed and error text folded to numbers. For inlining into a single file. |
 
 `build:tiny` drops `writeTexture`, `loadTexture`, `readTexture`, buffer `.r()`, `save`, `show`,
 the ping-pong helpers, `resizeCanvas`, depth support, mipmaps, the staging ring (in-frame writes become plain queue writes — last value per frame wins), the long aliases, and the named blend presets. Tiny builds also pack repeated WebGPU member names into a string table (`--no-pack` to skip). Keep any of them with
-`node build-min.mjs --tiny --with=show,read`, or start from the full build and remove a few with
+`node tools/build-min.mjs --tiny --with=show,read`, or start from the full build and remove a few with
 `--without=save,texio`. `--iife` emits a classic `<script>` assigning `globalThis.WEBGPU`.
 Full table of what each switch costs: README → *Tiny build*.
 

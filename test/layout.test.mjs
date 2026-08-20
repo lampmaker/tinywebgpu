@@ -4,7 +4,7 @@
 //        TWG_ENTRY=<path> node test/layout.test.mjs   ← run against another build
 // The entry is overridable so the same assertions can be run against the minified build.
 
-const ENTRY = process.env.TWG_ENTRY ?? '../tinywebgpu.js';
+const ENTRY = process.env.TWG_ENTRY ?? '../src/tinywebgpu.js';
 const { WEBGPU } = await import(ENTRY);
 // The long-form and one-letter tables the defines tests exercise (the tutorial ships a
 // similar one — a table is just a string, so there is no module to import).

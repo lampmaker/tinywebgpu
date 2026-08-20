@@ -866,7 +866,7 @@ G.endFrame();</code></pre>
           <b><code>.r()</code> stalls.</b> It waits for the GPU to finish and for the result to be
           mapped back — the one thing you must not do inside a frame loop. Keep results on the GPU
           and sample them occasionally without awaiting in the loop, the way
-          <a href="examples/6_evolution.html">example 6</a> does. Reading during an open frame is
+          <a href="../examples/6_evolution.html">example 6</a> does. Reading during an open frame is
           worse still: it sees pre-frame data, and says so in the console.
         </div>
       </div>
@@ -1129,7 +1129,7 @@ G.endFrame();</code></pre>
             it is one number, and nothing else in the loop changes.</div>
         </div>
         <p>The particles here stick when they reach the wall, because <code>clamp</code> is one
-          line and a bounce is four. <a href="examples/7_particles.html">Example 7</a> is the same
+          line and a bounce is four. <a href="../examples/7_particles.html">Example 7</a> is the same
           program with the bounce, a resizable grid, and controls.</p>
       </div>
     </section>
@@ -1189,12 +1189,12 @@ G.endFrame();</code></pre>
           Jekyll ignores directories beginning with an underscore and can quietly drop files.</p>
         <h3>Where to go next</h3>
         <ul>
-          <li><a href="examples/6_evolution.html">Example 6</a> — differential evolution: a real
+          <li><a href="../examples/6_evolution.html">Example 6</a> — differential evolution: a real
             gradient-free optimizer, one thread per individual, with a workgroup-shared-memory
             reduction and a non-blocking readback.</li>
-          <li><a href="examples/7_particles.html">Example 7</a> — the particle system with bouncing
+          <li><a href="../examples/7_particles.html">Example 7</a> — the particle system with bouncing
             walls, a grid that follows the window, and up to 800k particles.</li>
-          <li><a href="examples/4_indirect.html">Example 4</a> — indirect dispatch on its own.</li>
+          <li><a href="../examples/4_indirect.html">Example 4</a> — indirect dispatch on its own.</li>
           <li><b>Your own vertex stage.</b> Everything above draws a fullscreen quad.
             <code>G.makeDraw({ code, count, instances, topology })</code> is the same deal as
             <code>makeCompute</code> — you write both <code>@vertex fn vs_main</code> and
@@ -1205,9 +1205,9 @@ G.endFrame();</code></pre>
             a draw then reads. One catch worth knowing before you hit it — a buffer the
             <i>vertex</i> stage reads must be named in <code>readOnly</code>, because WebGPU
             refuses to make a read-write storage binding visible to that stage.
-            <a href="examples/8_heightmap.html">Example 8</a> is the whole pattern in one page:
+            <a href="../examples/8_heightmap.html">Example 8</a> is the whole pattern in one page:
             a compute pass writes a terrain, the vertex stage reads it straight back out.</li>
-          <li><a href="https://github.com/lampmaker/tinywebgpu/blob/main/API.md">API.md</a> — the
+          <li><a href="https://github.com/lampmaker/tinywebgpu/blob/main/docs/API.md">API.md</a> — the
             complete surface, including the escape hatches for when the schema is not enough.</li>
         </ul>
         <p>And when the wrapper stops helping, every raw handle is still there:
@@ -1217,10 +1217,10 @@ G.endFrame();</code></pre>
     </section>
 
     <footer>
-      <a href="index.html">Demos</a> ·
+      <a href="../index.html">Demos</a> ·
       <a href="https://github.com/lampmaker/tinywebgpu">Source</a> ·
       <a href="https://github.com/lampmaker/tinywebgpu#readme">README</a> ·
-      <a href="https://github.com/lampmaker/tinywebgpu/blob/main/API.md">API reference</a>
+      <a href="https://github.com/lampmaker/tinywebgpu/blob/main/docs/API.md">API reference</a>
       · MIT licensed.
     </footer>
   </main>
@@ -1230,8 +1230,8 @@ G.endFrame();</code></pre>
     // The tutorial itself needs nothing beyond the core, but many boxes read results back,
     // resize their canvas or upload textures — features the stock tiny build drops — so under
     // tiny those boxes are skipped with a note instead of failing on a missing function.
-    import { loadLib, explain, missing, TINY_DROPS } from './libselect.js';
-    const { WEBGPU, lib } = await loadLib(['read', 'resize', 'texio'], '.');
+    import { loadLib, explain, missing, TINY_DROPS } from '../libselect.js';
+    const { WEBGPU, lib } = await loadLib(['read', 'resize', 'texio'], '..');
 
     // What a box's code can use that the tiny build lacks. Checked against the live editor
     // content on every run, so deleting the offending line makes the box runnable again.

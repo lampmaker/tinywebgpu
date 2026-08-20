@@ -12,9 +12,9 @@
 // setUniforms between the dispatches).
 //
 // Usage: node test/frame.test.mjs
-//        TWG_ENTRY=../tinywebgpu.min.js node test/frame.test.mjs
+//        TWG_ENTRY=../dist/tinywebgpu.min.js node test/frame.test.mjs
 
-const ENTRY = process.env.TWG_ENTRY ?? '../tinywebgpu.js';
+const ENTRY = process.env.TWG_ENTRY ?? '../src/tinywebgpu.js';
 const { WEBGPU } = await import(ENTRY);
 
 let failures = 0;

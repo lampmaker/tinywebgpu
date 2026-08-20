@@ -1,10 +1,10 @@
-// Settings for the stock minified build — `npm run build:min` → tinywebgpu.min.js.
+// Settings for the stock minified build — `npm run build:min` → dist/tinywebgpu.min.js.
 // build-min.mjs holds the machinery (feature registry, error table, transforms); this file
 // holds the choices. CLI flags still override per run: --out=, --with=, --without=, --iife,
 // --pack / --no-pack, --no-banner.
 
 export default {
-  out: 'tinywebgpu.min.js',
+  out: 'dist/tinywebgpu.min.js',
 
   // Feature switches: true = keep, false = strip the whole entry point from the build.
   // Every optional feature stays in the stock build. DIAG never ships — build-min.mjs forces

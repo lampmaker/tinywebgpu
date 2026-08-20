@@ -1,6 +1,6 @@
 // Settings for the fully stripped inline/on-chain build — `npm run build:tiny` →
-// tinywebgpu.tiny.js. Start from nothing and add features back per piece:
-//   node build-min.mjs tiny --with=show,blend
+// dist/tinywebgpu.tiny.js. Start from nothing and add features back per piece:
+//   node tools/build-min.mjs tiny --with=show,blend
 // CLI flags override this file per run: --out=, --with=, --without=, --iife,
 // --pack / --no-pack, --no-banner.
 
@@ -33,7 +33,7 @@ export const RENAMES = {
 };
 
 export default {
-  out: 'tinywebgpu.tiny.js',
+  out: 'dist/tinywebgpu.tiny.js',
 
   // Feature switches: true = keep, false = strip the whole entry point from the build.
   // Everything optional is off here — flip a feature on for your piece, or per run with
