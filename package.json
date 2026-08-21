@@ -39,9 +39,13 @@
     "webgpu",
     "wgsl",
     "shader",
+    "shaders",
     "compute",
+    "compute-shader",
     "gpgpu",
-    "graphics"
+    "graphics",
+    "webgpu-framework",
+    "zero-dependency"
   ],
   "devDependencies": {
     "esbuild": "^0.25.0",
