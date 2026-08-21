@@ -27,7 +27,7 @@
   <script type="module">
     import { boot } from '../libselect.js';
     // No canvas argument: compute-only. boot also reports a failed start-up on the page.
-    const { G } = await boot(['read'], '..');   // ?lib=min|tiny switches the build
+    const { G } = await boot(['read']);   // ?lib=min|tiny switches the build
     const N = 16;
 
     const p = G.makeCompute('', `

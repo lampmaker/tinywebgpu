@@ -101,12 +101,12 @@
     <p id="status">starting…</p>
     <p>The objective is one WGSL function — replace <code>objStep</code>/<code>objDone</code> with
       your own and the rest of the machinery is unchanged.
-      <a href="../tutorial.html#atomics">The tutorial covers the pieces.</a></p>
+      <a href="../docs/tutorial.html#atomics">The tutorial covers the pieces.</a></p>
   </main>
 
   <script type="module">
     import { loadLib, reportFailure, explain } from '../libselect.js';
-    const { WEBGPU, lib } = await loadLib(['read'], '..');   // ?lib=min|tiny switches the build
+    const { WEBGPU, lib } = await loadLib(['read']);   // ?lib=min|tiny switches the build
 
     const canvas = document.getElementById('c');
     const el = id => document.getElementById(id);

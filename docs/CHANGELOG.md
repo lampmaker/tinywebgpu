@@ -4,6 +4,43 @@ All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API
 
 ## Unreleased
 
+**Fixed — the demo pages load their library again when the site is not at the root of its origin**
+
+Every example and the tutorial were broken on <https://lampmaker.github.io/tinywebgpu/>: the page
+rendered, the build picker appeared, and nothing else ran. `libselect.js` imported the library
+with a specifier built from a `base` argument the page passed in — `'../src/tinywebgpu.js'` from
+a page one level down — but a dynamic `import()` resolves its specifier against the *importing
+module's* URL, not the document's, and `libselect.js` sits at the repo root. Served from the root
+of an origin the leading `..` has nowhere to go and is clamped away, so a local
+`python3 -m http.server` resolved it to the right file and never showed the bug. Under GitHub
+Pages the site lives at `/tinywebgpu/`, so the same `..` walked out to the domain root and each
+page 404'd on `https://lampmaker.github.io/src/tinywebgpu.js`.
+
+`loadLib` now resolves the build against `import.meta.url`, which is correct wherever the site is
+mounted and wherever the page sits, and the `base` argument is gone from `loadLib`, `boot` and
+every call site. `test/paths.test.mjs` resolves every `src`, `href` and import specifier on the
+demo pages the way a browser will — against a mount at `/tinywebgpu/`, which is the case that
+fails — and checks each one against the files on disk. It found two more dead links while it was
+at it: examples 6 and 7 pointed at `../tutorial.html` rather than `../docs/tutorial.html`.
+
+**Added — a failed start-up says so on the page**
+
+Six of the eight examples called `init()` with no `catch`, so a missing `navigator.gpu`, a null
+adapter or the import failure above threw out of the module script into a console — which a phone
+does not have, and which the reader of a demo has no reason to open. The page just sat there
+looking loaded. `diag.js` is a classic, non-module script every demo page now loads first: it
+traps `error` and `unhandledrejection` and puts the failure on screen with an environment report
+(user agent, secure context, adapter, limits). Being classic and ahead of the modules, it also
+catches a module that fails to load or parse — the case above.
+
+`libselect.js` gained `gpuAdvice()`, which separates "this browser has no WebGPU" from "this
+device gave no adapter" and says what to do about each, `reportFailure()`, and `boot()` — picker,
+build import and `init()` in one call, with failures reported. Examples 1–5 and 8 use it; 6 and 7
+keep their own error strip, filled from the shared reporter. The tutorial reports an adapter
+failure once at page level rather than only inside whichever box scrolled into view first.
+`docs/webgpu-check.html` is a library-free page that walks `navigator.gpu` → adapter → device →
+one compiled and drawn triangle and reports where the chain broke, with a copyable report.
+
 **Added — tutorial step 16, "Your own vertex stage, and a depth buffer"**
 
 The tutorial stopped at compute and fullscreen passes; `makeDraw` lived only in a "where to go

@@ -44,7 +44,7 @@
 
     const canvas = document.getElementById('c');
     // boot = picker + build import + init(), with a start-up failure shown on the page.
-    const { G } = await boot(['read', 'resize', 'depth'], '..', canvas);   // ?lib=min|tiny switches the build
+    const { G } = await boot(['read', 'resize', 'depth'], canvas);   // ?lib=min|tiny switches the build
 
     // One f32 per grid vertex. The compute pass writes it read_write; the vertex stage reads it
     // read-only. Same GPUBuffer, two pipelines, two address spaces — see `readOnly` below.

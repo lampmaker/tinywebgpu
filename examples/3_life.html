@@ -35,7 +35,7 @@
 
     const W = 256, H = 256;
     // boot = picker + build import + init(), with a start-up failure shown on the page.
-    const { G } = await boot([], '..', document.getElementById('c'));   // ?lib=min|tiny switches the build
+    const { G } = await boot([], document.getElementById('c'));   // ?lib=min|tiny switches the build
 
     const step = G.makeCompute(`
         fn idx(x: i32, y: i32) -> u32 {

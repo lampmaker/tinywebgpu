@@ -468,6 +468,12 @@ libselect.js  the ?lib=full|min|tiny picker the pages share
 diag.js     puts an uncaught page error on the screen — see "Browser support" below
 ```
 
+`libselect.js` resolves the build it imports against its own `import.meta.url`, not against the
+page's — that is what a dynamic `import()` specifier is resolved against, and this file sits at
+the repo root beside `src/` and `dist/`. So the demo pages work whether the site is served from
+the root of an origin or from a subdirectory like `/tinywebgpu/`. `npm test` checks that by
+resolving every path on every demo page against a subdirectory mount.
+
 To vendor the library, take `src/tinywebgpu.js` (or a file from `dist/`) and drop it next to your
 HTML — there is nothing else to fetch. The site is served straight from the repo root by GitHub
 Pages, which is why `index.html` and `.nojekyll` live there.

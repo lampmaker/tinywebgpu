@@ -75,12 +75,12 @@
     </div>
     <p class="stats" id="stats">starting…</p>
     <p>Each particle is 16 bytes — position and velocity — and never leaves the GPU.
-      <a href="../tutorial.html#particles">The tutorial builds this one up step by step.</a></p>
+      <a href="../docs/tutorial.html#particles">The tutorial builds this one up step by step.</a></p>
   </main>
 
   <script type="module">
     import { loadLib, reportFailure, explain } from '../libselect.js';
-    const { WEBGPU, lib } = await loadLib(['read', 'resize'], '..');   // ?lib=min|tiny switches the build
+    const { WEBGPU, lib } = await loadLib(['read', 'resize']);   // ?lib=min|tiny switches the build
 
     const canvas = document.getElementById('c');
     const el = id => document.getElementById(id);

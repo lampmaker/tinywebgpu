@@ -44,7 +44,7 @@
   <script type="module">
     import { boot } from '../libselect.js';
     // boot = picker + build import + init(), with a start-up failure shown on the page.
-    const { G } = await boot(['texio', 'read', 'blend'], '..', document.getElementById('c'));
+    const { G } = await boot(['texio', 'read', 'blend'], document.getElementById('c'));
     const log = [];
     let ok = true;
     const check = (name, pass, detail) => { ok &&= pass; log.push(`${pass ? 'ok  ' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };

@@ -1443,7 +1443,7 @@ G.endFrame();</code></pre>
     // resize their canvas or upload textures — features the stock tiny build drops — so under
     // tiny those boxes are skipped with a note instead of failing on a missing function.
     import { loadLib, explain, missing, reportFailure, TINY_DROPS } from '../libselect.js';
-    const { WEBGPU, lib } = await loadLib(['read', 'resize', 'texio', 'depth'], '..');
+    const { WEBGPU, lib } = await loadLib(['read', 'resize', 'texio', 'depth']);
 
     // What a box's code can use that the tiny build lacks. Checked against the live editor
     // content on every run, so deleting the offending line makes the box runnable again.

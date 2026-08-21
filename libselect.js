@@ -146,10 +146,20 @@ export const initPicker = (needs = []) => {
 };
 
 // One call for the example pages: draw the picker and import the chosen build.
-// `base` is the path from the page to the repo root (pages one level down pass '..').
-export const loadLib = async (needs = [], base = '.') => {
+//
+// The path is resolved against `import.meta.url` — this module's own URL — and not against the
+// page's, because that is what a dynamic import() specifier is resolved against. This file sits
+// at the repo root beside src/ and dist/, so the build files are always one plain step away from
+// it, wherever the page doing the importing happens to live.
+//
+// It used to take a `base` argument and build a page-relative specifier ('../src/tinywebgpu.js'
+// from a page one level down). That was wrong, and only looked right when the site was served
+// from the root of its origin, where a leading '..' has nowhere to go and is clamped away. Under
+// GitHub Pages the site lives at /tinywebgpu/, so the '..' resolved out to the domain root and
+// every demo page 404'd on its own library.
+export const loadLib = async (needs = []) => {
   const lib = initPicker(needs);
-  const { WEBGPU } = await import(`${base}/${BUILDS[lib].file}`);
+  const { WEBGPU } = await import(new URL(BUILDS[lib].file, import.meta.url).href);
   return { WEBGPU, lib, missing: missing(needs, lib) };
 };
 
@@ -189,8 +199,8 @@ export const reportFailure = (e, lib = current()) => {
 // What the example pages actually call: picker, build import, and `init()` — with any failure
 // turned into something the reader can see and act on. `ctx` is whatever `init()` accepts
 // (a context, a canvas, a selector) or 0 for the compute-only demos.
-export const boot = async (needs = [], base = '.', ctx = 0, opts = {}) => {
-  const { WEBGPU, lib } = await loadLib(needs, base);
+export const boot = async (needs = [], ctx = 0, opts = {}) => {
+  const { WEBGPU, lib } = await loadLib(needs);
   try {
     const G = await WEBGPU().init(ctx, opts);
     return { G, WEBGPU, lib, missing: missing(needs, lib) };
