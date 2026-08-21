@@ -7,6 +7,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>TinyWebGPU — hello shader</title>
+  <!-- Loaded first and on purpose not a module: it turns an uncaught error in the
+       module scripts below — no WebGPU, no adapter, a file that failed to load — into
+       a banner on the page, because a phone has no console to print it to. -->
+  <script src="../diag.js"></script>
   <style>
     body {
       margin: 0; min-height: 100vh; padding: 1rem; display: grid; place-items: center;
@@ -25,10 +29,10 @@
 <body>
   <canvas id="c" width="800" height="450"></canvas>
   <script type="module">
-    import { loadLib } from '../libselect.js';
-    const { WEBGPU } = await loadLib([], '..');   // ?lib=min|tiny switches the build
-
-    const G = await WEBGPU().init(document.getElementById('c').getContext('webgpu'));
+    import { boot } from '../libselect.js';
+    // boot = the ?lib=min|tiny picker, the import of that build, and init() — with any
+    // start-up failure (no WebGPU, no adapter) put on the page instead of only the console.
+    const { G } = await boot([], '..', document.getElementById('c'));
     const quad = G.makeQuad({
       frag: `fn frag(uv: vec2<f32>) -> vec4<f32> {
         return vec4<f32>(0.5 + 0.5 * cos(UB.time + uv.xyx * 4.0 + vec3<f32>(0.0, 2.0, 4.0)), 1.0);

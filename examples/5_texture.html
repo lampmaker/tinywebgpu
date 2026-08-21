@@ -17,6 +17,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>TinyWebGPU — textures and blending</title>
+  <!-- Loaded first and on purpose not a module: it turns an uncaught error in the
+       module scripts below — no WebGPU, no adapter, a file that failed to load — into
+       a banner on the page, because a phone has no console to print it to. -->
+  <script src="../diag.js"></script>
   <style>
     body {
       margin: 0; padding: 1rem; background: #111; color: #ddd;
@@ -38,10 +42,9 @@
     <pre id="out">running…</pre>
   </main>
   <script type="module">
-    import { loadLib } from '../libselect.js';
-    const { WEBGPU } = await loadLib(['texio', 'read', 'blend'], '..');   // ?lib=min|tiny switches the build
-
-    const G = await WEBGPU().init(document.getElementById('c').getContext('webgpu'));
+    import { boot } from '../libselect.js';
+    // boot = picker + build import + init(), with a start-up failure shown on the page.
+    const { G } = await boot(['texio', 'read', 'blend'], '..', document.getElementById('c'));
     const log = [];
     let ok = true;
     const check = (name, pass, detail) => { ok &&= pass; log.push(`${pass ? 'ok  ' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };

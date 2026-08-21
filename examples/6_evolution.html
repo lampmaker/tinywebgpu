@@ -33,6 +33,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>TinyWebGPU — differential evolution</title>
+  <!-- Loaded first and on purpose not a module: it turns an uncaught error in the
+       module scripts below — no WebGPU, no adapter, a file that failed to load — into
+       a banner on the page, because a phone has no console to print it to. -->
+  <script src="../diag.js"></script>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -101,8 +105,8 @@
   </main>
 
   <script type="module">
-    import { loadLib } from '../libselect.js';
-    const { WEBGPU } = await loadLib(['read'], '..');   // ?lib=min|tiny switches the build
+    import { loadLib, reportFailure, explain } from '../libselect.js';
+    const { WEBGPU, lib } = await loadLib(['read'], '..');   // ?lib=min|tiny switches the build
 
     const canvas = document.getElementById('c');
     const el = id => document.getElementById(id);
@@ -149,10 +153,9 @@
       G = await WEBGPU().init(canvas.getContext('webgpu'));
     } catch (e) {
       el('err').style.display = 'block';
-      el('err').textContent = `WebGPU unavailable: ${e.message}. Needs Chrome/Edge 113+, ` +
-        `Firefox 141+ (Windows) or Safari 26+, over https or localhost.`;
+      el('err').textContent = reportFailure(e);   // also raises the shared banner, with details
       el('status').textContent = '';
-      window.__result = { ok: false, msg: 'no webgpu: ' + e.message };
+      window.__result = { ok: false, msg: 'no webgpu: ' + explain(e, lib) };
       throw e;
     }
 

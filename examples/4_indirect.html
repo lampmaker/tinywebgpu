@@ -10,6 +10,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>TinyWebGPU — indirect dispatch</title>
+  <!-- Loaded first and on purpose not a module: it turns an uncaught error in the
+       module scripts below — no WebGPU, no adapter, a file that failed to load — into
+       a banner on the page, because a phone has no console to print it to. -->
+  <script src="../diag.js"></script>
   <style>
     body {
       margin: 0; padding: 1rem; background: #111; color: #ddd;
@@ -24,10 +28,9 @@
 <body>
   <pre id="out">running…</pre>
   <script type="module">
-    import { loadLib } from '../libselect.js';
-    const { WEBGPU } = await loadLib(['read'], '..');   // ?lib=min|tiny switches the build
-
-    const G = await WEBGPU().init();          // no canvas needed
+    import { boot } from '../libselect.js';
+    // No canvas argument: compute-only. boot also reports a failed start-up on the page.
+    const { G } = await boot(['read'], '..');   // ?lib=min|tiny switches the build
     const N = 1000;
 
     // 1) keep multiples of 7, compact them into `survivors`, count atomically
