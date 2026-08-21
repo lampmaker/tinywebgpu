@@ -4,9 +4,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>TinyWebGPU — tutorial</title>
-  <meta name="description" content="A step-by-step tutorial for TinyWebGPU: from one fullscreen
-    shader to compute, atomics and a particle system. Every code box on the page really runs.">
+  <title>TinyWebGPU tutorial — WebGPU and WGSL, sixteen runnable steps</title>
+  <meta name="description" content="A step-by-step WebGPU tutorial: from one fullscreen WGSL
+    shader to compute, uniforms, ping-pong buffers, atomics, indirect dispatch and a particle
+    system. Every code box on the page really runs on your GPU.">
+  <link rel="canonical" href="https://lampmaker.github.io/tinywebgpu/docs/tutorial.html">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="TinyWebGPU">
+  <meta property="og:url" content="https://lampmaker.github.io/tinywebgpu/docs/tutorial.html">
+  <meta property="og:title" content="TinyWebGPU tutorial — WebGPU and WGSL in sixteen runnable steps">
+  <meta property="og:description" content="From one fullscreen WGSL shader to compute, atomics
+    and a particle system — every code box on the page recompiles live against your GPU.">
+  <meta name="twitter:card" content="summary">
   <!-- Loaded first and on purpose not a module: it turns an uncaught error in the
        module scripts below — no WebGPU, no adapter, a file that failed to load — into
        a banner on the page, because a phone has no console to print it to. -->
