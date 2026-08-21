@@ -7,6 +7,10 @@
   <title>TinyWebGPU — tutorial</title>
   <meta name="description" content="A step-by-step tutorial for TinyWebGPU: from one fullscreen
     shader to compute, atomics and a particle system. Every code box on the page really runs.">
+  <!-- Loaded first and on purpose not a module: it turns an uncaught error in the
+       module scripts below — no WebGPU, no adapter, a file that failed to load — into
+       a banner on the page, because a phone has no console to print it to. -->
+  <script src="../diag.js"></script>
   <style>
     :root {
       color-scheme: light dark;
@@ -187,7 +191,9 @@
     <div id="unsupported">
       <strong>WebGPU isn’t available in this browser.</strong> The text still reads fine, but no
       box will run. You need Chrome/Edge 113+, Firefox 141+ (Windows) or Safari 26+, over https
-      or localhost.
+      or localhost. On Android that means Chrome 121+ on Android 12+ — Samsung Internet, Firefox
+      for Android and the in-app browsers inside chat and mail apps have no WebGPU at all.
+      <a href="webgpu-check.html">Run the WebGPU check</a> to see what this device reports.
     </div>
 
     <div class="note">
@@ -1436,8 +1442,8 @@ G.endFrame();</code></pre>
     // The tutorial itself needs nothing beyond the core, but many boxes read results back,
     // resize their canvas or upload textures — features the stock tiny build drops — so under
     // tiny those boxes are skipped with a note instead of failing on a missing function.
-    import { loadLib, explain, missing, TINY_DROPS } from '../libselect.js';
-    const { WEBGPU, lib } = await loadLib(['read', 'resize', 'texio', 'depth'], '..');
+    import { loadLib, explain, missing, reportFailure, TINY_DROPS } from '../libselect.js';
+    const { WEBGPU, lib } = await loadLib(['read', 'resize', 'texio', 'depth']);
 
     // What a box's code can use that the tiny build lacks. Checked against the live editor
     // content on every run, so deleting the offending line makes the box runnable again.
@@ -1476,7 +1482,11 @@ G.endFrame();</code></pre>
     const TYPE_NAMES = Object.keys(TYPES);
     const DEFINES = Object.entries({ ...TYPES, ...CONSTS }).map(([t, r]) => `${t} ${r}`).join('\n');
 
-    const getG = () => (initPromise ||= WEBGPU().init().then(g => (g.defines = DEFINES, g)));
+    // A failure here is about the device, not about the box that happened to ask first, so it
+    // is reported once at page level as well as in that box's output panel.
+    const getG = () => (initPromise ||= WEBGPU().init()
+      .then(g => (g.defines = DEFINES, g))
+      .catch(e => { reportFailure(e, lib); throw e; }));
 
     const useCanvas = canvas => {
       if (!canvas) return;

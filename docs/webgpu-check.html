@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<!-- Does WebGPU work on this device? One page, one answer, no library involved.
+     Linked from the failure banner every demo shows when it cannot start, so a reader on a
+     phone can find out whether the problem is the browser, the driver or the page. -->
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TinyWebGPU — WebGPU check</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff; --fg: #1b1b1f; --muted: #5c5c68; --line: #e3e3e8; --card: #fafafb;
+      --accent: #2f6df6; --ok: #1a7f37; --bad: #b3261e;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #131317; --fg: #e8e8ec; --muted: #9a9aa6; --line: #2a2a32; --card: #1a1a20;
+        --accent: #7aa2ff; --ok: #4ac26b; --bad: #ff8a80;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 2rem 1rem 4rem; background: var(--bg); color: var(--fg);
+      font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-text-size-adjust: 100%;
+    }
+    main { max-width: 42rem; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin: 0 0 1.25rem; letter-spacing: -.02em; }
+    #verdict {
+      padding: 1rem 1.15rem; border: 1px solid var(--line); border-radius: 10px;
+      background: var(--card); margin-bottom: 1.25rem;
+    }
+    #verdict strong { display: block; font-size: 1.1rem; margin-bottom: .35rem; }
+    #verdict.ok strong { color: var(--ok); }
+    #verdict.bad strong { color: var(--bad); }
+    canvas {
+      display: block; width: 100%; max-width: 22rem; height: auto; aspect-ratio: 16 / 9;
+      border: 1px solid var(--line); border-radius: 8px; background: var(--card);
+    }
+    .cap { color: var(--muted); font-size: .9rem; margin: .4rem 0 1.5rem; }
+    table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+    th, td {
+      text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--line);
+      vertical-align: top; overflow-wrap: anywhere;
+    }
+    th { color: var(--muted); font-weight: 500; white-space: nowrap; width: 40%; }
+    td { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85rem; }
+    /* Two columns do not fit a phone: a user-agent string ends up one character per line.
+       Stack the label above its value instead. */
+    @media (max-width: 34rem) {
+      th, td { display: block; width: auto; }
+      th { border-bottom: 0; padding-bottom: 0; white-space: normal; }
+      td { padding-top: .1rem; }
+    }
+    button {
+      font: inherit; font-size: .9rem; padding: .5rem .9rem; margin: 1.25rem .5rem 0 0;
+      border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: inherit;
+    }
+    a { color: var(--accent); }
+    footer { margin-top: 2rem; padding-top: 1.25rem; border-top: 1px solid var(--line); font-size: .9rem; }
+  </style>
+</head>
+
+<body>
+  <main>
+    <h1>WebGPU check</h1>
+
+    <div id="verdict"><strong>Checking…</strong><span id="advice"></span></div>
+
+    <canvas id="c" width="480" height="270"></canvas>
+    <p class="cap" id="cap">A shader should paint this box. If it stays empty, nothing below ran.</p>
+
+    <h2 style="font-size:1rem;color:var(--muted);margin:0 0 .5rem">Environment</h2>
+    <table id="env"></table>
+
+    <button id="copy">Copy this report</button>
+    <button id="again">Run again</button>
+
+    <footer>
+      Back to the <a href="../index.html">demos</a> and the <a href="tutorial.html">tutorial</a>.
+    </footer>
+  </main>
+
+  <!-- Deliberately a classic script, not a module: if this page cannot run, the reason must
+       still reach the screen, and that rules out anything that could fail to parse first. -->
+  <script>
+    (function () {
+      var $ = function (id) { return document.getElementById(id); };
+      var rows = [];
+      var add = function (k, v) { rows.push([k, v]); };
+
+      var render = function () {
+        var t = $('env');
+        t.textContent = '';
+        for (var i = 0; i < rows.length; i++) {
+          var tr = document.createElement('tr');
+          var th = document.createElement('th');
+          var td = document.createElement('td');
+          th.textContent = rows[i][0];
+          td.textContent = String(rows[i][1]);
+          tr.appendChild(th); tr.appendChild(td); t.appendChild(tr);
+        }
+      };
+
+      var verdict = function (cls, title, advice) {
+        $('verdict').className = cls;
+        $('verdict').querySelector('strong').textContent = title;
+        $('advice').textContent = advice;
+      };
+
+      // A deliberately minimal pipeline: no library, no bind groups, no buffers. If this draws,
+      // WebGPU on this device works and any demo that still fails is the demo's problem.
+      var SHADER =
+        '@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {\n' +
+        '  var p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));\n' +
+        '  return vec4<f32>(p[i], 0.0, 1.0);\n' +
+        '}\n' +
+        '@fragment fn fs(@builtin(position) c: vec4<f32>) -> @location(0) vec4<f32> {\n' +
+        '  let uv = c.xy / 480.0;\n' +
+        '  return vec4<f32>(uv.x, uv.y, 0.6, 1.0);\n' +
+        '}\n';
+
+      var run = function () {
+        rows = [];
+        add('page', location.href);
+        add('userAgent', navigator.userAgent);
+        add('secure context (https or localhost)', String(window.isSecureContext));
+        add('viewport', window.innerWidth + '×' + window.innerHeight +
+          ' @ dpr ' + (window.devicePixelRatio || 1));
+        add('navigator.gpu', navigator.gpu ? 'present' : 'MISSING');
+        render();
+
+        if (!navigator.gpu) {
+          verdict('bad', 'No WebGPU in this browser.',
+            'On Android this usually means you are not in Chrome: Samsung Internet, Firefox for ' +
+            'Android, and the in-app browsers inside chat and mail apps have no WebGPU. Open this ' +
+            'page in Chrome 121 or newer on Android 12 or newer. On desktop you need Chrome/Edge ' +
+            '113+, Firefox 141+ (Windows) or Safari 26+, and the page must be on https or localhost.');
+          if (!window.isSecureContext) {
+            add('note', 'navigator.gpu is only exposed in a secure context — this page is not one.');
+            render();
+          }
+          return;
+        }
+
+        verdict('', 'Asking for an adapter…', '');
+
+        navigator.gpu.requestAdapter().then(function (a) {
+          if (!a) {
+            add('adapter', 'NULL');
+            render();
+            verdict('bad', 'WebGPU is present, but this device gave no adapter.',
+              'The GPU or its driver is blocked for WebGPU here. In Chrome, open ' +
+              'chrome://flags/#enable-unsafe-webgpu, switch it on and relaunch. An incognito ' +
+              'window, or hardware acceleration turned off, will also refuse an adapter.');
+            return;
+          }
+          var info = a.info || {};
+          add('adapter', [info.vendor, info.architecture, info.device, info.description]
+            .filter(Boolean).join(' / ') || '(no info exposed)');
+          add('features', a.features ? a.features.size + ' available' : '?');
+          var L = a.limits || {};
+          var keys = ['maxBufferSize', 'maxStorageBufferBindingSize',
+            'maxComputeInvocationsPerWorkgroup', 'maxComputeWorkgroupStorageSize',
+            'maxStorageBuffersPerShaderStage', 'maxTextureDimension2D'];
+          for (var i = 0; i < keys.length; i++) add(keys[i], L[keys[i]]);
+          render();
+
+          return a.requestDevice().then(function (d) {
+            var canvas = $('c');
+            var ctx = canvas.getContext('webgpu');
+            if (!ctx) throw new Error('canvas.getContext("webgpu") returned null');
+            var fmt = navigator.gpu.getPreferredCanvasFormat();
+            add('preferred canvas format', fmt);
+            ctx.configure({ device: d, format: fmt, alphaMode: 'opaque' });
+
+            var mod = d.createShaderModule({ code: SHADER });
+            var pipe = d.createRenderPipeline({
+              layout: 'auto',
+              vertex: { module: mod, entryPoint: 'vs' },
+              fragment: { module: mod, entryPoint: 'fs', targets: [{ format: fmt }] },
+              primitive: { topology: 'triangle-list' },
+            });
+            var enc = d.createCommandEncoder();
+            var pass = enc.beginRenderPass({
+              colorAttachments: [{
+                view: ctx.getCurrentTexture().createView(),
+                loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              }],
+            });
+            pass.setPipeline(pipe);
+            pass.draw(3);
+            pass.end();
+            d.queue.submit([enc.finish()]);
+
+            return d.queue.onSubmittedWorkDone().then(function () {
+              add('draw', 'submitted and completed');
+              render();
+              verdict('ok', 'WebGPU works on this device.',
+                'A triangle was compiled, drawn and presented. If a demo page still shows nothing, ' +
+                'the problem is in that page rather than in your browser — please report it with ' +
+                'the report below.');
+              $('cap').textContent = 'This gradient is real output from your GPU.';
+            });
+          });
+        }).catch(function (e) {
+          add('error', (e && e.name ? e.name + ': ' : '') + (e && e.message || e));
+          render();
+          verdict('bad', 'WebGPU failed part-way through.',
+            'An adapter was found but the device or the first pipeline did not come up. The error ' +
+            'is in the table below.');
+        });
+      };
+
+      $('again').onclick = run;
+      $('copy').onclick = function () {
+        var text = rows.map(function (r) { return r[0] + ': ' + r[1]; }).join('\n');
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(text).then(function () {
+            $('copy').textContent = 'Copied';
+            setTimeout(function () { $('copy').textContent = 'Copy this report'; }, 1500);
+          });
+        } else {
+          $('copy').textContent = 'Clipboard unavailable — select the table by hand';
+        }
+      };
+
+      window.addEventListener('error', function (ev) {
+        verdict('bad', 'This page itself hit a JavaScript error.',
+          (ev.error && ev.error.message) || ev.message || 'unknown');
+      });
+
+      run();
+    })();
+  </script>
+</body>
+
+</html>

@@ -460,12 +460,19 @@ no TypeScript build needed, and plain-JS users get it too through their editor.
 src/        tinywebgpu.js — the library — and tinywebgpu.d.ts
 dist/       the built artifacts, committed so the demo pages can load them
 tools/      build-min.mjs, its two configs, and find-repeats.mjs
-docs/       the tutorial, API.md, CHANGELOG.md
+docs/       the tutorial, webgpu-check.html, API.md, CHANGELOG.md
 examples/   the eight demo pages
 test/       the test suite
 index.html  the demo index — the site's landing page
 libselect.js  the ?lib=full|min|tiny picker the pages share
+diag.js     puts an uncaught page error on the screen — see "Browser support" below
 ```
+
+`libselect.js` resolves the build it imports against its own `import.meta.url`, not against the
+page's — that is what a dynamic `import()` specifier is resolved against, and this file sits at
+the repo root beside `src/` and `dist/`. So the demo pages work whether the site is served from
+the root of an origin or from a subdirectory like `/tinywebgpu/`. `npm test` checks that by
+resolving every path on every demo page against a subdirectory mount.
 
 To vendor the library, take `src/tinywebgpu.js` (or a file from `dist/`) and drop it next to your
 HTML — there is nothing else to fetch. The site is served straight from the repo root by GitHub
@@ -475,6 +482,21 @@ Pages, which is why `index.html` and `.nojekyll` live there.
 
 WebGPU requires a current browser (Chrome/Edge 113+, Firefox 141+ on Windows, Safari 26+) and
 a secure context (https or localhost). No WebGL fallback — this is a WebGPU tool.
+
+On **Android**, WebGPU means Chrome 121+ on Android 12 or newer. Samsung Internet, Firefox for
+Android, and the in-app browsers that chat and mail apps open links in have no WebGPU at all, so
+a demo opened from a message will not run — open it in Chrome. Where Chrome has WebGPU but the
+driver is blocklisted, `requestAdapter()` returns null; `chrome://flags/#enable-unsafe-webgpu`
+usually gets past that.
+
+Because a phone has no console, the demo pages do not rely on one. Every page loads `diag.js`
+first — a plain, non-module script that turns an uncaught error into a banner on the page:
+a missing `navigator.gpu`, a null adapter, a module that failed to load or parse. The banner
+carries an environment report (user agent, secure context, adapter, limits) and links to
+**[docs/webgpu-check.html](https://lampmaker.github.io/tinywebgpu/docs/webgpu-check.html)**,
+a library-free page that compiles and draws one triangle and reports exactly where the chain
+broke. That page is the right thing to open — and the right report to paste — when a demo shows
+nothing on a device.
 
 ## License
 

@@ -5,6 +5,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TinyWebGPU — demos</title>
+  <!-- Loaded first and on purpose not a module: it turns an uncaught error in the
+       module scripts below — no WebGPU, no adapter, a file that failed to load — into
+       a banner on the page, because a phone has no console to print it to. -->
+  <script src="./diag.js"></script>
   <style>
     :root {
       color-scheme: light dark;
@@ -71,7 +75,10 @@
 
     <div id="unsupported">
       <strong>WebGPU isn’t available in this browser.</strong> The demos need Chrome/Edge 113+,
-      Firefox 141+ (Windows), or Safari 26+, over https or localhost.
+      Firefox 141+ (Windows), or Safari 26+, over https or localhost. On Android that means
+      Chrome 121+ on Android 12+ — Samsung Internet, Firefox for Android and the in-app browsers
+      inside chat and mail apps have no WebGPU at all.
+      <a href="docs/webgpu-check.html">Run the WebGPU check</a> to see what this device reports.
     </div>
 
     <h2>Examples</h2>
@@ -109,6 +116,7 @@
     </ul>
 
     <footer>
+      Nothing rendering? <a href="docs/webgpu-check.html">Check WebGPU on this device</a>.<br>
       Source and docs: <a href="https://github.com/lampmaker/tinywebgpu">github.com/lampmaker/tinywebgpu</a>
       · The <a href="docs/tutorial.html">tutorial</a>, the
       <a href="https://github.com/lampmaker/tinywebgpu#readme">README</a> and the

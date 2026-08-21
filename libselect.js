@@ -146,9 +146,67 @@ export const initPicker = (needs = []) => {
 };
 
 // One call for the example pages: draw the picker and import the chosen build.
-// `base` is the path from the page to the repo root (pages one level down pass '..').
-export const loadLib = async (needs = [], base = '.') => {
+//
+// The path is resolved against `import.meta.url` — this module's own URL — and not against the
+// page's, because that is what a dynamic import() specifier is resolved against. This file sits
+// at the repo root beside src/ and dist/, so the build files are always one plain step away from
+// it, wherever the page doing the importing happens to live.
+//
+// It used to take a `base` argument and build a page-relative specifier ('../src/tinywebgpu.js'
+// from a page one level down). That was wrong, and only looked right when the site was served
+// from the root of its origin, where a leading '..' has nowhere to go and is clamped away. Under
+// GitHub Pages the site lives at /tinywebgpu/, so the '..' resolved out to the domain root and
+// every demo page 404'd on its own library.
+export const loadLib = async (needs = []) => {
   const lib = initPicker(needs);
-  const { WEBGPU } = await import(`${base}/${BUILDS[lib].file}`);
+  const { WEBGPU } = await import(new URL(BUILDS[lib].file, import.meta.url).href);
   return { WEBGPU, lib, missing: missing(needs, lib) };
+};
+
+// Why a WebGPU start-up failure happened, in the terms a reader can act on. `init()` throws in
+// two distinguishable places — no navigator.gpu at all, and an adapter the browser would not
+// hand over — and on a phone those two mean very different things, so they get different text.
+export const gpuAdvice = e => {
+  const m = (e?.message ?? String(e)).toLowerCase();
+  if (!navigator.gpu || m.includes('not supported') || m === '1')
+    return 'This browser has no WebGPU at all. On Android that usually means the built-in ' +
+      'browser rather than Chrome — Samsung Internet, the in-app browser inside a chat or mail ' +
+      'app, or Firefox for Android. Open the page in Chrome 121+ (Android 12 or newer). ' +
+      'On desktop: Chrome/Edge 113+, Firefox 141+ (Windows), or Safari 26+, over https or localhost.';
+  if (m.includes('adapter') || m === '2')
+    return 'This browser has WebGPU, but the device gave back no adapter — the GPU or its driver ' +
+      'is blocked for WebGPU here. In Chrome, opening chrome://flags/#enable-unsafe-webgpu, ' +
+      'switching it on and relaunching usually gets past it. In a private/incognito window, or ' +
+      'with hardware acceleration switched off, an adapter is often refused outright.';
+  return 'WebGPU started but the demo could not set itself up on this device.';
+};
+
+// Show a start-up failure on the page. Without this a demo that cannot reach a GPU throws into
+// the console and leaves a blank canvas behind, which on a phone is indistinguishable from the
+// JavaScript never having run at all.
+export const reportFailure = (e, lib = current()) => {
+  const detail = `${explain(e, lib)} — ${gpuAdvice(e)}`;
+  if (window.TWG_DIAG) window.TWG_DIAG.fail('This demo could not start.', detail);
+  else {                                   // diag.js missing: still say something visible
+    const p = document.createElement('p');
+    p.style.cssText = 'padding:.8rem 1rem;background:#2c2413;color:#f0d79a;font:13px/1.55 sans-serif';
+    p.textContent = 'This demo could not start. ' + detail;
+    document.body.prepend(p);
+  }
+  return detail;
+};
+
+// What the example pages actually call: picker, build import, and `init()` — with any failure
+// turned into something the reader can see and act on. `ctx` is whatever `init()` accepts
+// (a context, a canvas, a selector) or 0 for the compute-only demos.
+export const boot = async (needs = [], ctx = 0, opts = {}) => {
+  const { WEBGPU, lib } = await loadLib(needs);
+  try {
+    const G = await WEBGPU().init(ctx, opts);
+    return { G, WEBGPU, lib, missing: missing(needs, lib) };
+  } catch (e) {
+    const detail = reportFailure(e, lib);
+    window.__result = { ok: false, msg: 'no webgpu: ' + explain(e, lib) };
+    throw new Error(detail, { cause: e });
+  }
 };
