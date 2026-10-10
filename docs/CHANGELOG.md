@@ -2,7 +2,38 @@
 
 All notable changes to TinyWebGPU. Semver; pre-1.0, minor versions may break API.
 
-## Unreleased
+## 0.5.0 — 2026-10-10
+
+**Added — what ShadyTracer's copy had grown, brought home.** ShadyTracer (lampmaker/ShadyTracer)
+carried its own copy of this file and had moved ahead of the release; it now consumes this
+repository instead, so its additions land here:
+- **`async: true`** on `makeCompute`/`makeCompute2D` (and the pipeline factory): compiled with the
+  `create*PipelineAsync` twins, `p.pipeline` a getter that is `0` until `p.ready` settles, and
+  resources bound meanwhile parked and replayed. A dispatch before then throws error 24 by name.
+- **A compute pipeline cache per device**: the same text compiles once (`p.cached`), bounded by
+  `G.pipelineCacheMax` and `G.pipelineCacheChars`, least recently used first; `cache: false` opts
+  out. Keyed by the whole text, never a hash. Synchronous pipelines are cached only once their
+  error scopes come back clean, so only DIAG builds cache them.
+- **`moduleOnly: true`** returns `{ wgsl, module }` without a pipeline; **`p.wgsl`** is the source
+  the driver was given.
+- **`read ` and `uniform ` resource prefixes**: a buffer bound read-only wherever it is declared,
+  or bound `var<uniform>` with UNIFORM usage.
+- **`G.timePasses(fn)`**: a descriptor (e.g. `timestampWrites`) for each compute pass a dispatch
+  opens.
+- `init()` also requests the adapter's `maxStorageBuffersPerShaderStage`.
+- `makeCompute` and `makeCompute2D` pass every option through, where they used to keep only `wg`.
+
+**Changed** — DIAG builds push out-of-memory and internal error scopes as well as validation around
+pipeline creation. The checks a dispatch or draw makes now run before a pass is opened, so a throw
+no longer leaves the frame's encoder with an open pass.
+
+**Fixed** — a dispatch of an async pipeline still compiling, with its resources already set, said
+"No resources bound"; it now says the pipeline is still compiling.
+
+**Build** — `build-min` keeps the `export let WEBGPU=()=>{` splice working when esbuild folds the
+module-level cache declaration into the factory's statement.
+
+## Unreleased (folded into 0.5.0)
 
 **Fixed — the demo pages load their library again when the site is not at the root of its origin**
 

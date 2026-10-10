@@ -182,6 +182,7 @@ const ERRORS = {
   21: 'depth: target size unknown — pass a GPUTexture to drawTo, or supply depth.texture',
   22: 'unknown resource name in setResources',
   23: 'init: the CSS selector matched nothing',
+  24: 'pipeline still compiling (made with { async: true }); await its ready promise',
 };
 
 // ── argv & config ─────────────────────────────────────────────────────────────────────────────
@@ -442,7 +443,10 @@ let packed = code;
 const OPEN = iife ? 'globalThis.WEBGPU=()=>{' : 'export let WEBGPU=()=>{';
 if (!packed.includes(OPEN)) {
   const alias = packed.match(iife ? /globalThis\.WEBGPU=([A-Za-z_$][\w$]*);?/ : /export\{([A-Za-z_$][\w$]*) as WEBGPU\};?/);
-  const decl = alias && new RegExp(`\\b(?:let|var) ${escapeRe(alias[1])}=\\(\\)=>\\{`);
+  // esbuild may fold a module-level declaration before the factory into the same statement
+  // (`let a=new WeakMap,yt=()=>{`): the declarators before the factory's are split off into a
+  // statement of their own, so the factory's opening is still exactly OPEN.
+  const decl = alias && new RegExp(`\\b(let|var) ((?:[^;{}()]|\\(\\))*?,)?${escapeRe(alias[1])}=\\(\\)=>\\{`);
   // The alias must appear exactly twice — declaration and export/assignment — or the splice
   // would orphan a reference. Fail loudly rather than ship a broken artifact.
   const uses = alias ? (packed.match(new RegExp(`\\b${escapeRe(alias[1])}\\b`, 'g')) ?? []).length : 0;
@@ -450,7 +454,7 @@ if (!packed.includes(OPEN)) {
     console.error(`build-min: could not rewrite the WEBGPU export to \`${OPEN}\` — the minified export changed shape.`);
     process.exit(1);
   }
-  packed = packed.replace(alias[0], '').replace(decl, OPEN);
+  packed = packed.replace(alias[0], '').replace(decl, (_, kw, before) => (before ? `${kw} ${before.slice(0, -1)};` : '') + OPEN);
 }
 
 // ── terser second pass: remove what esbuild leaves behind by design ──────────────────────────

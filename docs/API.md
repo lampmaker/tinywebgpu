@@ -11,7 +11,8 @@ await G.init(canvas);        // or a 'webgpu' context, or a CSS selector
 ## Setup
 
 ### `await G.init(ctx?, opts?)`
-Requests adapter + device (with the adapter's max buffer-size limits) and configures the canvas.
+Requests adapter + device (with the adapter's max buffer-size limits and its
+`maxStorageBuffersPerShaderStage`) and configures the canvas.
 `ctx` can be a canvas `'webgpu'` context, a canvas element / OffscreenCanvas, or a CSS selector
 for one — `init('#c')` works. Omit it for compute-only use — render calls then need an explicit
 target view. Populates `G.device`, `G.context`, `G.format`, `G.features`. Throws if WebGPU is
@@ -158,11 +159,27 @@ auto-managed texture needs the target's size, which the library knows for the ca
 `GPUTexture` passed to `drawTo`; handing `drawTo` a raw `GPUTextureView` it has never seen makes
 it throw and ask for a texture or `depth.texture`.
 
-### `G.makeCompute(bodyWGSL, mainWGSL, uniforms?, resources?, { wg = [8,8,1] })`
+### `G.makeCompute(bodyWGSL, mainWGSL, uniforms?, resources?, { wg = [8,8,1], async, cache, moduleOnly })`
 Compute pipeline. `bodyWGSL` = declarations (functions, structs); `mainWGSL` = statements placed
 inside the generated entry point, which receives `gid` (global), `lid` (local), `wid`
 (workgroup) invocation ids. `wg` is the `@workgroup_size`; missing axes default to 1, so
 `wg: [64]` means `[64, 1, 1]`.
+
+- **`async: true`** compiles off-thread with `createComputePipelineAsync`. The handle comes back
+  at once with `p.pipeline` still `0` and a `p.ready` promise; await it before dispatching (a
+  dispatch before then throws and says so). `setResources` called meanwhile is kept and bound
+  when the pipeline arrives. Worth it for big shaders, whose synchronous compile blocks the page.
+- **The compute pipeline cache.** The same WGSL text (schema, `@workgroup_size` and `G.defines`
+  included) on the same device compiles once: a second `makeCompute` gets the first one's
+  `GPUComputePipeline` (immutable, so shared safely) and its own uniform buffer and bind groups.
+  `p.cached` says whether it was a hit. Bounded by `G.pipelineCacheMax` (48 entries) and
+  `G.pipelineCacheChars` (24e6 characters of key); the least recently used goes first. A
+  synchronous pipeline is entered only once its error scopes come back clean, which DIAG builds
+  alone check, so the minified builds cache async pipelines only. `cache: false` neither looks
+  up nor enters — for measuring what a compile costs.
+- **`moduleOnly: true`** returns `{ wgsl, module }` — the exact source and its shader module —
+  and makes no pipeline. `module.getCompilationInfo()` then validates the WGSL without handing it
+  to the driver's compiler.
 
 ### Schemas
 - `uniforms`: `{ name: 'f32' | 'i32' | 'u32' | 'vec2/3/4<f32|u32|i32>' | 'matCxR<f32>' }` →
@@ -179,6 +196,10 @@ inside the generated entry point, which receives `gid` (global), `lid` (local), 
   buffer. Supported forms:
   - `'array<T>'` → `var<storage, read_write>` runtime array (T may be a struct you define in
     `bodyWGSL` or inline via the struct form below)
+  - `'read array<T>'` (any storage type after `read `) → bound `var<storage, read>` by every
+    pipeline that declares it, as if named in that pipeline's `readOnly`
+  - `'uniform array<vec4<f32>, 256>'` (any sized type after `uniform `) → bound `var<uniform>`;
+    its buffer needs UNIFORM usage and fits `maxUniformBufferBindingSize` (64 KiB by default)
   - `'struct Foo { ... }'` → struct emitted + bound as `var<storage, read_write> name: Foo`
   - primitive/vector/matrix → auto-wrapped in a single-field struct, bound as storage
   - `'texture_2d<f32>'`, `'texture_storage_2d<rgba32float, write>'`, … → texture binding
@@ -189,7 +210,10 @@ inside the generated entry point, which receives `gid` (global), `lid` (local), 
 |---|---|
 | `p.uniforms = {vals}` / `p.setUniforms(vals)` / `p.setUniform(name, v)` | Merge values into the CPU staging struct and upload the whole buffer. Vectors/matrices take arrays or TypedArrays (or scalars for 1-wide). A name that is not in the schema throws. |
 | `p.resources = {vals}` / `p.setResources(vals)` | (Re)build the bind group. Pass buffer handles (`{b,w,r}`) or raw `GPUBuffer`s, and textures or views for textures. **Merged** into what is already bound, so partial updates are fine, and **compared by value**, so re-passing the same resources every frame is free. Bind groups are cached per resource combination (up to 8), so a ping-pong that alternates two states builds two groups total, not one per swap. A name that is not in the schema throws, like `setUniforms`. |
-| `p.pipeline` | The raw `GPURenderPipeline`/`GPUComputePipeline`. |
+| `p.pipeline` | The raw `GPURenderPipeline`/`GPUComputePipeline` — `0` until `p.ready` settles for an `async: true` one. |
+| `p.ready` | Promise of the pipeline. Already resolved for a synchronous pipeline, so `await p.ready` is always safe. |
+| `p.wgsl` | The source the driver was given, schema and `G.defines` included. |
+| `p.cached` | Whether a compute pipeline came from the device's pipeline cache. |
 | `p.uniformFields` / `p.resourceFields` | Names, in binding order. |
 
 Compute-only:
@@ -227,6 +251,12 @@ Render-only:
   the `x`/`y`/`width`/`height`/`mipLevel` region keys `readTexture` takes. There is no tiling —
   render as large as `maxTextureDimension2D` allows and save once. The canvas texture is not
   saveable unless you passed `canvasUsage` with `COPY_SRC` to `init`.
+
+### `G.timePasses(fn)`
+`fn(pipeline)` may return a `GPUComputePassDescriptor` — typically `{ timestampWrites }` — for
+each compute pass a dispatch opens for itself; returning nothing opens a plain pass. A
+`beginCompute()` chain's single pass keeps the descriptor it was opened with. `null` turns it off.
+Needs the `'timestamp-query'` feature for timestamps.
 
 ## Frame API (batching)
 

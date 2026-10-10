@@ -16,6 +16,10 @@ Terminology cheatsheet:
  * @typedef {Object.<string, string>} ResourceSchema
  *   name → full WGSL resource type: 'array<T>', 'struct Foo {...}', 'texture_2d<f32>',
  *   'texture_storage_2d<...>', 'sampler', or a primitive (auto-wrapped in a struct).
+ *   A buffer's type may start with `read ` ('read array<T>'): bound `var<storage, read>` by every
+ *   pipeline that declares it, as if named in that pipeline's `readOnly`. Or with `uniform `
+ *   ('uniform array<vec4<f32>, 4096>'): bound `var<uniform>`, a buffer made with UNIFORM usage --
+ *   a sized type, at most the device's maxUniformBufferBindingSize (64 KiB by default).
  *
  * @typedef {Object} BufferHandle
  * @property {GPUBuffer} b - the raw buffer; alias `buffer`
@@ -104,6 +108,13 @@ const F_ALIASES = true;
 // The generated uniform variable's name; makePipeline tests the shader for it.
 const UNIFORM_VAR = 'UB';
 
+// THE COMPUTE PIPELINE CACHE: GPUDevice → Map(key → entry), shared by every instance on that device
+// (makePipeline explains the key and the entries). Keyed by the device rather than the instance,
+// so a second WEBGPU() on the same device shares it, and a new device — `S.device = d`, or init()
+// again — starts empty instead of handing out pipelines another device made. A WeakMap, so a
+// device let go takes its pipelines with it.
+let pipeCaches = new WeakMap();
+
 
 
 
@@ -146,7 +157,8 @@ export let WEBGPU = () => {
     fPass = 0,                 // the open chained compute pass, if beginCompute() opened one
     fPassOpts = 0,             // that pass's descriptor, so a mid-chain reopen keeps e.g. timestampWrites
     fOwned = false,            // the encoder came from beginCompute(), so endCompute() submits it
-    fBound = 0;                // the bind fn of the pipeline currently bound to fPass
+    fBound = 0,                // the bind fn of the pipeline currently bound to fPass
+    passTimer = 0;             // timePasses(): a descriptor for each compute pass a dispatch opens
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   // PUBLIC API
@@ -169,6 +181,12 @@ export let WEBGPU = () => {
     // Called with the GPUDeviceLostInfo on a context crash, driver reset or tab backgrounding.
     // The library logs regardless; set this to rebuild.
     onDeviceLost: 0,
+    // The compute pipeline cache's bounds (see makePipeline): how many pipelines it keeps, and the
+    // total characters of their keys. The second is there because a key is the whole shader text,
+    // and a path tracer's kernels run to hundreds of thousands of characters each; the first
+    // because what a cached pipeline holds on the GPU side is not known. The oldest-used goes
+    // first. The cache is the device's, so the instance that inserts applies its own bounds.
+    pipelineCacheMax: 48, pipelineCacheChars: 24e6,
 
 
 
@@ -208,8 +226,14 @@ export let WEBGPU = () => {
       ctx?.getContext && (ctx = ctx.getContext('webgpu')),   // a canvas rather than a context
       (a = await gpu.requestAdapter()) || err(2, MSG && 'No GPU adapter'),
       // Raise these to whatever the adapter allows; anything in opts.limits still wins.
+      // Asking for exactly what the adapter reports can never fail, which is what makes this
+      // safe to do unconditionally. maxStorageBuffersPerShaderStage defaults to 8 and is the
+      // one that bites without warning: a kernel grows a ninth binding and pipeline creation
+      // throws at setScene, pages away from the line that added it. Desktop adapters report
+      // 16 or more; one that reports 8 still gets 8 and the kernel still has to fit.
       d = { ...opts.limits },
-      ['maxStorageBufferBindingSize', 'maxBufferSize'].forEach(k => d[k] ??= a.limits[k]),
+      ['maxStorageBufferBindingSize', 'maxBufferSize',
+       'maxStorageBuffersPerShaderStage'].forEach(k => d[k] ??= a.limits[k]),
       // Asking for a feature the adapter lacks would throw, so filter first.
       w = opts.features ?? [],
       DIAG && (drop => drop.length && console.warn(
@@ -241,6 +265,7 @@ export let WEBGPU = () => {
       F_DEPTH && (depthCache.forEach(t => t.destroy()), depthCache.clear()),
       F_SHOW && blitCache.clear(),
       F_MIPS && mipCache.clear(),
+      D && pipeCaches.delete(D),
       D && D.destroy(),   // `&&`, not `?.` — the empty value is 0, which `?.` would try to call through
       D = 0),
 
@@ -324,13 +349,21 @@ ${frag}
      * statements of the generated entry point, which receives `gid`, `lid` and `wid`.
      * @param {string} body @param {string} main
      * @param {UniformSchema} [uniforms] @param {ResourceSchema} [resources]
-     * @param {{wg?: number[]}} [opts] workgroup size, default [8,8,1]
+     * @param {{wg?: number[], async?: boolean, cache?: boolean, moduleOnly?: boolean}} [opts] workgroup size, default [8,8,1];
+     *   `async: true` compiles off-thread — see the `async` option on the pipeline factory;
+     *   `cache: false` always compiles and keeps nothing, for measuring what a compile costs —
+     *   by default the same text on the same device is compiled once (see the pipeline factory)
+     *   and the handle's `cached` says whether it was;
+     *   `moduleOnly: true` returns `{ wgsl, module }` and makes no pipeline, nor any cache entry — see the factory
      * @returns {ComputePipeline}
      */
-    makeCompute: (body, main, uniforms, resources, { wg = [8, 8, 1] } = {}) => (
+    makeCompute: (body, main, uniforms, resources, { wg = [8, 8, 1], ...opts } = {}) => (
       // Missing axes default to 1 — `wg: [64]` used to interpolate `undefined` into the WGSL.
       wg = [wg[0] ?? 1, wg[1] ?? 1, wg[2] ?? 1],
       makePipeline({
+      // ...and everything else (today: `async`, `cache`, `moduleOnly`) spreads through to makePipeline, where its
+      // default lives. Naming only `wg` here used to drop the rest in silence.
+      ...opts,
       // Kept flush-left: this text is prepended to every generated shader, so it is hashed,
       // compiled, and line-numbered in compile errors. `${wg}` renders as `x,y,z`.
       code: `${body}
@@ -358,8 +391,8 @@ ${main}
      * @returns {ComputePipeline & {run: (w?: number, h?: number, d?: number) => void}}
      */
     // `p` and `run` are trailing-parameter locals; `run` captures p.run before OA overwrites it.
-    makeCompute2D: ({ body, decls = '', uniforms, resources, size = [1, 1], wg }, p, run) => (
-      p = S.makeCompute(decls, body, uniforms, resources, { wg }),
+    makeCompute2D: ({ body, decls = '', uniforms, resources, size = [1, 1], wg, ...opts }, p, run) => (
+      p = S.makeCompute(decls, body, uniforms, resources, { wg, ...opts }),
       run = p.run,
       OA(p, { run: (w = size[0], h = size[1], d = 1, encoder) => run(w, h, d, encoder) })),
 
@@ -415,6 +448,11 @@ ${main}
     endCompute: () => (
       endPass(),
       fOwned && S.endFrame()),             // beginCompute() opened the encoder; nothing else submits it
+    // PASS TIMING: fn(program) may return a descriptor for each compute pass a dispatch opens for
+    // itself, or nothing for a plain one. The path tracer's per-kernel GPU time puts timestampWrites
+    // there (pathtracer/core/kerneltime.js). Not for a beginCompute() chain: its one pass keeps the
+    // descriptor it was opened with. null stops it.
+    timePasses: fn => { passTimer = fn || 0; },
 
 
 
@@ -1114,16 +1152,19 @@ ${main}
   // order; a blend state, if given, applies to every target.
   // The {module, entryPoint} stage descriptor, spelled once for all three stages.
   let stage = (module, entryPoint) => ({ module, entryPoint });
-  let rawRender = (module, format, topology, blend, dep) => (
+  // The descriptors are built apart from the create call so the same one serves
+  // createRenderPipeline / createComputePipeline and their Async twins — see the `async`
+  // option on makePipeline.
+  let renderDesc = (module, format, topology, blend, dep) => (
     blend = resolveBlend(blend),
-    D.createRenderPipeline({
+    {
       layout: 'auto',
       vertex: stage(module, 'vs_main'),
       fragment: OA(stage(module, 'fs_main'), { targets: [format].flat().map(f => blend ? { format: f, blend } : { format: f }) }),
       primitive: { topology },
       ...(F_DEPTH && dep ? { depthStencil: { format: dep.format, depthWriteEnabled: dep.write, depthCompare: dep.compare } } : {}),
-    }));
-  let rawCompute = module => D.createComputePipeline({ layout: 'auto', compute: stage(module, 'main') });
+    });
+  let computeDesc = module => ({ layout: 'auto', compute: stage(module, 'main') });
 
   // ─── Schema engine ─────────────────────────────────────────────────────────────────────────
   // Turns the two schema objects into WGSL declarations, a CPU-side uniform struct with a writer,
@@ -1220,8 +1261,19 @@ ${structFields.join('\n')}
     // Anything that is not a texture or sampler is a storage buffer and needs an address space.
     // Three forms: `array<…>` is kept as-is, a full `struct Foo {…}` is emitted and bound by name,
     // and a bare primitive/vector/matrix is auto-wrapped in `struct name_buf { value: T }`.
+    // A BUFFER THAT SAYS `read ` IS BOUND READ-ONLY WHEREVER IT IS DECLARED. `readOnly` is per
+    // pipeline, so a buffer shared by many pipelines (a scene's, handed to every kernel that reads
+    // the scene) was read_write wherever one call site forgot it -- all of them, for the scene as
+    // data. The marker travels with the resource instead, and is stripped here: `_wgslType` and the
+    // WGSL are the type alone.
+    // A BUFFER THAT SAYS `uniform ` IS BOUND `var<uniform>`: small, read-only, and read through the
+    // path GPUs keep for values every thread reads alike (a scene's records, walked in step by every
+    // ray: builder/scenedata.js). Its type must be sized, and its buffer made with UNIFORM usage.
     let resourceLayout = {};
-    let resourceWGSL = OE(resources).map(([name, wgslType], i, a,
+    let resourceWGSL = OE(resources).map(([name, declared], i, a,
+      ro = /^read\s+/.test(declared),
+      uni = /^uniform\s+/.test(declared),
+      wgslType = declared.replace(/^(read|uniform)\s+/, ''),
       b = binding++,
       isTex = wgslType.startsWith('texture_'),
       isSampler = wgslType.startsWith('sampler'),   // 'sampler' | 'sampler_comparison'
@@ -1234,9 +1286,9 @@ ${structFields.join('\n')}
             typeForBinding = wgslType.match(/^struct\s+([A-Za-z_][A-Za-z0-9_]*)/)?.[1] ?? wgslType)
           : (typeForBinding = `${name}_buf`,
             decls = `struct ${typeForBinding} {\n  value: ${wgslType},\n}`)),
-      resourceLayout[name] = { _binding: b, _wgslType: wgslType, _isBuf: isBuf, _isTex: isTex, _isSampler: isSampler },
+      resourceLayout[name] = { _binding: b, _wgslType: wgslType, _isBuf: isBuf, _isUniform: isBuf && uni, _isTex: isTex, _isSampler: isSampler },
       (decls && `${decls}\n`) +
-        `${gb(b)}${isBuf ? `<storage, read${readOnly.includes(name) ? '' : '_write'}>` : ''} ${name}: ${typeForBinding};`));
+        `${gb(b)}${!isBuf ? '' : uni ? '<uniform>' : `<storage, read${ro || readOnly.includes(name) ? '' : '_write'}>`} ${name}: ${typeForBinding};`));
 
     // `wgsl` / `uniformBuffer` / `uniformWrite` are the documented shape and keep their names. The
     // rest is internal, so it is `_`-prefixed and the minified build renames it.
@@ -1260,13 +1312,20 @@ ${structFields.join('\n')}
 
   // ─── Pipeline factory ──────────────────────────────────────────────────────────────────────
   // The engine behind makeFrag / makeDraw / makeCompute: generate the schema WGSL, compile the
-  // pipeline, and hand back the object those three return. Synchronous throughout — every
+  // pipeline, and hand back the object those three return. Synchronous by default — every
   // WebGPU call on this path is synchronous by spec (see compileShader above), so the pipeline
   // is usable on the next line and pieces never await a factory.
+  // `async: true` opts out of exactly that, and only that. createRenderPipeline /
+  // createComputePipeline hand the module to the driver and BLOCK the calling thread until it
+  // has compiled it; for a big shader that is seconds to a minute in which the page cannot
+  // paint. The Async twins do the same work off-thread, so the handle comes back with its
+  // `pipeline` still empty and a `ready` promise that settles when it is filled. Await `ready`
+  // before dispatching or drawing — bind() says so by name if you forget.
   // `wg` has no default: makeCompute always normalizes and passes it, and render never reads it.
   let makePipeline = ({ code, uniforms = {}, resources = {}, format = S.format,
     _isCompute: isCompute = false, blend, wg, _targetNames: targetNames,
-    topology = 'triangle-list', count = 3, instances = 1, readOnly = [], depth }) => {
+    topology = 'triangle-list', count = 3, instances = 1, readOnly = [], depth,
+    async: isAsync = false, cache: useCache = true, moduleOnly = false }) => {
     // The resolved depth config: defaults, overridable field by field. `texture` is the caller's
     // own depth attachment; without it drawTo manages one sized to the target.
     let dep = F_DEPTH && depth && !isCompute
@@ -1298,14 +1357,107 @@ ${structFields.join('\n')}
     // Prepend the schema WGSL; compileShader expands G.defines on the complete source.
     let finalCode = schema.wgsl ? `${schema.wgsl}\n${code}` : code;
 
-    // The error scope is purely for reporting: WebGPU rejects a bad pipeline either way, and
-    // without DIAG the driver's own message is the one that surfaces.
-    if (DIAG) D.pushErrorScope('validation');
-    let module = S.makeShader(finalCode);
-    let pipeline = isCompute ? rawCompute(module) : rawRender(module, format, topology, blend, dep);
-    if (DIAG) D.popErrorScope().then(err => {
-      err && console.error(`[TinyWebGPU] Pipeline creation failed:\n${err.message}`);
-    }).catch(() => { });   // scope pop rejects if the device is lost meanwhile
+    // `moduleOnly: true`: the source and its module exactly as the pipeline would have them -- schema, entry
+    // point, G.defines -- and no pipeline. For a caller that only asks whether the WGSL is valid: the module's
+    // getCompilationInfo() answers that from the browser's front end (parse, types, uniformity), while making
+    // a pipeline also hands it to the driver's compiler. Measured by the user: 27-33 ms for a march kernel's
+    // module (Pascal, 2026-10-02); the builder's probe, made as a pipeline, recorded at 1.2-3.1 s (PERFORMANCE.md,
+    // a structural edit end to end). What only the driver refuses, this cannot see.
+    if (moduleOnly) return { wgsl: finalCode, module: S.makeShader(finalCode) };
+
+    // Sync: `pipeline` is filled below, before makePipeline returns. Async: it stays 0 until `ready`
+    // settles, and an async creation failure arrives as a rejection rather than through the error
+    // scope, so it is reported on the promise instead.
+    let pipeline = 0;
+    // layout:'auto' means the bind group layout comes FROM the pipeline, so a bind group cannot
+    // be built before it exists. setResources on a pipeline still compiling therefore parks its
+    // values here and they are replayed the moment it arrives — callers bind resources when they
+    // have them, not when the driver is finished.
+    let pending = 0;
+    let ready;
+    // What an async pipeline does when it arrives, whether it was compiled here or by an earlier
+    // request for the same text: fill the handle, then replay what setResources parked.
+    let arrive = p => (pipeline = p, pending && (rebindResources(pending), pending = 0), p);
+
+    // THE COMPUTE PIPELINE CACHE. A revisit — a scene switched back to, a structural edit undone, a
+    // second renderer (the raytracer's studio) building what the first already has, a failed
+    // scene change rebuilding the scene before — asks for text this device has compiled already,
+    // and without a cache every one of them was a module and a pipeline again, and a compile
+    // again whenever the browser's own cache did not answer. With it the same text on the same
+    // device makes no shader module and no pipeline: only the handle's own uniform buffer (made
+    // above) and its bind groups, which every handle needs whoever compiled its pipeline.
+    // What is shared is only the GPUComputePipeline, which is immutable. Each handle keeps its own
+    // uniform buffer (buildSchema made it above) and builds its own bind groups from that pipeline's
+    // layout, so two handles on one pipeline never see each other's values.
+    // THE KEY IS THE WHOLE TEXT, not a hash of it: two texts that hashed alike would hand one the
+    // other's pipeline — the collision the old toolkit's hashed cache had (toolkit BUG-008) — and
+    // a Map lookup on a 348K-character key is about 0.2 ms (measured in node). finalCode holds the
+    // schema and the @workgroup_size; G.defines is expanded later, at compile, so it joins the key;
+    // the entry point and layout:'auto' are fixed by computeDesc. Pipeline `constants`, if ever
+    // added to computeDesc, must join the key too. Compute only: a render pipeline also depends on
+    // its format, blend, topology and depth, and none here is costly enough to be worth keying.
+    // An entry is { _p } once its pipeline exists, { _r } while an async one is compiling: a second
+    // async request for that text waits on the same compile rather than starting its own, and a
+    // rejection drops the entry so the next request compiles again. A sync pipeline is entered only
+    // once its error scopes have come back clean (DIAG builds): sync creation never throws, so before
+    // that nothing says it is not an invalid pipeline — and without DIAG nothing ever says, so sync
+    // pipelines are not cached at all there. Clean means of every kind, not validation alone: a
+    // scope catches only its own kind, and a sync pipeline that failed with an internal error (a
+    // backend compile that failed) would otherwise pass as clean and be handed, invalid, to every
+    // later request for its text instead of the compile that might succeed. Async needs none of
+    // this: createComputePipelineAsync rejects on either kind. A sync request that finds an async compile still in
+    // flight compiles its own: it cannot wait. `cache: false` neither looks up nor enters, for the
+    // measurements that exist to compile (the path tracer's profile.js profileWG): its throwaway
+    // pipelines would otherwise also push the real ones out.
+    let key = D && isCompute && useCache ? `C|main|${S.defines}|${finalCode}` : 0;
+    let pc = key && (pipeCaches.get(D) || (pipeCaches.set(D, new Map()), pipeCaches.get(D)));
+    let hit = key && pc.get(key);
+    hit && (pc.delete(key), pc.set(key, hit));           // the most recently used is last
+    // Enter `e` under the key, then drop the least recently used until both bounds hold — an entry
+    // larger than pipelineCacheChars by itself is dropped too, so it is simply not kept.
+    let put = (e, n = 0) => {
+      pc.delete(key); pc.set(key, e);
+      for (let k of pc.keys()) n += k.length;
+      for (let k of pc.keys()) {
+        if (pc.size <= S.pipelineCacheMax && n <= S.pipelineCacheChars) break;
+        n -= k.length; pc.delete(k);
+      }
+    };
+    // Whether this handle's pipeline came from the cache, compiled or in flight (the `cached` getter).
+    let cached = 0;
+    if (hit && hit._p) {
+      cached = 1;
+      pipeline = hit._p;
+      ready = Promise.resolve(pipeline);
+    } else if (hit && isAsync) {
+      cached = 1;
+      // The first request logs a failure; this one only passes the rejection on.
+      ready = hit._r.then(arrive);
+    } else {
+      // The error scopes are for reporting, and for the cache's sync entry above: WebGPU rejects a
+      // bad pipeline either way, and without DIAG the driver's own message is the one that surfaces.
+      // One per kind of error, popped together below.
+      if (DIAG) D.pushErrorScope('out-of-memory'), D.pushErrorScope('internal'), D.pushErrorScope('validation');
+      let module = S.makeShader(finalCode);
+      let desc = isCompute ? computeDesc(module) : renderDesc(module, format, topology, blend, dep);
+      if (isAsync) {
+        let raw = isCompute ? D.createComputePipelineAsync(desc) : D.createRenderPipelineAsync(desc), ent;
+        // The entry's own handlers, on a branch of their own: `ready` below still rejects for the caller.
+        key && (put(ent = { _r: raw }), raw.then(p => { ent._p = p; }, () => { pc.get(key) === ent && pc.delete(key); }));
+        ready = raw.then(arrive, e => {
+          console.error(`[TinyWebGPU] Pipeline creation failed:\n${e.message || e}`);
+          throw e;
+        });
+      } else {
+        pipeline = isCompute ? D.createComputePipeline(desc) : D.createRenderPipeline(desc);
+        ready = Promise.resolve(pipeline);
+      }
+      if (DIAG) Promise.all([D.popErrorScope(), D.popErrorScope(), D.popErrorScope()]).then(errs => {
+        let err = errs.find(e => e);
+        err && console.error(`[TinyWebGPU] Pipeline creation failed:\n${err.message}`);
+        !err && key && !isAsync && put({ _p: pipeline });   // free of every kind of error only now
+      }).catch(() => { });   // scope pop rejects if the device is lost meanwhile
+    }
 
     let bindGroup = 0, bound = 0;   // `bound` = the resource map the current group was built from
 
@@ -1314,7 +1466,8 @@ ${structFields.join('\n')}
     // of driver validation text into one line naming the resource and the missing flag. Diagnostics
     // only — WebGPU validates the bind group itself, so the minified build folds this away.
     let usageNeed = !DIAG ? 0 : info =>
-      info._isBuf ? [BUF_STORAGE, 'GPUBufferUsage.STORAGE']
+      info._isUniform ? [BUF_UNIFORM, 'GPUBufferUsage.UNIFORM']
+        : info._isBuf ? [BUF_STORAGE, 'GPUBufferUsage.STORAGE']
         : info._isTex ? (/^texture_storage_/.test(info._wgslType)
           ? [TEX_STORAGE_BINDING, 'GPUTextureUsage.STORAGE_BINDING (use createStorageTexture)']
           : [TEX_BINDING, 'GPUTextureUsage.TEXTURE_BINDING'])
@@ -1382,37 +1535,67 @@ ${structFields.join('\n')}
           bgCache.size >= 8 && bgCache.delete(bgCache.keys().next().value),   // oldest out
           bgCache.set(key, bindGroup))));
 
+    // The public door onto rebindResources: binds now if the pipeline is here, parks the values
+    // if it is still compiling (see `pending` above). Parking MERGES, so a caller that binds its
+    // resources over several calls gets the same result either side of `ready`.
+    let setRes = values => {
+      if (pipeline) { rebindResources(values); return; }
+      pending = { ...(pending || {}), ...(values || {}) };
+    };
+
     // Nothing left for the caller to supply: build @group(0) now. Otherwise wait for
     // setResources, so the group is never built against a layout still missing entries.
-    if (uBinding >= 0 && !rFields.length) rebindResources({});
+    if (uBinding >= 0 && !rFields.length) setRes({});
 
     // Whether @group(0) exists at all. If it does and nothing is bound to it, dispatching produces
     // a bare "bind group 0 is not set" from the driver — say which call is missing instead.
     let needsBindGroup = uBinding >= 0 || rFields.length > 0;
 
-    let bind = pass => (
+    // The two ways a dispatch or draw cannot go ahead, as a check of its own so it runs BEFORE a pass
+    // is opened. It ran inside bind(), after beginComputePass/beginRenderPass, so the throw left that
+    // pass open: nothing here knew of it, and the frame's finish() then failed on it ("Command buffer
+    // recording ended before [ComputePassEncoder] was ended") -- one error became three, and the
+    // frame was lost. A renderer that dispatched a pipeline still compiling did exactly that.
+    let check = () => (
+      // An `async: true` pipeline is empty until the driver has compiled it. Saying so beats
+      // the driver's "setPipeline: parameter is not of type GPUComputePipeline". Asked first: its
+      // bind group cannot exist before it does (setResources parks the values until then), so
+      // asked second it was always "No resources bound", to a caller that had bound them.
+      !pipeline && err(24, MSG && `Pipeline is still compiling. This pipeline was made with { async: true }; await its \`ready\` promise before dispatching/drawing.`),
       !bindGroup && needsBindGroup &&
-        err(15, MSG && `No resources bound. Call setResources({ ${rFields.join(', ')} }) before dispatching/drawing.`),
+        err(15, MSG && `No resources bound. Call setResources({ ${rFields.join(', ')} }) before dispatching/drawing.`));
+    let bind = pass => (
+      check(),
       pass.setPipeline(pipeline),
       bindGroup && pass.setBindGroup(0, bindGroup));
 
     // Records compute work. When beginCompute() has a pass open on the encoder we would use, join
     // it — rebinding only if the last pipeline bound to it was a different one — so chaining is
     // what you get by default and `dispatch()` never silently ends someone else's chain.
-    // Otherwise open a pass of our own, and submit if we also own the encoder.
+    // Otherwise open a pass of our own, and submit if we also own the encoder -- checked first (above).
     let computePass = (record, encoder) =>
       fPass && (!encoder || encoder === fEnc)
         ? (fBound !== bind && (bind(fPass), fBound = bind), record(fPass))
-        : onEncoder(encoder, (enc, pass = enc.beginComputePass()) =>
-          (bind(pass), record(pass), pass.end()));
+        : onEncoder(encoder, (enc, pass) =>
+          (check(), pass = enc.beginComputePass(passTimer ? passTimer(base) : undefined), bind(pass), record(pass), pass.end()));
 
     let base = {
-      pipeline,
+      // A getter, not a value: with { async: true } the pipeline arrives later.
+      get pipeline() { return pipeline; },
+      // Resolves to the GPUPipeline once the driver has compiled it. Already resolved for a
+      // synchronous pipeline, so `await p.ready` is safe and free whichever way it was made.
+      ready,
+      // The source the driver was actually given, schema and G.defines included. Worth having
+      // when a shader takes a long time to compile: its size is the thing that predicts that.
+      get wgsl() { return finalCode; },
+      // Whether the pipeline came from the device's compute pipeline cache rather than a compile of
+      // its own (see `cache` above) — true too while it waits on a compile another request started.
+      get cached() { return !!cached; },
       set uniforms(values) { uWrite(values); },
       setUniform: (name, value) => uWrite({ [name]: value }),
       setUniforms: values => uWrite(values),
-      set resources(values) { rebindResources(values); },
-      setResources: values => rebindResources(values),
+      set resources(values) { setRes(values); },
+      setResources: values => setRes(values),
       ...(F_ALIASES ? {
         get uniformFields() { return schema._uniformFields; },
         get resourceFields() { return rFields; },
@@ -1457,6 +1640,7 @@ ${structFields.join('\n')}
           : [view ? asView(view) : targetView()];
 
         onEncoder(encoder, (enc, pass) => (
+          check(),                              // before the pass opens (see check)
           enc === fEnc && fPass && endPass(),   // a render pass cannot nest inside the compute pass
           pass = enc.beginRenderPass({
             colorAttachments: views.map(v => ({ view: v, loadOp, storeOp: 'store', clearValue })),
