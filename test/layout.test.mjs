@@ -6,6 +6,9 @@
 
 const ENTRY = process.env.TWG_ENTRY ?? '../src/tinywebgpu.js';
 const { WEBGPU } = await import(ENTRY);
+// The source build. A minified one has DIAG off (so a sync pipeline is never cached: nothing says
+// it compiled clean) and mangles internal names, so what rests on either is asked of the source only.
+const SOURCE = !process.env.TWG_ENTRY;
 // The long-form and one-letter tables the defines tests exercise (the tutorial ships a
 // similar one — a table is just a string, so there is no module to import).
 const TOKENS = `
@@ -82,6 +85,21 @@ const layoutOf = uniforms => {
   check('vec3<u32>+u32 written uints', [...new Uint32Array(lastWrite)], [10, 20, 30, 7]);
 }
 
+// --- a write MERGES into the struct: a field not named keeps its value ------
+// (API.md, setUniforms). A caller that hands the whole bag once and then only what moves rests on
+// it: a write that cleared what it did not name would zero every other field from the second on.
+{
+  const { write } = layoutOf({ a: 'f32', b: 'f32', v: 'vec2<f32>' });
+  write({ a: 1, b: 2, v: [5, 6] });
+  write({ a: 3 });
+  check('a later write names one field, the others keep theirs', [...new Float32Array(lastWrite)], [3, 2, 5, 6]);
+  write({ v: [7, 8] });
+  check('...and the whole struct is what is written each time', [...new Float32Array(lastWrite)], [3, 2, 7, 8]);
+  let threw = false;
+  try { write({ notDeclared: 1 }); } catch { threw = true; }
+  check('a name the schema does not declare throws (so a caller with a wider bag must filter it)', threw, true);
+}
+
 // --- createStorageBuffer: size vs create-and-fill -------------------
 {
   const bySize = S.createStorageBuffer(64);
@@ -117,6 +135,30 @@ const layoutOf = uniforms => {
   let threw = '';
   try { w2({ tiem: 1 }); } catch (e) { threw = e.message; }
   check('uniform write rejects an unknown name', /Unknown uniform 'tiem'/.test(threw), true);
+}
+
+// --- A BUFFER MARKED `read ` IS BOUND READ-ONLY WHEREVER IT IS DECLARED -------
+// (`readOnly` is per pipeline, so a buffer many pipelines share was read_write wherever one call
+// site forgot it; the marker travels with the resource instead)
+{
+  const r = S.makeSchema({}, { a: 'read array<vec4<f32>>', b: 'array<f32>', c: 'array<u32>' }, { readOnly: ['c'] });
+  const decl = name => (r.wgsl.match(new RegExp(`var(<[^>]*>)? ${name}: [^;]*;`)) || [''])[0];
+  check('`read array<T>` binds var<storage, read>, the marker gone from the type', decl('a'), 'var<storage, read> a: array<vec4<f32>>;');
+  check('an unmarked buffer stays read_write', decl('b'), 'var<storage, read_write> b: array<f32>;');
+  check('readOnly still works for one pipeline', decl('c'), 'var<storage, read> c: array<u32>;');
+  check('the layout keeps the type alone', r._resourceLayout?.a?._wgslType ?? 'array<vec4<f32>>', 'array<vec4<f32>>');
+}
+
+// --- A BUFFER MARKED `uniform ` IS BOUND var<uniform> --------------------------
+{
+  const r = S.makeSchema({}, { recs: 'uniform array<vec4<f32>, 4096>', data: 'read array<vec4<f32>>' }, { readOnly: ['recs'] });
+  const decl = name => (r.wgsl.match(new RegExp(`var(<[^>]*>)? ${name}: [^;]*;`)) || [''])[0];
+  check('`uniform T` binds var<uniform>, the marker gone from the type', decl('recs'), 'var<uniform> recs: array<vec4<f32>, 4096>;');
+  check('...readOnly naming it changes nothing (a uniform is read-only already)', /storage/.test(decl('recs')), false);
+  check('...beside a storage buffer as before', decl('data'), 'var<storage, read> data: array<vec4<f32>>;');
+  check('...the bindings numbered in order', [...r.wgsl.matchAll(/@binding\((\d+)\)/g)].map(m => +m[1]), [0, 1]);
+  // the bind-time check (DIAG) then asks its buffer for UNIFORM usage, not STORAGE: it refused the first draft's
+  SOURCE && check('...marked a uniform in the layout, the storage buffer not', [r._resourceLayout?.recs?._isUniform, r._resourceLayout?.data?._isUniform], [true, false]);
 }
 
 // --- pipeline: generated entry point, dispatch sizing, resource binding -----
@@ -157,6 +199,36 @@ const layoutOf = uniforms => {
   check('run() divides item count by the workgroup size', dispatched, [16, 1, 1]);
   p.dispatch(1000);
   check('dispatch() still counts workgroups', dispatched, [1000, 1, 1]);
+
+  // --- the compute pipeline cache: the same text on the same device compiles once -----------
+  // (a sync pipeline is entered only once its error scopes come back clean, so the second request
+  // has to come after they have settled)
+  let compiles = 0, asyncCompiles = 0;
+  const createComputePipeline = S.device.createComputePipeline;
+  S.device.createComputePipeline = d => (compiles++, createComputePipeline(d));
+  S.device.createComputePipelineAsync = async d => (asyncCompiles++, createComputePipeline(d));
+  const text = 'if (gid.x < UB.n) { a[gid.x] = 1.0; }';
+  const mk = opts => S.makeCompute('', text, { n: 'u32' }, { a: 'array<f32>' }, { wg: [64, 1, 1], ...opts });
+  const c1 = mk();
+  await new Promise(r => setTimeout(r, 0));
+  const c2 = mk();
+  check('the same compute text compiles once', [compiles, c1.cached, c2.cached], SOURCE ? [1, false, true] : [2, false, false]);
+  SOURCE && check('...and the two handles share the pipeline', c1.pipeline === c2.pipeline, true);
+  const before = compiles;
+  mk({ cache: false });
+  check('cache: false compiles anyway', compiles, before + 1);
+  const a1 = mk({ async: true, wg: [32, 1, 1] });
+  check('async: no pipeline until ready', a1.pipeline, 0);
+  a1.setResources({ a: A });                       // parked until the pipeline arrives
+  let early = '';
+  try { a1.dispatch(1); } catch (e) { early = e.message; }
+  check('...and dispatching before then says so', /still compiling/.test(early), true);
+  const a2 = mk({ async: true, wg: [32, 1, 1] });
+  await a1.ready; await a2.ready;
+  check('...a second async request waits on the first compile', [asyncCompiles, a2.cached], [1, true]);
+  check('...ready fills the pipeline', !!a1.pipeline, true);
+  const m = mk({ moduleOnly: true });
+  check('moduleOnly hands back the text and a module, and compiles nothing', [typeof m.wgsl, !!m.module, compiles], ['string', true, before + 1]);
 }
 
 // --- readTexture: rows come back tightly packed, without the 256-byte padding -------------

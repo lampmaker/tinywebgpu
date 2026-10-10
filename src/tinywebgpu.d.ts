@@ -58,7 +58,14 @@ export interface PingPong<T> {
 }
 
 export interface Pipeline {
-  pipeline: GPURenderPipeline | GPUComputePipeline;
+  /** 0 until `ready` settles for an `async: true` pipeline; the pipeline itself otherwise. */
+  readonly pipeline: GPURenderPipeline | GPUComputePipeline | 0;
+  /** Resolves to the pipeline once compiled. Already resolved for a synchronous one. */
+  readonly ready: Promise<GPURenderPipeline | GPUComputePipeline>;
+  /** The source the driver was given: schema, entry point and G.defines included. */
+  readonly wgsl: string;
+  /** Whether the pipeline came from the device's compute pipeline cache. */
+  readonly cached: boolean;
   /** Merge values into the CPU struct and upload. Unknown names throw. */
   uniforms: Record<string, number | number[] | ArrayBufferView>;
   setUniforms(values: Record<string, number | number[] | ArrayBufferView>): void;
@@ -125,6 +132,15 @@ export interface MakeDrawOptions {
   depth?: Depth | None;
 }
 
+export interface ComputeOptions {
+  /** @workgroup_size, default [8,8,1]. */
+  wg?: number[];
+  /** Compile off-thread: `pipeline` is 0 until `ready` settles. */
+  async?: boolean;
+  /** false: always compile, and keep nothing in the device's pipeline cache. Default true. */
+  cache?: boolean;
+}
+
 export interface MakeFragOptions {
   format?: GPUTextureFormat | GPUTextureFormat[];
   blend?: Blend | None;
@@ -158,12 +174,15 @@ export interface TinyWebGPU {
   makeDraw(opts: MakeDrawOptions): RenderPipeline;
   /** Compute pipeline: `body` = declarations, `main` = entry-point statements (gid/lid/wid in scope). */
   makeCompute(body: string, main: string, uniforms?: UniformSchema, resources?: ResourceSchema,
-    opts?: { wg?: number[] }): ComputePipeline;
+    opts?: ComputeOptions & { moduleOnly?: false }): ComputePipeline;
+  /** `moduleOnly: true`: the WGSL and its shader module as the pipeline would have them, and no pipeline. */
+  makeCompute(body: string, main: string, uniforms: UniformSchema | None, resources: ResourceSchema | None,
+    opts: ComputeOptions & { moduleOnly: true }): { wgsl: string; module: GPUShaderModule };
   /** makeFrag plus `run(uniforms?, view?)`. All makeFrag options pass through. */
   makeQuad(opts: { frag: string; uniforms?: UniformSchema; resources?: ResourceSchema; clear?: Clear } & MakeFragOptions): QuadPipeline;
   /** makeCompute with a default grid size, so `run()` with no arguments covers it. */
   makeCompute2D(opts: { body: string; decls?: string; uniforms?: UniformSchema; resources?: ResourceSchema;
-    size?: number[]; wg?: number[] }): ComputePipeline;
+    size?: number[] } & ComputeOptions): ComputePipeline;
 
   // ─── Frame API ────────────────────────────────────────────────────────────────────────────
   /** One encoder + one swapchain view for the whole frame; endFrame() is the single submit. */
@@ -171,6 +190,12 @@ export interface TinyWebGPU {
   endFrame(): void;
   /** beginFrame/endFrame around `fn`, exception-safe. Returns fn's result. */
   frame<T>(fn: () => T, opts?: { view?: GPUTextureView }): T;
+  /** Per-pass descriptors (e.g. timestampWrites) for each compute pass a dispatch opens itself; null stops. */
+  timePasses(fn: ((pipeline: ComputePipeline) => GPUComputePassDescriptor | undefined) | None): void;
+  /** Bounds of the per-device compute pipeline cache: entries, and total characters of their WGSL. */
+  pipelineCacheMax: number;
+  pipelineCacheChars: number;
+
   /** Open a chained compute pass: dispatches join it and rebind only on pipeline change. */
   beginCompute(opts?: GPUComputePassDescriptor): GPUComputePassEncoder;
   endCompute(): void;
